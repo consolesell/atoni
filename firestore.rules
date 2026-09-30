@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // User profile: only the authenticated user can read & write their own profile
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Trades collection: users can read & write their own trade history
+    match /trades/{tradeId} {
+      allow read, write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid) && request.resource.data.uid == request.auth.uid;
+    }
+
+    // Autonomous Subagent configurations
+    match /subagents/{subagentId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid);
+    }
+
+    // Agent Evolution Logs
+    match /evolution_logs/{logId} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Google Keep style Trading Notes & Strategy Journal
+    match /notes/{noteId} {
+      allow read, write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid) && request.resource.data.uid == request.auth.uid;
+    }
+  }
+}

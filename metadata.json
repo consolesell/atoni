@@ -1,0 +1,6 @@
+{
+  "name": "sbatomic4.1",
+  "description": "Professional Deriv Rise/Fall Trading Platform powered by sbagent Market Intelligence, Multi-Agent Decision Engine, Sniper Confluence Suite, Dynamic Trailing Stop-Loss, and Real-Time Technical Analytics.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
