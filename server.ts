@@ -1272,6 +1272,228 @@ Calculate weight adjustments (each agent's weights: ma, momentum, rsi, bb, norma
 });
 
 // -------------------------------------------------------------
+// Deriv OAuth 2.0 Flow Endpoints (Popup & Callback)
+// -------------------------------------------------------------
+
+app.get("/api/auth/deriv/url", (req, res) => {
+  const cleanAppId = String(req.query.app_id || process.env.DERIV_APP_ID || "1089").trim();
+  const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
+  const redirectUri = `${appUrl}/auth/deriv/callback`;
+
+  const params = new URLSearchParams({
+    app_id: cleanAppId,
+    l: "en",
+    brand: "deriv",
+    redirect_uri: redirectUri,
+  });
+
+  const authUrl = `https://oauth.deriv.com/oauth2/authorize?${params.toString()}`;
+  res.json({
+    url: authUrl,
+    appId: cleanAppId,
+    redirectUri,
+  });
+});
+
+app.get(
+  ["/auth/callback", "/auth/callback/", "/auth/deriv/callback", "/auth/deriv/callback/"],
+  (req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deriv Authentication | Deriv AI Terminal</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #090d16;
+      color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+    .card {
+      background: #111827;
+      border: 1px solid #1f2937;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+      border-radius: 1.25rem;
+      padding: 2.25rem;
+      max-width: 440px;
+      width: 100%;
+      text-align: center;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      padding: 0.35rem 0.85rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 1.25rem;
+    }
+    .spinner {
+      display: inline-block;
+      width: 3rem;
+      height: 3rem;
+      border: 3.5px solid rgba(239, 68, 68, 0.2);
+      border-top-color: #ef4444;
+      border-radius: 50%;
+      animation: spin 0.85s linear infinite;
+      margin-bottom: 1.25rem;
+    }
+    .success-icon {
+      display: none;
+      width: 3.25rem;
+      height: 3.25rem;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1.5px solid rgba(16, 185, 129, 0.3);
+      border-radius: 50%;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 1.25rem;
+      font-size: 1.75rem;
+    }
+    h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #f8fafc;
+      margin-bottom: 0.5rem;
+    }
+    p {
+      font-size: 0.875rem;
+      color: #94a3b8;
+      line-height: 1.5;
+    }
+    .subtext {
+      margin-top: 1.5rem;
+      font-size: 0.75rem;
+      color: #64748b;
+      font-family: monospace;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">Deriv OAuth 2.0</div>
+    <div id="spinner" class="spinner"></div>
+    <div id="success-icon" class="success-icon">✓</div>
+    <h2 id="title">Authenticating Accounts...</h2>
+    <p id="desc">Securely transferring authorized trading tokens to Deriv AI Terminal.</p>
+    <div id="subtext" class="subtext">This window will close automatically.</div>
+  </div>
+
+  <script>
+    (function() {
+      try {
+        var searchParams = new URLSearchParams(window.location.search);
+        var rawHash = window.location.hash.startsWith('#') ? window.location.hash.substring(1) : window.location.hash;
+        var hashParams = new URLSearchParams(rawHash);
+
+        var params = new URLSearchParams();
+        searchParams.forEach(function(v, k) { params.set(k, v); });
+        hashParams.forEach(function(v, k) { params.set(k, v); });
+
+        var accounts = [];
+        var i = 1;
+        while (params.has('acct' + i) || params.has('token' + i)) {
+          var acct = params.get('acct' + i);
+          var token = params.get('token' + i);
+          var cur = params.get('cur' + i) || 'USD';
+          if (acct && token) {
+            accounts.push({
+              account: acct,
+              token: token,
+              currency: cur,
+              isVirtual: acct.startsWith('VRTC') || acct.indexOf('VR') !== -1
+            });
+          }
+          i++;
+        }
+
+        var primaryToken = params.get('token1') || params.get('token') || (accounts.length > 0 ? accounts[0].token : null);
+        var primaryAccount = params.get('acct1') || params.get('acct') || (accounts.length > 0 ? accounts[0].account : null);
+        var primaryCurrency = params.get('cur1') || (accounts.length > 0 ? accounts[0].currency : 'USD');
+        var error = params.get('error') || params.get('error_message') || params.get('error_code');
+
+        if (error) {
+          document.getElementById('spinner').style.display = 'none';
+          document.getElementById('title').textContent = 'Authentication Failed';
+          document.getElementById('desc').textContent = 'Deriv returned: ' + error;
+          if (window.opener) {
+            window.opener.postMessage({
+              type: 'DERIV_OAUTH_ERROR',
+              error: error
+            }, '*');
+          }
+          return;
+        }
+
+        if (accounts.length > 0 || primaryToken) {
+          document.getElementById('spinner').style.display = 'none';
+          var sIcon = document.getElementById('success-icon');
+          if (sIcon) { sIcon.style.display = 'flex'; }
+          document.getElementById('title').textContent = 'Connected Successfully!';
+          document.getElementById('desc').textContent = 'Linked ' + (accounts.length || 1) + ' Deriv account(s) • ' + (primaryAccount || 'CR_USER');
+
+          var payload = {
+            type: 'DERIV_OAUTH_SUCCESS',
+            accounts: accounts,
+            primaryToken: primaryToken,
+            primaryAccount: primaryAccount,
+            currency: primaryCurrency,
+            timestamp: Date.now()
+          };
+
+          // Store in localStorage as backup
+          try {
+            localStorage.setItem('deriv_oauth_pending_success', JSON.stringify(payload));
+          } catch(e) {}
+
+          if (window.opener) {
+            window.opener.postMessage(payload, '*');
+            setTimeout(function() {
+              window.close();
+            }, 600);
+          } else {
+            // If opened directly without opener, redirect back to root after short pause
+            setTimeout(function() {
+              window.location.href = '/';
+            }, 1000);
+          }
+        } else {
+          document.getElementById('spinner').style.display = 'none';
+          document.getElementById('title').textContent = 'Awaiting Authorization';
+          document.getElementById('desc').textContent = 'No account tokens found in response callback URL.';
+        }
+      } catch (err) {
+        console.error('Deriv callback error:', err);
+        document.getElementById('spinner').style.display = 'none';
+        document.getElementById('title').textContent = 'Callback Error';
+        document.getElementById('desc').textContent = err.message || 'Failed to process authorization tokens.';
+      }
+    })();
+  </script>
+</body>
+</html>`);
+  }
+);
+
+// -------------------------------------------------------------
 // Vite Middleware / Static Serving
 // -------------------------------------------------------------
 

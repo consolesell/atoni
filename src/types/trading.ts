@@ -109,6 +109,19 @@ export interface TradingAgent {
   recommendedAction?: 'BUY' | 'SELL' | 'HOLD';
 }
 
+export interface AgentConsensusResult {
+  buyVotes: number;
+  sellVotes: number;
+  holdVotes: number;
+  totalAgents: number;
+  agreementRatio: number; // e.g. 0.75 for 3/4
+  weightedAgreement: number; // e.g. 0.65
+  hasConsensus: boolean; // >= 3/4 or weighted >= 0.62
+  consensusDirection: 'BUY' | 'SELL' | 'HOLD';
+  thresholdRequired: number; // 0.62
+  rationale: string;
+}
+
 export interface DecisionResult {
   action: 'BUY' | 'SELL' | 'HOLD' | 'STRONG BUY' | 'STRONG SELL';
   reason: string;
@@ -126,6 +139,7 @@ export interface DecisionResult {
   adjustments?: string[];
   aiPrediction?: AIPredictionResult | null;
   aiBlocked?: boolean;
+  consensus?: AgentConsensusResult;
 }
 
 export interface AIPredictionResult {
@@ -227,6 +241,7 @@ export interface BotState {
   currentDailyLoss?: number;
   cooldownUntil?: number;
   consecutiveLosses: number;
+  maxSessionDrawdownPercent?: number;
   preset: 'ultra_safe' | 'balanced' | 'aggressive_scalper';
   autonomousSymbolChange?: boolean;
   allowedRotationSymbols?: string[];
@@ -278,6 +293,8 @@ export interface UserProfile {
   realBalance: number;
   derivApiToken?: string;
   derivAppId?: string;
+  derivAccounts?: DerivLinkedAccount[];
+  derivActiveAccount?: string;
   createdAt?: string;
   updatedAt?: string;
 }

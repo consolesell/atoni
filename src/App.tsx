@@ -24,7 +24,7 @@ import {
 } from './lib/decisionEngine';
 import { sound } from './lib/soundEngine';
 import { voice } from './lib/voiceEngine';
-import { calculateCoreRiskMetrics, calculateDynamicStake } from './lib/riskEngine';
+import { calculateCoreRiskMetrics, calculateDynamicStake, validateDerivDuration } from './lib/riskEngine';
 import { detectPattern, recordPatternOutcome } from './lib/adaptivePatternEngine';
 import {
   calculateTrailingDistance,
@@ -61,6 +61,9 @@ import { SubAgentEditorModal } from './components/SubAgentEditorModal';
 import { AgentEvolutionModal } from './components/AgentEvolutionModal';
 import { GoogleDocsModal } from './components/GoogleDocsModal';
 import { GoogleKeepNotesModal } from './components/GoogleKeepNotesModal';
+import { QuickSettingsModal } from './components/QuickSettingsModal';
+import { ChartErrorBoundary } from './components/ChartErrorBoundary';
+import { autoSyncEngine } from './lib/autoSyncEngine';
 import { BrainAnatomyModal } from './components/BrainAnatomyModal';
 import { DailyCumulativePnLChart } from './components/DailyCumulativePnLChart';
 import { AdvancedAlertsModal } from './components/AdvancedAlertsModal';
@@ -84,7 +87,7 @@ import { Bell, Sparkles, AlertTriangle, CheckCircle2, X } from 'lucide-react';
 
 export default function App() {
   // Authentication & Persistent Profile
-  const { user, userProfile, updateBalances, updateAccountMode } = useAuth();
+  const { user, userProfile, updateBalances, updateAccountMode, googleAccessToken } = useAuth();
   const { settings, updateTrailingStop } = useTerminalSettings();
 
   // Navigation & Views
@@ -153,12 +156,16 @@ export default function App() {
     const res = calculateDynamicStake({
       balance,
       winRate: winProb,
+      confidence: algorithmicDecision?.confidence ?? 0.62,
+      symbol: selectedSymbol,
+      regime,
+      closedTrades,
       mode: sizingMode,
       fixedStake: 1.0,
       minStake: 1.0,
     });
     return res.recommendedStake;
-  }, [sizingMode, balance, aiPrediction?.ai_predicted_win_probability, algorithmicDecision?.confidence, martingaleState.enabled, martingaleState.currentStake]);
+  }, [sizingMode, balance, aiPrediction?.ai_predicted_win_probability, algorithmicDecision?.confidence, selectedSymbol, regime, closedTrades, martingaleState.enabled, martingaleState.currentStake]);
 
   // Keep stake synchronized with dynamic Kelly / Martingale stake when not in manual fixed mode
   useEffect(() => {
@@ -257,6 +264,8 @@ export default function App() {
   const [isEvolutionModalOpen, setIsEvolutionModalOpen] = useState(false);
   const [isGoogleDocsModalOpen, setIsGoogleDocsModalOpen] = useState(false);
   const [isKeepModalOpen, setIsKeepModalOpen] = useState(false);
+  const [isQuickSettingsOpen, setIsQuickSettingsOpen] = useState(false);
+  const [lastAutoSyncTime, setLastAutoSyncTime] = useState<number | null>(null);
   const [isBrainModalOpen, setIsBrainModalOpen] = useState(false);
   const [isSettingsDrawerOpen, setIsSettingsDrawerOpen] = useState(false);
   const [isFullscreenWorkspaceOpen, setIsFullscreenWorkspaceOpen] = useState(false);
@@ -342,6 +351,52 @@ export default function App() {
     };
   }, []);
 
+  // 10-Minute Intelligent Auto-Sync payload registration & listener
+  useEffect(() => {
+    autoSyncEngine.registerPayloadGetter(() => ({
+      uid: user?.uid,
+      symbol: selectedSymbol,
+      currentPrice: currentPriceRef.current,
+      regime,
+      balance,
+      currency,
+      isLiveMode,
+      botState,
+      agents,
+      aiPrediction,
+      algorithmicDecision,
+      openTrades,
+      closedTrades,
+      riskMetrics: coreRiskMetrics,
+      googleAccessToken,
+      workspaceUrls: {
+        appUrl: typeof window !== 'undefined' ? window.location.origin : '',
+        googleKeepUrl: 'https://keep.google.com/',
+      },
+    }));
+
+    const unsub = autoSyncEngine.subscribe((st) => {
+      setLastAutoSyncTime(st.lastSyncTime);
+    });
+
+    return () => unsub();
+  }, [
+    user,
+    selectedSymbol,
+    regime,
+    balance,
+    currency,
+    isLiveMode,
+    botState,
+    agents,
+    aiPrediction,
+    algorithmicDecision,
+    openTrades,
+    closedTrades,
+    coreRiskMetrics,
+    googleAccessToken,
+  ]);
+
   // Append log to bot stream
   const addLog = useCallback(
     (message: string, type: 'info' | 'success' | 'warn' | 'error' = 'info') => {
@@ -350,6 +405,25 @@ export default function App() {
     },
     []
   );
+
+  // Check for Deriv OAuth tokens from popup or redirect
+  useEffect(() => {
+    try {
+      const pendingRaw = localStorage.getItem('deriv_oauth_pending_success');
+      if (pendingRaw) {
+        localStorage.removeItem('deriv_oauth_pending_success');
+        const data = JSON.parse(pendingRaw);
+        if (data.primaryToken) {
+          derivWS.setCredentials(data.primaryToken, localStorage.getItem('deriv_app_id') || '1089');
+          derivWS.send({ authorize: data.primaryToken });
+          if (data.accounts) derivWS.setLinkedAccounts(data.accounts);
+          addLog(`Connected via Deriv OAuth: ${data.primaryAccount || 'CR_USER'}`, 'success');
+        }
+      }
+    } catch (e) {
+      console.warn('OAuth pending check error:', e);
+    }
+  }, [addLog]);
 
   // 1. Initial Candles Generator & Deriv Connection
   useEffect(() => {
@@ -521,7 +595,8 @@ export default function App() {
       candles,
       calculatedIndicators,
       agents,
-      botState.minConfidence ?? 0.38
+      botState.minConfidence ?? 0.38,
+      botState.consecutiveLosses ?? 0
     );
     setAlgorithmicDecision(decision);
 
@@ -657,7 +732,17 @@ export default function App() {
 
   // Autonomous Sniper Reticle Auto-Trigger when price touches optimal entry target
   useEffect(() => {
-    if (!isSniperTriggerArmed || !sniperSetup || !sniperSetup.isPrimed || sniperSetup.direction === 'NEUTRAL' || isExecuting) return;
+    if (
+      !isSniperTriggerArmed ||
+      !sniperSetup ||
+      !sniperSetup.isPrimed ||
+      sniperSetup.direction === 'NEUTRAL' ||
+      isExecuting ||
+      coreRiskMetrics.maxDrawdownPercent >= 5.0 ||
+      sniperSetup.holdReason
+    ) {
+      return;
+    }
     const priceDiff = Math.abs(currentPrice - sniperSetup.optimalEntryPrice) / (sniperSetup.optimalEntryPrice || 1);
     if (priceDiff < 0.0012) {
       sound.play('trade');
@@ -806,14 +891,27 @@ export default function App() {
         return;
       }
 
-      // Strict Duration Compliance: Mandatory execution bounds ensuring every trade strictly adheres to predefined expiry and duration rules without dynamic overrides
-      let validDuration = tradeDuration;
-      if (tradeDurationUnit === 'ticks') {
-        validDuration = Math.max(1, Math.min(10, Math.round(tradeDuration)));
-      } else if (tradeDurationUnit === 'seconds') {
-        validDuration = Math.max(15, Math.min(60, Math.round(tradeDuration)));
-      } else {
-        validDuration = Math.max(2, Math.min(30, Math.round(tradeDuration)));
+      // Hard 5% Session Drawdown Circuit Breaker Enforcement (sbagent.md Section 2 & 4)
+      if (
+        source !== 'MANUAL' &&
+        (coreRiskMetrics.maxDrawdownPercent >= 5.0 ||
+          (botState.maxSessionDrawdownPercent && coreRiskMetrics.maxDrawdownPercent >= botState.maxSessionDrawdownPercent))
+      ) {
+        addLog(
+          `🛑 [CIRCUIT BREAKER] 5% Session Drawdown limit hit (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Auto-fire halted to protect equity.`,
+          'error'
+        );
+        setBotState((b) => ({ ...b, enabled: false }));
+        voice.speak('Session drawdown limit reached. Auto trading suspended for capital protection.', 'urgent');
+        sound.play('loss');
+        return;
+      }
+
+      // Legal Deriv Contract Duration Compliance: Map requested duration to exact nearest legal duration
+      const validated = validateDerivDuration(selectedSymbol, tradeDuration, tradeDurationUnit);
+      const validDuration = validated.duration;
+      if (validated.isAdjusted) {
+        addLog(`⏱️ Duration calibrated to legal Deriv bound: ${tradeDuration} → ${validated.exactLegalString}`, 'info');
       }
 
       setIsExecuting(true);
@@ -1110,6 +1208,22 @@ export default function App() {
         }
 
         if (evalData.action === 'BUY' || evalData.action === 'SELL') {
+          // Check 5% session drawdown circuit breaker
+          if (coreRiskMetrics.maxDrawdownPercent >= 5.0) {
+            addLog(
+              `🛑 [CIRCUIT BREAKER] Subagent auto-fire blocked: 5% session drawdown reached (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%).`,
+              'error'
+            );
+            return;
+          }
+
+          // Check consensus gate
+          const consensus = algorithmicDecision?.consensus;
+          if (consensus && !consensus.hasConsensus) {
+            addLog(`🛡️ [CONSENSUS GATE] Subagent auto-fire blocked: ${consensus.rationale}`, 'warn');
+            return;
+          }
+
           const dir = evalData.action === 'BUY' ? 'CALL' : 'PUT';
           const dur = evalData.suggested_duration_mins || 15;
           addLog(`🤖 Subagent (sbagent.md) triggered: ${dir} (${evalData.rule_matched})`, 'success');
@@ -1126,6 +1240,8 @@ export default function App() {
     regime,
     stake,
     granularity,
+    coreRiskMetrics.maxDrawdownPercent,
+    algorithmicDecision?.consensus,
     botState.allowedRotationSymbols,
     botState.autonomousSymbolChange,
     botState.rotationCooldownSeconds,
@@ -1154,6 +1270,21 @@ export default function App() {
     const now = Date.now();
     if (now - lastBotTradeTimeRef.current < 8000) return;
 
+    // Hard 5% Session Drawdown Circuit Breaker Enforcement (sbagent.md Section 2 & 4)
+    if (
+      coreRiskMetrics.maxDrawdownPercent >= 5.0 ||
+      (botState.maxSessionDrawdownPercent && coreRiskMetrics.maxDrawdownPercent >= botState.maxSessionDrawdownPercent)
+    ) {
+      addLog(
+        `🛑 [CIRCUIT BREAKER] 5% Session Drawdown limit reached (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Pausing bot.`,
+        'error'
+      );
+      setBotState((b) => ({ ...b, enabled: false }));
+      voice.speak('5% session drawdown limit reached. Auto trading suspended for capital protection.', 'urgent');
+      sound.play('loss');
+      return;
+    }
+
     const currentLoss = botState.currentDailyLoss ?? 0;
     if (currentLoss >= botState.maxDailyLoss) {
       addLog(`Daily loss limit reached ($${currentLoss.toFixed(2)} / $${botState.maxDailyLoss}). Pausing bot.`, 'warn');
@@ -1167,7 +1298,7 @@ export default function App() {
       return;
     }
 
-    const { action, confidence } = algorithmicDecision;
+    const { action, confidence, consensus } = algorithmicDecision;
     const minConf = botState.minConfidence ?? 0.38;
 
     // Check for high-confluence sniper opportunity as an autonomous trigger
@@ -1175,6 +1306,22 @@ export default function App() {
     const hasAlgorithmicSignal = (action === 'BUY' || action === 'STRONG BUY' || action === 'SELL' || action === 'STRONG SELL') && confidence >= minConf;
 
     if (!hasAlgorithmicSignal && !hasSniperTrigger) {
+      return;
+    }
+
+    // 1. Real Agent Consensus Gate: Require >= 3/4 BUY/SELL agreement OR weighted >= 0.62 (sbagent.md)
+    if (consensus && !consensus.hasConsensus) {
+      addLog(`🛡️ [CONSENSUS GATE] Auto-fire blocked: ${consensus.rationale}`, 'warn');
+      return;
+    }
+
+    // 2. Wire HOLD Rules from sbagent.md: BB width < threshold, MTF conflict, consecutive losses
+    if (action === 'HOLD') {
+      return;
+    }
+
+    if (hasSniperTrigger && sniperSetup?.holdReason) {
+      addLog(`🛡️ [HOLD RULE] Sniper auto-fire withheld: ${sniperSetup.holdReason}`, 'warn');
       return;
     }
 
@@ -1624,6 +1771,8 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={(tab: any) => setActiveTab(tab)}
         isAutonomousRunning={isAutonomousRunning}
+        onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
+        onTriggerAutoSync={() => autoSyncEngine.triggerSync()}
         onOpenSettings={() => {
           setSettingsCategory('overview');
           setIsSettingsDrawerOpen(true);
@@ -1715,30 +1864,39 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
               {/* Left Column: Interactive Canvas Chart & Active Positions */}
               <div className="lg:col-span-8 flex flex-col gap-4 sm:gap-5">
-              <InteractiveChart
-                candles={candles}
-                currentPrice={currentPrice}
-                openTrades={openTrades}
-                closedTrades={closedTrades}
-                indicators={indicators}
-                granularity={granularity}
-                onGranularityChange={(g) => setGranularity(g)}
-                onRefresh={() => {
+              <ChartErrorBoundary
+                fallbackSymbol={selectedSymbol}
+                onReset={() => {
                   derivWS.fetchCandles(selectedSymbol, granularity, 120);
                   triggerAIScan();
                 }}
-                symbol={selectedSymbol}
-                aiPrediction={aiPrediction}
-                onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
-                stake={stake}
-                onStakeChange={setStake}
-                isExecuting={isExecuting}
-                currency={currency}
-                algorithmicDecision={algorithmicDecision}
-                regime={regime}
-                agents={agents}
-                sniperSetup={sniperSetup}
-              />
+              >
+                <InteractiveChart
+                  candles={candles}
+                  currentPrice={currentPrice}
+                  openTrades={openTrades}
+                  closedTrades={closedTrades}
+                  indicators={indicators}
+                  granularity={granularity}
+                  onGranularityChange={(g) => setGranularity(g)}
+                  onRefresh={() => {
+                    derivWS.fetchCandles(selectedSymbol, granularity, 120);
+                    triggerAIScan();
+                  }}
+                  symbol={selectedSymbol}
+                  aiPrediction={aiPrediction}
+                  onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
+                  stake={stake}
+                  onStakeChange={setStake}
+                  isExecuting={isExecuting}
+                  currency={currency}
+                  algorithmicDecision={algorithmicDecision}
+                  regime={regime}
+                  agents={agents}
+                  sniperSetup={sniperSetup}
+                  onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
+                />
+              </ChartErrorBoundary>
 
               <PositionsDrawer
                 openTrades={openTrades}
@@ -1781,6 +1939,7 @@ export default function App() {
                   setTrailingStopConfig(cfg);
                   updateTrailingStop(cfg);
                 }}
+                onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
                 onExecuteSniperTrade={(dir, s, dur, unit, sniperTSL) => {
                   executeTrade(
                     dir,
@@ -1996,6 +2155,30 @@ export default function App() {
           currency,
           riskMetrics: coreRiskMetrics,
         }}
+      />
+
+      {/* Quick Settings Fast Execution Modal */}
+      <QuickSettingsModal
+        isOpen={isQuickSettingsOpen}
+        onClose={() => setIsQuickSettingsOpen(false)}
+        stake={stake}
+        onStakeChange={setStake}
+        duration={duration}
+        durationUnit={durationUnit}
+        onDurationChange={(dur, unit) => {
+          setDuration(dur);
+          if (unit) setDurationUnit(unit);
+        }}
+        botState={botState}
+        onUpdateBotState={(updates) => setBotState((prev) => ({ ...prev, ...updates }))}
+        isLiveMode={isLiveMode}
+        onOpenFullSettings={() => {
+          setSettingsCategory('overview');
+          setIsSettingsDrawerOpen(true);
+        }}
+        onTriggerAutoSync={() => autoSyncEngine.triggerSync()}
+        lastSyncTime={lastAutoSyncTime}
+        currency={currency}
       />
 
       {/* Google Keep Trading Notes & Checklists Modal */}

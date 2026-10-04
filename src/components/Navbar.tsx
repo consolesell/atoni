@@ -17,6 +17,8 @@ import {
   Bell,
   RefreshCw,
   Settings,
+  Sliders,
+  Clock,
   Maximize2,
   BarChart3,
   Palette,
@@ -28,6 +30,7 @@ import {
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS } from '../lib/voiceEngine';
 import { voiceInput } from '../lib/voiceInputEngine';
+import { autoSyncEngine } from '../lib/autoSyncEngine';
 import { useAuth } from '../context/AuthContext';
 import { AccountModeSwitcher } from './AuthModal';
 import { VoiceWaveform } from './VoiceWaveformIndicator';
@@ -55,6 +58,8 @@ interface NavbarProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
   isAutonomousRunning: boolean;
+  onOpenQuickSettings?: () => void;
+  onTriggerAutoSync?: () => void;
   onOpenSettings?: () => void;
   onOpenTheme?: () => void;
   onOpenFullscreenWorkspace?: () => void;
@@ -83,6 +88,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   onTabChange,
   isAutonomousRunning,
+  onOpenQuickSettings,
+  onTriggerAutoSync,
   onOpenSettings,
   onOpenTheme,
   onOpenFullscreenWorkspace,
@@ -90,14 +97,27 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [voiceState, setVoiceState] = useState(voice.getState());
   const [isVoiceListening, setIsVoiceListening] = useState(voiceInput.getIsListening());
+  const [syncState, setSyncState] = useState<{
+    nextSyncSeconds: number;
+    isSyncing: boolean;
+    lastSyncTime: number | null;
+  }>({ nextSyncSeconds: 600, isSyncing: false, lastSyncTime: null });
   const { user, userProfile, logout } = useAuth();
 
   useEffect(() => {
     const unsub = voice.subscribeState((st) => setVoiceState(st));
     const unsubVoiceInput = voiceInput.subscribe((listening) => setIsVoiceListening(listening));
+    const unsubSync = autoSyncEngine.subscribe((st) => {
+      setSyncState({
+        nextSyncSeconds: st.nextSyncSeconds,
+        isSyncing: st.isSyncing,
+        lastSyncTime: st.lastSyncTime,
+      });
+    });
     return () => {
       unsub();
       unsubVoiceInput();
+      unsubSync();
     };
   }, []);
 
@@ -405,6 +425,49 @@ export const Navbar: React.FC<NavbarProps> = ({
                 {audioEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
               </button>
             </div>
+
+            {/* 10-Min Auto-Sync Indicator & Instant Trigger */}
+            <button
+              onClick={() => {
+                if (onTriggerAutoSync) {
+                  onTriggerAutoSync();
+                } else {
+                  autoSyncEngine.triggerSync();
+                }
+                sound.play('click');
+              }}
+              disabled={syncState.isSyncing}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-mono font-bold transition-all border shadow-sm ${
+                syncState.isSyncing
+                  ? 'bg-amber-500/25 text-amber-300 border-amber-500/60 animate-pulse'
+                  : 'bg-amber-950/40 hover:bg-amber-900/50 text-amber-300 border-amber-600/40 hover:border-amber-400'
+              }`}
+              title="10-Minute Intelligent Auto-Sync to Google Keep, Drive & Firestore (Click to Sync Now)"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${syncState.isSyncing ? 'animate-spin' : ''}`} />
+              <span className="hidden xl:inline text-[10px] text-amber-400/80">AUTO-SYNC:</span>
+              <span className="text-[11px] font-mono font-bold">
+                {syncState.isSyncing
+                  ? 'SYNCING...'
+                  : `${Math.floor(syncState.nextSyncSeconds / 60)}:${(syncState.nextSyncSeconds % 60).toString().padStart(2, '0')}`}
+              </span>
+            </button>
+
+            {/* Quick Settings Button */}
+            {onOpenQuickSettings && (
+              <button
+                onClick={() => {
+                  onOpenQuickSettings();
+                  sound.play('click');
+                }}
+                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold font-mono bg-cyan-950/80 hover:bg-cyan-900/90 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 transition-all shadow-sm shadow-cyan-950/40 active:scale-95"
+                title="Quick Execution, AI Gate & Stake Settings"
+                aria-label="Quick Settings"
+              >
+                <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="text-[11px] sm:text-xs font-bold tracking-tight">SETTINGS</span>
+              </button>
+            )}
 
             {/* Fullscreen Workspace Expansion Trigger */}
             {onOpenFullscreenWorkspace && (

@@ -1,4 +1,4 @@
-import { TradeRecord, CoreRiskMetrics, PositionSizingMode } from '../types/trading';
+import { TradeRecord, CoreRiskMetrics, PositionSizingMode, MarketRegime } from '../types/trading';
 
 export interface KellyStakeResult {
   recommendedStake: number;
@@ -11,17 +11,145 @@ export interface KellyStakeResult {
   equityBoundMax: number;
   rationale: string;
   expectedValue: number;
+  isCalibrated?: boolean;
+}
+
+export interface CalibratedProbabilityParams {
+  symbol?: string;
+  regime?: MarketRegime;
+  confidence?: number;
+  closedTrades?: TradeRecord[];
+}
+
+/**
+ * Builds calibrated empirical win-probability buckets by symbol and market regime.
+ * Uses Bayesian Laplace prior P(W) = (wins + 2) / (samples + 4) as specified in sbagent.md.
+ * Only the calibrated empirical probability is fed into the Kelly Criterion.
+ */
+export function getCalibratedWinProbability(params: CalibratedProbabilityParams): {
+  calibratedP: number;
+  sampleCount: number;
+  empiricalWinRate: number;
+  source: 'BUCKET_CALIBRATED' | 'BAYESIAN_SMOOTHED' | 'GLOBAL_FALLBACK';
+  rationale: string;
+} {
+  const { symbol = '', regime, confidence = 0.6, closedTrades = [] } = params;
+
+  // 1. Filter trades for the specific symbol
+  const symbolTrades = symbol ? closedTrades.filter((t) => t.symbol === symbol) : closedTrades;
+
+  // 2. Filter trades for the specific regime if available
+  const regimeTrades =
+    regime && regime.type
+      ? symbolTrades.filter((t) => t.regime === regime.type || (t as any).marketRegime === regime.type)
+      : symbolTrades;
+
+  // Select appropriate empirical bucket with sample size confidence
+  let activeBucket = regimeTrades;
+  let source: 'BUCKET_CALIBRATED' | 'BAYESIAN_SMOOTHED' | 'GLOBAL_FALLBACK' = 'BUCKET_CALIBRATED';
+
+  if (activeBucket.length < 3 && symbolTrades.length >= 3) {
+    activeBucket = symbolTrades;
+    source = 'BAYESIAN_SMOOTHED';
+  } else if (activeBucket.length < 3) {
+    activeBucket = closedTrades;
+    source = 'GLOBAL_FALLBACK';
+  }
+
+  const samples = activeBucket.length;
+  const wins = activeBucket.filter((t) => t.result === 'WIN').length;
+
+  // Bayesian Laplace Smoothing: P(W) = (wins + 2) / (samples + 4) from sbagent.md Section 3
+  const laplaceEmpiricalRate = (wins + 2) / (samples + 4);
+
+  // Calibrate model confidence: As empirical samples grow, empirical evidence dominates
+  const weightEmpirical = Math.min(0.85, 0.45 + (samples / (samples + 8)) * 0.4);
+  const weightModel = 1 - weightEmpirical;
+  const calibratedP = Math.min(
+    0.85,
+    Math.max(0.42, laplaceEmpiricalRate * weightEmpirical + confidence * weightModel)
+  );
+
+  const rationale = `[Calibrated p] Bucket (${symbol || 'All'}:${regime?.type || 'Any'}) ${wins}/${samples} wins (Laplace ${(laplaceEmpiricalRate * 100).toFixed(1)}%) blended with confidence ${(confidence * 100).toFixed(0)}% → p = ${(calibratedP * 100).toFixed(1)}%`;
+
+  return {
+    calibratedP: Math.round(calibratedP * 1000) / 1000,
+    sampleCount: samples,
+    empiricalWinRate: Math.round(laplaceEmpiricalRate * 1000) / 1000,
+    source,
+    rationale,
+  };
+}
+
+/**
+ * Validates and maps Deriv contract duration to the nearest legal discrete duration
+ * for that symbol and contract type.
+ */
+export interface ValidatedDuration {
+  duration: number;
+  unit: 'ticks' | 'seconds' | 'minutes';
+  exactLegalString: string;
+  isAdjusted: boolean;
+}
+
+export function validateDerivDuration(
+  symbol: string,
+  requestedDuration: number,
+  unit: 'ticks' | 'seconds' | 'minutes' = 'minutes'
+): ValidatedDuration {
+  let finalDur = requestedDuration;
+  let finalUnit = unit;
+  let isAdjusted = false;
+
+  if (unit === 'ticks') {
+    // Deriv synthetics tick contracts: exactly 1 to 10 ticks (discrete integers)
+    const legalTicks = [1, 2, 3, 5, 8, 10];
+    const rounded = Math.round(requestedDuration);
+    const nearest = legalTicks.reduce((prev, curr) =>
+      Math.abs(curr - rounded) < Math.abs(prev - rounded) ? curr : prev
+    );
+    finalDur = Math.max(1, Math.min(10, nearest));
+    isAdjusted = finalDur !== requestedDuration;
+  } else if (unit === 'seconds') {
+    // Deriv synthetics 1HZ seconds: minimum 15 seconds, max 86400
+    const clamped = Math.max(15, Math.min(86400, Math.round(requestedDuration)));
+    if (clamped <= 60) {
+      const nearest = [15, 30, 45, 60].reduce((prev, curr) =>
+        Math.abs(curr - clamped) < Math.abs(prev - clamped) ? curr : prev
+      );
+      finalDur = nearest;
+    } else {
+      finalDur = clamped;
+    }
+    isAdjusted = finalDur !== requestedDuration;
+  } else {
+    // Deriv synthetics minutes: minimum 1m, legal discrete steps: 1, 2, 3, 5, 10, 15, 20, 30, 45, 60
+    const legalMinutes = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60];
+    const rounded = Math.round(requestedDuration);
+    const nearest = legalMinutes.reduce((prev, curr) =>
+      Math.abs(curr - rounded) < Math.abs(prev - rounded) ? curr : prev
+    );
+    finalDur = Math.max(1, Math.min(60, nearest));
+    isAdjusted = finalDur !== requestedDuration;
+  }
+
+  return {
+    duration: finalDur,
+    unit: finalUnit,
+    exactLegalString: `${finalDur} ${finalUnit}`,
+    isAdjusted,
+  };
 }
 
 /**
  * Calculates dynamic position size using the Kelly Criterion or Fixed % of Account Equity
  * to eliminate asymmetric risk and prevent single large losses from erasing streaks of wins.
  *
- * Kelly formula for binary binary contracts:
+ * Kelly formula for binary contracts:
  * f* = (p * (b + 1) - 1) / b
  * where:
- *   p = win probability (e.g. 0.60)
- *   b = net payout ratio (e.g. 0.95 for Deriv Rise/Fall contracts)
+ *   p = calibrated empirical win probability
+ *   b = net payout ratio (0.95 for Deriv Rise/Fall contracts)
  *
  * We apply Fractional Kelly (Quarter or Half) with strict min/max equity bounds.
  */
@@ -29,9 +157,12 @@ export function calculateDynamicStake(params: {
   balance: number;
   winRate: number; // 0 to 1 (e.g. 0.62)
   confidence?: number; // 0 to 1
+  symbol?: string;
+  regime?: MarketRegime;
+  closedTrades?: TradeRecord[];
   mode?: PositionSizingMode;
   fixedStake?: number;
-  maxStakePercent?: number; // default 2.5% of balance
+  maxStakePercent?: number; // default 2.5% - 3.0% of balance
   minStake?: number; // default $1.00
   payoutRate?: number; // default 0.95 (95% net payout)
 }): KellyStakeResult {
@@ -39,6 +170,9 @@ export function calculateDynamicStake(params: {
     balance,
     winRate,
     confidence = 0.6,
+    symbol = '',
+    regime,
+    closedTrades,
     mode = 'KELLY_HALF',
     fixedStake = 5.0,
     maxStakePercent = 0.03, // 3% max equity per trade
@@ -61,14 +195,28 @@ export function calculateDynamicStake(params: {
     };
   }
 
-  // 1. Blend historical win rate with current AI / Algorithmic confidence score
-  const blendedWinProb = Math.min(
-    0.85,
-    Math.max(0.45, winRate > 0 ? winRate * 0.6 + confidence * 0.4 : confidence)
-  );
+  // 1. Calibrate empirical win probability by symbol and regime bucket
+  let calibratedWinProb = winRate;
+  let isCalibrated = false;
+
+  if (closedTrades && closedTrades.length > 0) {
+    const calibration = getCalibratedWinProbability({
+      symbol,
+      regime,
+      confidence,
+      closedTrades,
+    });
+    calibratedWinProb = calibration.calibratedP;
+    isCalibrated = true;
+  } else {
+    calibratedWinProb = Math.min(
+      0.85,
+      Math.max(0.45, winRate > 0 ? winRate * 0.6 + confidence * 0.4 : confidence)
+    );
+  }
 
   const b = payoutRate; // 0.95
-  const p = blendedWinProb;
+  const p = calibratedWinProb;
   const q = 1 - p;
 
   // Raw Kelly Formula: f* = (p * b - q) / b
@@ -115,7 +263,7 @@ export function calculateDynamicStake(params: {
       // Round to 2 decimal places
       calculatedStake = Math.round(calculatedStake * 100) / 100;
 
-      rationale = `${mode === 'KELLY_QUARTER' ? 'Quarter' : 'Half'}-Kelly Sizing: Win Prob ${(p * 100).toFixed(1)}%, Raw f* ${(rawKellyFraction * 100).toFixed(1)}% → Scaled ${(effectiveFraction * 100).toFixed(2)}% of equity ($${calculatedStake.toFixed(2)}).`;
+      rationale = `${mode === 'KELLY_QUARTER' ? 'Quarter' : 'Half'}-Kelly Sizing: Calibrated Win Prob ${(p * 100).toFixed(1)}%, Raw f* ${(rawKellyFraction * 100).toFixed(1)}% → Scaled ${(effectiveFraction * 100).toFixed(2)}% of equity ($${calculatedStake.toFixed(2)}).`;
     }
   }
 

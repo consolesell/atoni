@@ -1,0 +1,97 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with balance, deriv credentials and mode preferences",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "accountMode": { "type": "string", "enum": ["DEMO", "REAL"] },
+        "demoBalance": { "type": "number" },
+        "realBalance": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "accountMode"]
+    },
+    "Trade": {
+      "title": "Trade",
+      "description": "Historical and open execution trade record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "contractId": { "type": "string" },
+        "symbol": { "type": "string" },
+        "decision": { "type": "string" },
+        "amount": { "type": "number" },
+        "entryPrice": { "type": "number" },
+        "exitPrice": { "type": "number" },
+        "profit": { "type": "number" },
+        "result": { "type": "string", "enum": ["WIN", "LOSS", "PENDING"] },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["id", "symbol", "decision", "amount", "entryPrice"]
+    },
+    "TradingNote": {
+      "title": "TradingNote",
+      "description": "Google Keep style trading note, checklist and market memo",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "color": { "type": "string" },
+        "isPinned": { "type": "boolean" },
+        "tags": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "title"]
+    },
+    "SyncSnapshot": {
+      "title": "SyncSnapshot",
+      "description": "10-minute automated intelligence snapshot synced to Google Keep, Drive and Cloud",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "symbol": { "type": "string" },
+        "currentPrice": { "type": "number" },
+        "regime": { "type": "string" },
+        "winRate": { "type": "number" },
+        "profitFactor": { "type": "number" },
+        "openTradesCount": { "type": "number" },
+        "closedTradesCount": { "type": "number" },
+        "workspaceUrls": { "type": "object" },
+        "agentConfigurations": { "type": "object" },
+        "syncedToKeep": { "type": "boolean" },
+        "syncedToDrive": { "type": "boolean" },
+        "googleDocUrl": { "type": "string" }
+      },
+      "required": ["id", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "entity": "UserProfile",
+      "description": "User profile document"
+    },
+    "/trades/{tradeId}": {
+      "entity": "Trade",
+      "description": "User trade records"
+    },
+    "/notes/{noteId}": {
+      "entity": "TradingNote",
+      "description": "Trading notes and checklists"
+    },
+    "/sync_snapshots/{snapshotId}": {
+      "entity": "SyncSnapshot",
+      "description": "Automated 10-minute sync snapshot records"
+    }
+  }
+}

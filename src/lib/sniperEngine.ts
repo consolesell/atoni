@@ -168,12 +168,35 @@ export function evaluateSniperConfluence(
   const atr = indicators.atrNow || Math.max(0.5, currentPrice * (indicators.volatility || 0.002));
   const pattern = indicators.pattern;
 
+  // -------------------------------------------------------------------------
+  // HOLD RULES & CONSENSUS GATE VALIDATION (From sbagent.md)
+  // -------------------------------------------------------------------------
+  const bbUpper = bb.upper ?? (currentPrice * 1.01);
+  const bbLower = bb.lower ?? (currentPrice * 0.99);
+  const bbWidth = (bbUpper - bbLower) / (currentPrice || 1);
+  const isBbSqueezeHold = bbWidth < 0.0015; // Tight consolidation trap rule
+
+  const mtf = indicators.mtfAnalysis;
+  const isMtfBearConflict = mtf?.direction === 'BEARISH' && (decision?.action.includes('BUY') || currentPrice > ma14) && (mtf.consistency || 0) >= 0.65;
+  const isMtfBullConflict = mtf?.direction === 'BULLISH' && (decision?.action.includes('SELL') || currentPrice < ma14) && (mtf.consistency || 0) >= 0.65;
+
+  let activeHoldReason: string | undefined;
+  if (isBbSqueezeHold) {
+    activeHoldReason = `HOLD: Volatility squeeze (BB Width ${(bbWidth * 100).toFixed(3)}% < 0.15% consolidation trap)`;
+  } else if (isMtfBearConflict || isMtfBullConflict) {
+    activeHoldReason = `HOLD: Higher timeframe trend conflict (${mtf?.direction} MTF consistency ${Math.round((mtf?.consistency || 0) * 100)}%)`;
+  } else if (decision && decision.action === 'HOLD') {
+    activeHoldReason = decision.reason || 'HOLD: Algorithmic decision engine in equilibrium';
+  }
+
   // Determine tentative direction based on algorithmic consensus or dominant trend
   let tentativeDirection: 'CALL' | 'PUT' | 'NEUTRAL' = 'NEUTRAL';
-  if (decision && decision.action.includes('BUY')) tentativeDirection = 'CALL';
-  else if (decision && decision.action.includes('SELL')) tentativeDirection = 'PUT';
-  else if (currentPrice > ma14 && ma14 > ma50) tentativeDirection = 'CALL';
-  else if (currentPrice < ma14 && ma14 < ma50) tentativeDirection = 'PUT';
+  if (!activeHoldReason) {
+    if (decision && decision.action.includes('BUY')) tentativeDirection = 'CALL';
+    else if (decision && decision.action.includes('SELL')) tentativeDirection = 'PUT';
+    else if (currentPrice > ma14 && ma14 > ma50) tentativeDirection = 'CALL';
+    else if (currentPrice < ma14 && ma14 < ma50) tentativeDirection = 'PUT';
+  }
 
   const factors: SniperFactor[] = [];
 
@@ -341,26 +364,40 @@ export function evaluateSniperConfluence(
   // VECTOR 5: Multi-Agent Consensus Score (Weight: 15)
   let vector5Score = 0.5;
   let vector5Desc = 'Consensus in equilibrium';
-  if (agents && agents.length > 0) {
+  let agreementRatio = 0;
+  let weightedAgreement = 0;
+  let hasConsensus = false;
+
+  if (agents && agents.length > 0 && tentativeDirection !== 'NEUTRAL') {
+    let totalWeight = 0;
+    let agreedWeight = 0;
     const agreeingAgents = agents.filter((ag) => {
       const rec = ag.recommendedAction;
-      return tentativeDirection === 'CALL' ? rec === 'BUY' : rec === 'SELL';
+      const w = ag.winRate * 0.7 + (ag.trades > 5 ? 0.3 : 0.1);
+      totalWeight += w;
+      const isAgreeing = tentativeDirection === 'CALL' ? rec === 'BUY' : rec === 'SELL';
+      if (isAgreeing) agreedWeight += w;
+      return isAgreeing;
     });
-    const agreementRatio = agreeingAgents.length / agents.length;
-    vector5Score = agreementRatio;
-    vector5Desc = `${agreeingAgents.length} of ${agents.length} agents voting ${tentativeDirection} (${(agreementRatio * 100).toFixed(0)}% consensus)`;
+
+    agreementRatio = agreeingAgents.length / agents.length;
+    weightedAgreement = totalWeight > 0 ? agreedWeight / totalWeight : 0;
+    hasConsensus = agreementRatio >= 0.75 || weightedAgreement >= 0.62;
+    vector5Score = Math.max(agreementRatio, weightedAgreement);
+    vector5Desc = `${agreeingAgents.length}/${agents.length} agents agreed (${(agreementRatio * 100).toFixed(0)}% count, ${(weightedAgreement * 100).toFixed(0)}% weight)`;
   } else if (decision) {
+    hasConsensus = decision.consensus?.hasConsensus ?? false;
     vector5Score = Math.min(1.0, decision.confidence);
     vector5Desc = `Algorithmic agent confidence: ${(decision.confidence * 100).toFixed(0)}%`;
   }
 
   factors.push({
     id: 'agent_consensus',
-    name: 'Multi-Agent Consensus',
+    name: 'Multi-Agent Consensus (>=3/4 or >=62% wt)',
     weight: 15,
     score: vector5Score,
-    isMet: vector5Score >= 0.75,
-    verdict: vector5Score >= 0.75 ? 'HIGH CONSENSUS' : 'DIVIDED',
+    isMet: hasConsensus,
+    verdict: hasConsensus ? 'CONSENSUS SECURED' : 'CONSENSUS WITHHELD',
     detail: vector5Desc,
   });
 
@@ -396,7 +433,12 @@ export function evaluateSniperConfluence(
     factors.reduce((sum, f) => sum + f.score * f.weight, 0)
   );
 
-  const isPrimed = totalConfluence >= 75 && tentativeDirection !== 'NEUTRAL';
+  // Hard gating: isPrimed requires score >= 75 AND direction NOT neutral AND NO active HOLD reason AND consensus secured!
+  const isPrimed =
+    totalConfluence >= 75 &&
+    tentativeDirection !== 'NEUTRAL' &&
+    !activeHoldReason &&
+    hasConsensus;
 
   // Readiness categorization
   let readinessLevel: SniperConfluenceResult['readinessLevel'] = 'BUILDING';
@@ -492,5 +534,8 @@ export function evaluateSniperConfluence(
     triggerCondition,
     summaryReason,
     suggestedStakeMultiplier,
+    holdReason: activeHoldReason,
+    hasConsensus,
+    consensusRatio: agreementRatio,
   };
 }

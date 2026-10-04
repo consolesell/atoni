@@ -125,7 +125,8 @@ export function runAlgorithmicDecisionEngine(
   candles: Candle[],
   indicators: TechnicalIndicators,
   agents: TradingAgent[] = DEFAULT_AGENTS,
-  minConfidenceThreshold = 0.38
+  minConfidenceThreshold = 0.38,
+  consecutiveLosses = 0
 ): DecisionResult {
   const currentPrice = indicators.currentPrice;
   const ma14 = indicators.ma14Now ?? currentPrice;
@@ -141,6 +142,11 @@ export function runAlgorithmicDecisionEngine(
   // Calculate individual signals per agent
   let bestAgent = agents[0];
   let highestWeightScore = -Infinity;
+  let buyVotes = 0;
+  let sellVotes = 0;
+  let holdVotes = 0;
+  let totalAgentWeight = 0;
+  let agreedAgentWeight = 0;
 
   agents.forEach((agent) => {
     const trendSignal = (currentPrice > ma14 ? 1 : -1) * agent.weights.ma;
@@ -153,9 +159,15 @@ export function runAlgorithmicDecisionEngine(
     agent.currentSignal = agentScore;
     agent.recommendedAction = agentScore > 1.2 ? 'BUY' : agentScore < -1.2 ? 'SELL' : 'HOLD';
 
-    const weightedPerformance = agent.winRate * 0.7 + (agent.trades > 5 ? 0.3 : 0.1);
-    if (weightedPerformance > highestWeightScore) {
-      highestWeightScore = weightedPerformance;
+    if (agent.recommendedAction === 'BUY') buyVotes++;
+    else if (agent.recommendedAction === 'SELL') sellVotes++;
+    else holdVotes++;
+
+    const agentWeight = agent.winRate * 0.7 + (agent.trades > 5 ? 0.3 : 0.1);
+    totalAgentWeight += agentWeight;
+
+    if (agentWeight > highestWeightScore) {
+      highestWeightScore = agentWeight;
       bestAgent = agent;
     }
   });
@@ -182,6 +194,24 @@ export function runAlgorithmicDecisionEngine(
     mtfComponent +
     vwapComponent;
 
+  // Preliminary directional bias
+  const preliminaryAction = compositeSignal > 1.2 ? 'BUY' : compositeSignal < -1.2 ? 'SELL' : 'HOLD';
+
+  // Calculate consensus for the preliminary direction
+  const agreeingCount = preliminaryAction === 'BUY' ? buyVotes : preliminaryAction === 'SELL' ? sellVotes : 0;
+  const agreementRatio = agents.length > 0 ? agreeingCount / agents.length : 0;
+
+  // Sum weights of agreeing agents
+  agents.forEach((agent) => {
+    if (agent.recommendedAction === preliminaryAction && preliminaryAction !== 'HOLD') {
+      agreedAgentWeight += (agent.winRate * 0.7 + (agent.trades > 5 ? 0.3 : 0.1));
+    }
+  });
+
+  const weightedAgreement = totalAgentWeight > 0 ? agreedAgentWeight / totalAgentWeight : 0;
+  // Hard Consensus Rule from sbagent.md: >= 3/4 agreeing OR weighted >= 0.62
+  const hasConsensus = preliminaryAction !== 'HOLD' && (agreementRatio >= 0.75 || weightedAgreement >= 0.62);
+
   // Base confidence calculation - calibrated to realistically scale across signals
   const absSignal = Math.abs(compositeSignal);
   const baseNormalizedSignal = Math.min(1.0, absSignal / 3.0);
@@ -204,11 +234,15 @@ export function runAlgorithmicDecisionEngine(
     adjustments.push('RSI approaching extreme oversold (<22)');
   }
 
-  if (mtf.direction === 'BEARISH' && compositeSignal > 0 && mtf.consistency > 0.7) {
-    confidence *= 0.86;
+  // Multi-Timeframe Conflict Check
+  const isMtfBearConflict = mtf.direction === 'BEARISH' && compositeSignal > 0 && mtf.consistency >= 0.65;
+  const isMtfBullConflict = mtf.direction === 'BULLISH' && compositeSignal < 0 && mtf.consistency >= 0.65;
+
+  if (isMtfBearConflict) {
+    confidence *= 0.82;
     adjustments.push('Higher timeframe bearish trend conflicts with Rise signal');
-  } else if (mtf.direction === 'BULLISH' && compositeSignal < 0 && mtf.consistency > 0.7) {
-    confidence *= 0.86;
+  } else if (isMtfBullConflict) {
+    confidence *= 0.82;
     adjustments.push('Higher timeframe bullish trend conflicts with Fall signal');
   }
 
@@ -220,22 +254,49 @@ export function runAlgorithmicDecisionEngine(
     adjustments.push(`Confirmed by ${pattern.pattern} pattern`);
   }
 
-  // Decision determination
+  // =========================================================================
+  // HARD HOLD RULES ENFORCEMENT (From sbagent.md Section 4: HOLD Directives)
+  // =========================================================================
+  const bbUpper = bb.upper ?? (currentPrice * 1.01);
+  const bbLower = bb.lower ?? (currentPrice * 0.99);
+  const bbWidth = (bbUpper - bbLower) / (currentPrice || 1);
+  const isBbSqueezeHold = bbWidth < 0.0015; // Tight consolidation trap rule from sbagent.md
+
   let action: DecisionResult['action'] = 'HOLD';
   let reason = 'Market conditions in equilibrium or below confidence gate';
 
-  if (compositeSignal > 2.4 && confidence >= minConfidenceThreshold) {
+  if (isBbSqueezeHold) {
+    // HOLD Rule 1: Tight consolidation with Bollinger Band Width < 0.0015
+    action = 'HOLD';
+    reason = `⏸️ [HOLD RULE] Volatility squeeze / BB Width ${(bbWidth * 100).toFixed(3)}% < 0.15% (consolidation trap)`;
+    adjustments.push('BB Width < 0.0015 hard HOLD active');
+  } else if (isMtfBearConflict || isMtfBullConflict) {
+    // HOLD Rule 2: Multi-Timeframe trend conflict with higher timeframe consistency >= 65%
+    action = 'HOLD';
+    reason = `⏸️ [HOLD RULE] Multi-Timeframe trend conflict (${mtf.direction} MTF consistency ${(mtf.consistency * 100).toFixed(0)}%)`;
+    adjustments.push('MTF conflict hard HOLD active');
+  } else if (consecutiveLosses >= 2) {
+    // HOLD Rule 3: Consecutive losses shield (>= 2 consecutive losses triggers rotation/cooldown)
+    action = 'HOLD';
+    reason = `⏸️ [HOLD RULE] Consecutive losses shield (${consecutiveLosses} losses) - risk cooldown active`;
+    adjustments.push('Consecutive loss shield hard HOLD active');
+  } else if (!hasConsensus && preliminaryAction !== 'HOLD') {
+    // HOLD Rule 4: Consensus Gate: Require >= 3/4 agreement OR weighted >= 0.62
+    action = 'HOLD';
+    reason = `⏸️ [HOLD RULE] Consensus gate not met (${agreeingCount}/${agents.length} agreed, weighted ${(weightedAgreement * 100).toFixed(0)}% < 62%)`;
+    adjustments.push('Consensus gate (<3/4 & <62%) hard HOLD active');
+  } else if (compositeSignal > 2.4 && confidence >= minConfidenceThreshold && hasConsensus) {
     action = 'STRONG BUY';
-    reason = `Strong Bullish Convergence (+${compositeSignal.toFixed(2)}) confirmed by ${bestAgent.displayName}`;
-  } else if (compositeSignal > 1.2 && confidence >= minConfidenceThreshold) {
+    reason = `Strong Bullish Convergence (+${compositeSignal.toFixed(2)}) with ${agreeingCount}/4 Consensus (${(weightedAgreement * 100).toFixed(0)}% weight)`;
+  } else if (compositeSignal > 1.2 && confidence >= minConfidenceThreshold && hasConsensus) {
     action = 'BUY';
-    reason = `Bullish Technical Setup (+${compositeSignal.toFixed(2)}) supported by ${indicators.regime.type}`;
-  } else if (compositeSignal < -2.4 && confidence >= minConfidenceThreshold) {
+    reason = `Bullish Setup (+${compositeSignal.toFixed(2)}) supported by ${indicators.regime.type} (${agreeingCount}/4 Consensus)`;
+  } else if (compositeSignal < -2.4 && confidence >= minConfidenceThreshold && hasConsensus) {
     action = 'STRONG SELL';
-    reason = `Strong Bearish Convergence (${compositeSignal.toFixed(2)}) confirmed by ${bestAgent.displayName}`;
-  } else if (compositeSignal < -1.2 && confidence >= minConfidenceThreshold) {
+    reason = `Strong Bearish Convergence (${compositeSignal.toFixed(2)}) with ${agreeingCount}/4 Consensus (${(weightedAgreement * 100).toFixed(0)}% weight)`;
+  } else if (compositeSignal < -1.2 && confidence >= minConfidenceThreshold && hasConsensus) {
     action = 'SELL';
-    reason = `Bearish Technical Setup (${compositeSignal.toFixed(2)}) supported by ${indicators.regime.type}`;
+    reason = `Bearish Setup (${compositeSignal.toFixed(2)}) supported by ${indicators.regime.type} (${agreeingCount}/4 Consensus)`;
   }
 
   // Duration optimization
@@ -269,6 +330,20 @@ export function runAlgorithmicDecisionEngine(
     targetPrice,
     stopPrice,
     adjustments,
+    consensus: {
+      buyVotes,
+      sellVotes,
+      holdVotes,
+      totalAgents: agents.length,
+      agreementRatio,
+      weightedAgreement,
+      hasConsensus,
+      consensusDirection: hasConsensus ? preliminaryAction as ('BUY' | 'SELL') : 'HOLD',
+      thresholdRequired: 0.62,
+      rationale: hasConsensus
+        ? `Consensus satisfied: ${agreeingCount}/${agents.length} agreed (${(weightedAgreement * 100).toFixed(0)}% weight)`
+        : `Consensus withheld: ${agreeingCount}/${agents.length} agreed, ${(weightedAgreement * 100).toFixed(0)}% weight < 62%`,
+    },
   };
 }
 

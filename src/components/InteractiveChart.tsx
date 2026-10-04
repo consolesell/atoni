@@ -20,12 +20,23 @@ import {
   Target,
   Bot,
   Crosshair,
+  Settings,
 } from 'lucide-react';
 import { ChartDrawing, DrawingToolType, ChartPoint } from '../types/drawings';
 import { loadChartDrawings, saveChartDrawings, FIBONACCI_LEVELS } from '../lib/chartDrawings';
 import { sound } from '../lib/soundEngine';
 import { generateAgentChartDrawings } from '../lib/agentChartTools';
 import { AgentChartToolsConfig, DEFAULT_AGENT_CHART_CONFIG, SniperConfluenceResult } from '../types/sniper';
+
+/**
+ * High-reliability numerical formatter for chart rendering to strictly prevent
+ * undefined/NaN .toFixed() exceptions from causing a viewport crash
+ */
+const safeFixed = (val: unknown, dec = 2, fallback = '--'): string => {
+  if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
+  const clampedDec = Math.max(0, Math.min(8, Math.floor(dec)));
+  return val.toFixed(clampedDec);
+};
 
 interface InteractiveChartProps {
   candles: Candle[];
@@ -48,6 +59,7 @@ interface InteractiveChartProps {
   regime?: MarketRegime;
   agents?: TradingAgent[];
   sniperSetup?: SniperConfluenceResult | null;
+  onOpenQuickSettings?: () => void;
 }
 
 export const InteractiveChart: React.FC<InteractiveChartProps> = ({
@@ -71,6 +83,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   regime,
   agents,
   sniperSetup,
+  onOpenQuickSettings,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -98,17 +111,23 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   const [drawings, setDrawings] = useState<ChartDrawing[]>(() => loadChartDrawings(symbol));
   const [pendingDrawingStart, setPendingDrawingStart] = useState<ChartPoint | null>(null);
 
-  // Compute live agent drawings in real-time
+  // Compute live agent drawings in real-time with comprehensive error guard
   const agentDrawings = useMemo(() => {
-    return generateAgentChartDrawings(
-      symbol,
-      candles,
-      indicators,
-      regime || { type: 'NEUTRAL', confidence: 0.6 },
-      algorithmicDecision || null,
-      sniperSetup || null,
-      agentToolsConfig
-    );
+    try {
+      if (!candles || candles.length < 10) return [];
+      return generateAgentChartDrawings(
+        symbol,
+        candles,
+        indicators,
+        regime || { type: 'NEUTRAL', confidence: 0.6 },
+        algorithmicDecision || null,
+        sniperSetup || null,
+        agentToolsConfig
+      );
+    } catch (err) {
+      console.warn('agentDrawings safe fallback:', err);
+      return [];
+    }
   }, [symbol, candles, indicators, regime, algorithmicDecision, sniperSetup, agentToolsConfig]);
 
   const handleSaveAgentDrawingsToUser = () => {
@@ -221,114 +240,117 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     }
 
     ctx.save();
-    ctx.scale(dpr, dpr);
+    try {
+      ctx.scale(dpr, dpr);
 
-    const width = cssWidth;
-    const height = cssHeight;
+      const width = cssWidth;
+      const height = cssHeight;
 
-    // Responsive padding
-    const isSmall = width < 480;
-    const padding = {
-      top: 24,
-      right: isSmall ? 58 : 72,
-      bottom: showRSI ? (isSmall ? 70 : 85) : 28,
-      left: isSmall ? 8 : 14,
-    };
+      // Responsive padding
+      const isSmall = width < 480;
+      const padding = {
+        top: 24,
+        right: isSmall ? 58 : 72,
+        bottom: showRSI ? (isSmall ? 70 : 85) : 28,
+        left: isSmall ? 8 : 14,
+      };
 
-    const chartHeight = height - padding.top - padding.bottom;
-    const chartWidth = width - padding.left - padding.right;
+      const chartHeight = height - padding.top - padding.bottom;
+      const chartWidth = width - padding.left - padding.right;
 
-    // Canvas background
-    ctx.fillStyle = '#090d16';
-    ctx.fillRect(0, 0, width, height);
+      // Canvas background
+      ctx.fillStyle = '#090d16';
+      ctx.fillRect(0, 0, width, height);
 
-    if (!candles || candles.length === 0) {
-      ctx.fillStyle = '#64748b';
-      ctx.font = '11px JetBrains Mono, monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('Synchronizing live ticks & candles...', width / 2, height / 2);
-      ctx.textAlign = 'start';
-      ctx.restore();
-      return;
-    }
+      if (!candles || candles.length === 0) {
+        ctx.fillStyle = '#64748b';
+        ctx.font = '11px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('Synchronizing live ticks & candles...', width / 2, height / 2);
+        ctx.textAlign = 'start';
+        return;
+      }
 
-    // Visible slice of candles with panOffset
-    const candleSpacing = Math.max(2, Math.floor(candleWidth * 0.3));
-    const totalUnit = candleWidth + candleSpacing;
-    const maxVisibleCount = Math.floor(chartWidth / totalUnit);
+      // Visible slice of candles with panOffset
+      const candleSpacing = Math.max(2, Math.floor(candleWidth * 0.3));
+      const totalUnit = candleWidth + candleSpacing;
+      const maxVisibleCount = Math.floor(chartWidth / totalUnit);
 
-    const clampedPan = Math.max(0, Math.min(candles.length - 10, panOffset));
-    const endIndex = candles.length - clampedPan;
-    const startIndex = Math.max(0, endIndex - maxVisibleCount);
-    const visibleCandles = candles.slice(startIndex, endIndex);
+      const clampedPan = Math.max(0, Math.min(candles.length - 10, panOffset));
+      const endIndex = candles.length - clampedPan;
+      const startIndex = Math.max(0, endIndex - maxVisibleCount);
+      const visibleCandles = candles.slice(startIndex, endIndex);
 
-    if (visibleCandles.length === 0) return;
+      if (visibleCandles.length === 0) return;
 
-    // Price Bounds
-    const anchorPrice =
-      currentPrice > 0 ? currentPrice : visibleCandles[visibleCandles.length - 1]?.close || 1000;
-    const validCandles = visibleCandles.filter(
-      (c) => Math.abs(c.close - anchorPrice) / anchorPrice < 0.45
-    );
-    const boundsCandles = validCandles.length >= 3 ? validCandles : visibleCandles;
+      // Price Bounds
+      const anchorPrice =
+        (currentPrice > 0 && Number.isFinite(currentPrice))
+          ? currentPrice
+          : visibleCandles[visibleCandles.length - 1]?.close || 1000;
+      const validCandles = visibleCandles.filter(
+        (c) => Number.isFinite(c.close) && Math.abs(c.close - anchorPrice) / (anchorPrice || 1) < 0.45
+      );
+      const boundsCandles = validCandles.length >= 3 ? validCandles : visibleCandles;
 
-    let minPrice = Infinity;
-    let maxPrice = -Infinity;
+      let minPrice = Infinity;
+      let maxPrice = -Infinity;
 
-    boundsCandles.forEach((c) => {
-      minPrice = Math.min(minPrice, c.low);
-      maxPrice = Math.max(maxPrice, c.high);
-    });
-
-    if (currentPrice > 0) {
-      minPrice = Math.min(minPrice, currentPrice);
-      maxPrice = Math.max(maxPrice, currentPrice);
-    }
-
-    if (showBB && indicators?.bb) {
-      indicators.bb.slice(startIndex, endIndex).forEach((b) => {
-        if (b.lower && Math.abs(b.lower - anchorPrice) / anchorPrice < 0.35) {
-          minPrice = Math.min(minPrice, b.lower);
-        }
-        if (b.upper && Math.abs(b.upper - anchorPrice) / anchorPrice < 0.35) {
-          maxPrice = Math.max(maxPrice, b.upper);
-        }
+      boundsCandles.forEach((c) => {
+        if (typeof c.low === 'number' && Number.isFinite(c.low)) minPrice = Math.min(minPrice, c.low);
+        if (typeof c.high === 'number' && Number.isFinite(c.high)) maxPrice = Math.max(maxPrice, c.high);
       });
-    }
 
-    if (showMarkers) {
-      openTrades.forEach((t) => {
-        if (t.entryPrice > 0 && Math.abs(t.entryPrice - anchorPrice) / anchorPrice < 0.45) {
-          minPrice = Math.min(minPrice, t.entryPrice);
-          maxPrice = Math.max(maxPrice, t.entryPrice);
-        }
-      });
-      (closedTrades || []).slice(0, 10).forEach((t) => {
-        if (t.entryPrice > 0 && Math.abs(t.entryPrice - anchorPrice) / anchorPrice < 0.45) {
-          minPrice = Math.min(minPrice, t.entryPrice);
-          maxPrice = Math.max(maxPrice, t.entryPrice);
-        }
-        if (t.exitPrice && Math.abs(t.exitPrice - anchorPrice) / anchorPrice < 0.45) {
-          minPrice = Math.min(minPrice, t.exitPrice);
-          maxPrice = Math.max(maxPrice, t.exitPrice);
-        }
-      });
-    }
+      if (currentPrice > 0 && Number.isFinite(currentPrice)) {
+        minPrice = Math.min(minPrice, currentPrice);
+        maxPrice = Math.max(maxPrice, currentPrice);
+      }
 
-    // Safety fallback
-    if (!Number.isFinite(minPrice) || !Number.isFinite(maxPrice) || minPrice >= maxPrice) {
-      minPrice = anchorPrice * 0.99;
-      maxPrice = anchorPrice * 1.01;
-    }
+      if (showBB && indicators?.bb) {
+        indicators.bb.slice(startIndex, endIndex).forEach((b) => {
+          if (b.lower && Number.isFinite(b.lower) && Math.abs(b.lower - anchorPrice) / (anchorPrice || 1) < 0.35) {
+            minPrice = Math.min(minPrice, b.lower);
+          }
+          if (b.upper && Number.isFinite(b.upper) && Math.abs(b.upper - anchorPrice) / (anchorPrice || 1) < 0.35) {
+            maxPrice = Math.max(maxPrice, b.upper);
+          }
+        });
+      }
 
-    const pricePadding = (maxPrice - minPrice) * 0.08 || 0.05;
-    minPrice -= pricePadding;
-    maxPrice += pricePadding;
-    const priceRange = maxPrice - minPrice || 1;
+      if (showMarkers) {
+        openTrades.forEach((t) => {
+          if (t.entryPrice > 0 && Number.isFinite(t.entryPrice) && Math.abs(t.entryPrice - anchorPrice) / (anchorPrice || 1) < 0.45) {
+            minPrice = Math.min(minPrice, t.entryPrice);
+            maxPrice = Math.max(maxPrice, t.entryPrice);
+          }
+        });
+        (closedTrades || []).slice(0, 10).forEach((t) => {
+          if (t.entryPrice > 0 && Number.isFinite(t.entryPrice) && Math.abs(t.entryPrice - anchorPrice) / (anchorPrice || 1) < 0.45) {
+            minPrice = Math.min(minPrice, t.entryPrice);
+            maxPrice = Math.max(maxPrice, t.entryPrice);
+          }
+          if (t.exitPrice && Number.isFinite(t.exitPrice) && Math.abs(t.exitPrice - anchorPrice) / (anchorPrice || 1) < 0.45) {
+            minPrice = Math.min(minPrice, t.exitPrice);
+            maxPrice = Math.max(maxPrice, t.exitPrice);
+          }
+        });
+      }
 
-    const priceToY = (price: number) => {
-      return padding.top + chartHeight - ((price - minPrice) / priceRange) * chartHeight;
-    };
+      // Safety fallback
+      if (!Number.isFinite(minPrice) || !Number.isFinite(maxPrice) || minPrice >= maxPrice) {
+        minPrice = anchorPrice * 0.99;
+        maxPrice = anchorPrice * 1.01;
+      }
+
+      const pricePadding = (maxPrice - minPrice) * 0.08 || 0.05;
+      minPrice -= pricePadding;
+      maxPrice += pricePadding;
+      const priceRange = Math.max(0.0001, maxPrice - minPrice || 1);
+
+      const priceToY = (price: number) => {
+        if (!Number.isFinite(price)) return padding.top + chartHeight / 2;
+        return padding.top + chartHeight - ((price - minPrice) / priceRange) * chartHeight;
+      };
 
     // Horizontal Price Grid & Labels
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
@@ -346,7 +368,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ctx.lineTo(padding.left + chartWidth, y);
       ctx.stroke();
 
-      ctx.fillText(p.toFixed(decimals), width - padding.right + 6, y + 4);
+      ctx.fillText(safeFixed(p, decimals), width - padding.right + 6, y + 4);
     }
 
     // Vertical Time Grid
@@ -520,7 +542,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ctx.fillRect(width - padding.right + 2, ySpot - 9, isSmall ? 54 : 68, 18);
       ctx.fillStyle = '#020617';
       ctx.font = `bold ${isSmall ? '10px' : '11px'} JetBrains Mono, monospace`;
-      ctx.fillText(currentPrice.toFixed(decimals), width - padding.right + 5, ySpot + 4);
+      ctx.fillText(safeFixed(currentPrice, decimals), width - padding.right + 5, ySpot + 4);
     }
 
     // =========================================================================
@@ -605,7 +627,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 9px JetBrains Mono, monospace';
         ctx.fillText(
-          `${isCall ? '▲ CALL' : '▼ PUT'} $${trade.amount.toFixed(0)}`,
+          `${isCall ? '▲ CALL' : '▼ PUT'} $${safeFixed(trade.amount, 0)}`,
           padding.left + 8,
           yEntry + 4
         );
@@ -634,9 +656,9 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
             ctx.fillStyle = '#0f172a';
             ctx.font = 'bold 8.5px JetBrains Mono, monospace';
-            const lockedTxt = trade.lockedInProfit && trade.lockedInProfit > 0 ? ` +$${trade.lockedInProfit.toFixed(1)}` : '';
+            const lockedTxt = trade.lockedInProfit && trade.lockedInProfit > 0 ? ` +$${safeFixed(trade.lockedInProfit, 1)}` : '';
             ctx.fillText(
-              `🛡️ TSL ${trade.currentTrailingStopPrice.toFixed(decimals >= 3 ? 2 : decimals)}${lockedTxt}`,
+              `🛡️ TSL ${safeFixed(trade.currentTrailingStopPrice, decimals >= 3 ? 2 : decimals)}${lockedTxt}`,
               padding.left + 7,
               yTSL + 4
             );
@@ -646,7 +668,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         // D. Right-Axis Live ITM / OTM Unrealized PnL Tag
         const isITM = isCall ? currentPrice > trade.entryPrice : currentPrice < trade.entryPrice;
         const livePnl = isITM ? trade.amount * 0.95 : -trade.amount;
-        const pnlText = `${isITM ? '▲ ITM +' : '▼ OTM -'}$${Math.abs(livePnl).toFixed(2)}`;
+        const pnlText = `${isITM ? '▲ ITM +' : '▼ OTM -'}$${safeFixed(Math.abs(livePnl), 2)}`;
 
         ctx.fillStyle = isITM ? '#059669' : '#dc2626';
         ctx.fillRect(width - padding.right + 2, yEntry - 9, isSmall ? 58 : 72, 18);
@@ -871,7 +893,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
               ctx.fillStyle = '#94a3b8';
               ctx.font = 'bold 7px JetBrains Mono, monospace';
-              ctx.fillText(`IN @ ${trade.entryPrice.toFixed(1)}`, clampedEntryX - 19, yEntry + 17);
+              ctx.fillText(`IN @ ${safeFixed(trade.entryPrice, 1)}`, clampedEntryX - 19, yEntry + 17);
 
               tradeHitZones.push({
                 x: clampedEntryX,
@@ -922,7 +944,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
               ctx.fillStyle = isWin ? '#34d399' : '#f87171';
               ctx.font = 'bold 7px JetBrains Mono, monospace';
-              ctx.fillText(`OUT @ ${exitPrice.toFixed(1)}`, clampedExitX - 21, yExit + 18);
+              ctx.fillText(`OUT @ ${safeFixed(exitPrice, 1)}`, clampedExitX - 21, yExit + 18);
 
               tradeHitZones.push({
                 x: clampedExitX,
@@ -941,7 +963,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             );
             const midY = Math.min(yEntry, yExit) - 15;
 
-            const outcomeLabel = `${isWin ? '✔ WIN' : '✖ LOSS'} ${trade.profit >= 0 ? '+' : ''}$${trade.profit.toFixed(2)}`;
+            const outcomeLabel = `${isWin ? '✔ WIN' : '✖ LOSS'} ${trade.profit >= 0 ? '+' : ''}$${safeFixed(trade.profit, 2)}`;
             const pillW = isSmall ? 76 : 84;
             ctx.fillStyle = isWin ? 'rgba(5, 150, 105, 0.95)' : 'rgba(225, 29, 72, 0.95)';
             ctx.strokeStyle = '#ffffff';
@@ -1012,7 +1034,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ctx.fillRect(width - padding.right + 2, y - 8, isSmall ? 52 : 64, 16);
           ctx.fillStyle = '#0f172a';
           ctx.font = '9px JetBrains Mono, monospace';
-          ctx.fillText(drawing.price.toFixed(decimals), width - padding.right + 5, y + 4);
+          ctx.fillText(safeFixed(drawing.price, decimals), width - padding.right + 5, y + 4);
           break;
         }
 
@@ -1081,7 +1103,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
             ctx.fillStyle = fib.color;
             ctx.font = '8px JetBrains Mono, monospace';
-            ctx.fillText(`${fib.label}: ${targetP.toFixed(decimals)}`, Math.min(x1, x2) + 4, y - 3);
+            ctx.fillText(`${fib.label}: ${safeFixed(targetP, decimals)}`, Math.min(x1, x2) + 4, y - 3);
           });
           break;
         }
@@ -1098,7 +1120,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ctx.fillRect(x + 6, y - 9, 78, 18);
           ctx.fillStyle = '#ffffff';
           ctx.font = 'bold 9px JetBrains Mono, monospace';
-          ctx.fillText(drawing.label || drawing.price.toFixed(decimals), x + 10, y + 4);
+          ctx.fillText(drawing.label || safeFixed(drawing.price, decimals), x + 10, y + 4);
           break;
         }
       }
@@ -1124,7 +1146,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             ctx.setLineDash([]);
 
             // Neon glowing Agent Badge on right
-            const labelText = drawing.label || `[Agent: ${drawing.price.toFixed(decimals)}]`;
+            const labelText = drawing.label || `[Agent: ${safeFixed(drawing.price, decimals)}]`;
             ctx.font = 'bold 8.5px JetBrains Mono, monospace';
             const textWidth = ctx.measureText(labelText).width;
             const badgeW = textWidth + 12;
@@ -1207,8 +1229,8 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
               ctx.font = 'bold 8px JetBrains Mono, monospace';
               const label =
                 fib.level === 0.618
-                  ? `★ GOLDEN POCKET 61.8%: ${targetP.toFixed(decimals)}`
-                  : `${fib.label}: ${targetP.toFixed(decimals)}`;
+                  ? `★ GOLDEN POCKET 61.8%: ${safeFixed(targetP, decimals)}`
+                  : `${fib.label}: ${safeFixed(targetP, decimals)}`;
               ctx.fillText(label, x1 + 6, y - 3);
             });
             break;
@@ -1308,7 +1330,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ctx.stroke();
 
       // Optimal Entry Tag
-      const entryText = `🎯 SNIPER ENTRY: $${sniperSetup.optimalEntryPrice.toFixed(decimals)} (${sniperSetup.score}%)`;
+      const entryText = `🎯 SNIPER ENTRY: $${safeFixed(sniperSetup.optimalEntryPrice, decimals)} (${sniperSetup.score}%)`;
       ctx.font = 'bold 8.5px JetBrains Mono, monospace';
       const entryW = ctx.measureText(entryText).width + 12;
       ctx.fillStyle = 'rgba(8, 51, 68, 0.95)';
@@ -1330,7 +1352,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ctx.lineTo(padding.left + chartWidth, yTP);
       ctx.stroke();
 
-      const tpText = `🎯 SNIPER TP: $${sniperSetup.takeProfitPrice.toFixed(decimals)} (+1.8 ATR | R:R ${sniperSetup.riskRewardRatio}:1)`;
+      const tpText = `🎯 SNIPER TP: $${safeFixed(sniperSetup.takeProfitPrice, decimals)} (+1.8 ATR | R:R ${sniperSetup.riskRewardRatio || 1.8}:1)`;
       const tpW = ctx.measureText(tpText).width + 12;
       ctx.fillStyle = 'rgba(6, 78, 59, 0.95)';
       ctx.strokeStyle = '#10b981';
@@ -1351,7 +1373,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ctx.lineTo(padding.left + chartWidth, ySL);
       ctx.stroke();
 
-      const slText = `🛑 SNIPER SL: $${sniperSetup.stopLossPrice.toFixed(decimals)} (-0.75 ATR)`;
+      const slText = `🛑 SNIPER SL: $${safeFixed(sniperSetup.stopLossPrice, decimals)} (-0.75 ATR)`;
       const slW = ctx.measureText(slText).width + 12;
       ctx.fillStyle = 'rgba(127, 29, 29, 0.95)';
       ctx.strokeStyle = '#ef4444';
@@ -1404,7 +1426,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
 
       ctx.fillStyle = '#94a3b8';
       ctx.font = '9px JetBrains Mono, monospace';
-      const curRSI = indicators.rsiNow ? indicators.rsiNow.toFixed(1) : '--';
+      const curRSI = safeFixed(indicators.rsiNow, 1);
       ctx.fillText(`RSI(14): ${curRSI}`, padding.left + 6, rsiTop + 12);
       ctx.fillText('70', width - padding.right + 5, y70 + 3);
       ctx.fillText('30', width - padding.right + 5, y30 + 3);
@@ -1456,14 +1478,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ctx.fillRect(width - padding.right + 2, y - 8, isSmall ? 54 : 68, 16);
       ctx.fillStyle = '#f8fafc';
       ctx.font = `${isSmall ? '9px' : '10px'} JetBrains Mono, monospace`;
-      ctx.fillText(hoverPrice.toFixed(decimals), width - padding.right + 5, y + 4);
-
-      // Find hovered candle
-      const candleIndex = Math.floor((x - padding.left) / totalUnit);
-      if (candleIndex >= 0 && candleIndex < visibleCandles.length) {
-        const hc = visibleCandles[candleIndex];
-        setInspectedCandle(hc);
-      }
+      ctx.fillText(safeFixed(hoverPrice, decimals), width - padding.right + 5, y + 4);
 
       // Check trade marker hit inspection
       let hoveredTradeHit: TradeHitZone | null = null;
@@ -1508,16 +1523,21 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         ctx.fillStyle = '#94a3b8';
         ctx.font = '8.5px JetBrains Mono, monospace';
         const pnlStr = t.result === 'PENDING'
-          ? (isCall ? (currentPrice > t.entryPrice ? `+$${(t.amount * 0.95).toFixed(2)} (ITM)` : `-$${t.amount.toFixed(2)} (OTM)`) : (currentPrice < t.entryPrice ? `+$${(t.amount * 0.95).toFixed(2)} (ITM)` : `-$${t.amount.toFixed(2)} (OTM)`))
-          : `${t.profit >= 0 ? '+' : ''}$${t.profit.toFixed(2)}`;
-        ctx.fillText(`Stake: $${t.amount.toFixed(2)} | PnL: ${pnlStr}`, cardX + 8, cardY + 44);
-        ctx.fillText(`Entry: ${t.entryPrice.toFixed(decimals)} | Exit: ${(t.exitPrice ?? currentPrice).toFixed(decimals)}`, cardX + 8, cardY + 58);
+          ? (isCall ? (currentPrice > t.entryPrice ? `+$${safeFixed(t.amount * 0.95, 2)} (ITM)` : `-$${safeFixed(t.amount, 2)} (OTM)`) : (currentPrice < t.entryPrice ? `+$${safeFixed(t.amount * 0.95, 2)} (ITM)` : `-$${safeFixed(t.amount, 2)} (OTM)`))
+          : `${t.profit >= 0 ? '+' : ''}$${safeFixed(t.profit, 2)}`;
+        ctx.fillText(`Stake: $${safeFixed(t.amount, 2)} | PnL: ${pnlStr}`, cardX + 8, cardY + 44);
+        ctx.fillText(`Entry: ${safeFixed(t.entryPrice, decimals)} | Exit: ${safeFixed(t.exitPrice ?? currentPrice, decimals)}`, cardX + 8, cardY + 58);
         ctx.fillText(`Strategy: ${t.agent || 'Consensus'}`, cardX + 8, cardY + 72);
         ctx.fillText(`Time: ${new Date(t.timestamp).toLocaleTimeString()}`, cardX + 8, cardY + 84);
       }
     }
-
-    ctx.restore();
+  } catch (chartErr) {
+    console.warn('InteractiveChart drawing safe note:', chartErr);
+  } finally {
+    try {
+      ctx.restore();
+    } catch {}
+  }
   }, [
     candles,
     indicators,
@@ -1706,7 +1726,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         type: 'pricemarker',
         price: clickedPrice,
         time: x,
-        label: clickedPrice.toFixed(decimals),
+        label: safeFixed(clickedPrice, decimals),
         color: '#ec4899',
         symbol,
         createdAt: Date.now(),
@@ -1768,12 +1788,25 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
                 {symbol}
               </span>
               <span className="text-[10px] text-cyan-400 font-mono font-bold">
-                {currentPrice ? currentPrice.toFixed(decimals) : '--'}
+                {safeFixed(currentPrice, decimals)}
               </span>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
+            {onOpenQuickSettings && (
+              <button
+                onClick={() => {
+                  onOpenQuickSettings();
+                  sound.play('click');
+                }}
+                className="px-2.5 py-1.5 text-xs font-mono font-bold bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-500/40 text-cyan-300 rounded-lg flex items-center gap-1"
+                title="Quick Settings"
+              >
+                <Settings className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Settings</span>
+              </button>
+            )}
             <button
               onClick={() => setIsFullscreen(false)}
               className="px-3 py-1.5 text-xs font-mono font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg flex items-center gap-1"
@@ -1807,8 +1840,24 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           ))}
         </div>
 
-        {/* Right: Actions (Indicators, Draw, AI, Fullscreen, Refresh) */}
+        {/* Right: Actions (Quick Settings, Indicators, Draw, AI, Fullscreen, Refresh) */}
         <div className="flex items-center gap-1 relative">
+          {/* Quick Settings Shortcut Button */}
+          {onOpenQuickSettings && (
+            <button
+              onClick={() => {
+                onOpenQuickSettings();
+                sound.play('click');
+              }}
+              className="px-2 py-1 rounded-md font-mono text-[11px] font-bold flex items-center gap-1 transition-all bg-cyan-950/80 hover:bg-cyan-900/90 text-cyan-300 border border-cyan-500/50 hover:border-cyan-400 shadow-sm shadow-cyan-950/30 active:scale-95"
+              title="Open Quick Settings (Execution, AI Gate, Sizing & Sync)"
+              aria-label="Quick Settings"
+            >
+              <Settings className="w-3 h-3 text-cyan-400" />
+              <span className="hidden sm:inline">Settings</span>
+            </button>
+          )}
+
           {/* Agent Tools Popover Trigger */}
           <button
             onClick={() => {
@@ -1949,6 +1998,21 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           >
             {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
+
+          {/* Quick Settings Action */}
+          {onOpenQuickSettings && (
+            <button
+              onClick={() => {
+                onOpenQuickSettings();
+                sound.play('click');
+              }}
+              className="px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-md font-mono text-[11px] font-semibold flex items-center gap-1 transition-all shadow-sm"
+              title="Quick Settings: Risk, Agent Weights, Deriv Durations, Auto-Sync & Circuit Breakers"
+            >
+              <Settings className="w-3.5 h-3.5 text-amber-400 animate-[spin_8s_linear_infinite]" />
+              <span className="hidden sm:inline">Settings</span>
+            </button>
+          )}
 
           {/* Refresh Stream */}
           <button
@@ -2248,7 +2312,36 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         onMouseMove={(e) => {
           const rect = canvasRef.current?.getBoundingClientRect();
           if (rect) {
-            setMousePos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            setMousePos({ x, y });
+
+            if (candles && candles.length > 0) {
+              const width = Math.max(280, Math.floor(rect.width || 320));
+              const isSmall = width < 480;
+              const paddingLeft = isSmall ? 8 : 14;
+              const paddingRight = isSmall ? 58 : 72;
+              const chartWidth = width - paddingLeft - paddingRight;
+              const candleSpacing = Math.max(2, Math.floor(candleWidth * 0.3));
+              const totalUnit = candleWidth + candleSpacing;
+              const maxVisibleCount = Math.floor(chartWidth / totalUnit);
+              const clampedPan = Math.max(0, Math.min(candles.length - 10, panOffset));
+              const endIndex = candles.length - clampedPan;
+              const startIndex = Math.max(0, endIndex - maxVisibleCount);
+              const visibleCandles = candles.slice(startIndex, endIndex);
+
+              const candleIndex = Math.floor((x - paddingLeft) / totalUnit);
+              if (candleIndex >= 0 && candleIndex < visibleCandles.length) {
+                const hc = visibleCandles[candleIndex];
+                if (hc && Number.isFinite(hc.open) && Number.isFinite(hc.close)) {
+                  setInspectedCandle(hc);
+                } else {
+                  setInspectedCandle(null);
+                }
+              } else {
+                setInspectedCandle(null);
+              }
+            }
           }
         }}
         onMouseLeave={() => {
@@ -2267,13 +2360,13 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
           <div className="flex items-center gap-1 text-slate-300">
             <span className="text-slate-400">SPOT:</span>
             <span className="font-bold text-cyan-300">
-              {currentPrice ? currentPrice.toFixed(decimals) : '--'}
+              {safeFixed(currentPrice, decimals)}
             </span>
           </div>
-          {indicators?.ma14Now && (
+          {indicators?.ma14Now !== undefined && Number.isFinite(indicators.ma14Now) && (
             <div className="hidden sm:flex items-center gap-1 text-amber-400">
               <span>MA14:</span>
-              <span>{indicators.ma14Now.toFixed(decimals)}</span>
+              <span>{safeFixed(indicators.ma14Now, decimals)}</span>
             </div>
           )}
           {indicators?.pattern && indicators.pattern.pattern !== 'NONE' && (
@@ -2289,17 +2382,17 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         </div>
 
         {/* Inspected Candle Tooltip */}
-        {inspectedCandle && (
+        {inspectedCandle && Number.isFinite(inspectedCandle.open) && (
           <div className="absolute bottom-2 left-2.5 sm:left-3 pointer-events-none bg-slate-950/90 backdrop-blur-md px-2.5 py-1 rounded-lg border border-slate-800 text-[10px] font-mono flex items-center gap-2 text-slate-300">
-            <span>O: {inspectedCandle.open.toFixed(decimals)}</span>
-            <span>H: {inspectedCandle.high.toFixed(decimals)}</span>
-            <span>L: {inspectedCandle.low.toFixed(decimals)}</span>
+            <span>O: {safeFixed(inspectedCandle.open, decimals)}</span>
+            <span>H: {safeFixed(inspectedCandle.high, decimals)}</span>
+            <span>L: {safeFixed(inspectedCandle.low, decimals)}</span>
             <span
               className={
-                inspectedCandle.close >= inspectedCandle.open ? 'text-emerald-400' : 'text-rose-400'
+                (inspectedCandle.close ?? 0) >= (inspectedCandle.open ?? 0) ? 'text-emerald-400' : 'text-rose-400'
               }
             >
-              C: {inspectedCandle.close.toFixed(decimals)}
+              C: {safeFixed(inspectedCandle.close, decimals)}
             </span>
           </div>
         )}

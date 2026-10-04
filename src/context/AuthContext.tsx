@@ -26,6 +26,12 @@ interface AuthContextType {
   signInWithGoogle: () => Promise<void>;
   signInEmail: (email: string, pass: string) => Promise<void>;
   signUpEmail: (email: string, pass: string) => Promise<void>;
+  signInWithDerivOAuth: (
+    accounts: any[],
+    primaryToken: string,
+    primaryAccount: string,
+    appId?: string
+  ) => Promise<void>;
   logout: () => Promise<void>;
   updateAccountMode: (mode: 'DEMO' | 'REAL') => Promise<void>;
   updateBalances: (demoBal?: number, realBal?: number) => Promise<void>;
@@ -86,7 +92,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (currentUser) {
         await fetchOrCreateProfile(currentUser);
       } else {
-        setUserProfile(null);
+        // Check if there is an active local Deriv OAuth profile saved
+        try {
+          const savedLocalProfile = localStorage.getItem('deriv_local_profile');
+          if (savedLocalProfile) {
+            setUserProfile(JSON.parse(savedLocalProfile));
+          } else {
+            setUserProfile(null);
+          }
+        } catch (e) {
+          setUserProfile(null);
+        }
         setGoogleAccessToken(null);
       }
       setLoading(false);
@@ -139,10 +155,67 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
-    await firebaseSignOut(auth);
+    try {
+      await firebaseSignOut(auth);
+    } catch (e) {
+      console.warn('Firebase signout err:', e);
+    }
     setUser(null);
     setUserProfile(null);
     setGoogleAccessToken(null);
+    try {
+      localStorage.removeItem('deriv_local_profile');
+    } catch (e) {}
+  };
+
+  const signInWithDerivOAuth = async (
+    accounts: any[],
+    primaryToken: string,
+    primaryAccount: string,
+    appId: string = '1089'
+  ) => {
+    const isVirtual = primaryAccount.startsWith('VRTC') || primaryAccount.includes('VR');
+    const mode: 'DEMO' | 'REAL' = isVirtual ? 'DEMO' : 'REAL';
+
+    if (user) {
+      // User is logged into Firebase Auth -> sync with Firestore
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        const updates: any = {
+          derivApiToken: primaryToken,
+          derivAppId: appId,
+          derivAccounts: accounts,
+          derivActiveAccount: primaryAccount,
+          accountMode: mode,
+          updatedAt: new Date().toISOString(),
+        };
+        await updateDoc(userRef, updates);
+        setUserProfile((prev) => prev ? { ...prev, ...updates } : null);
+      } catch (err) {
+        console.warn('Silent fallback on Firestore profile update:', err);
+      }
+    } else {
+      // User is logging in directly via Deriv OAuth
+      const localProfile: UserProfile = {
+        uid: `deriv-${primaryAccount}`,
+        email: `${primaryAccount.toLowerCase()}@deriv.user`,
+        displayName: primaryAccount,
+        photoURL: null,
+        accountMode: mode,
+        demoBalance: isVirtual ? 10000 : 10,
+        realBalance: isVirtual ? 0 : 100,
+        derivApiToken: primaryToken,
+        derivAppId: appId,
+        derivAccounts: accounts,
+        derivActiveAccount: primaryAccount,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      setUserProfile(localProfile);
+      try {
+        localStorage.setItem('deriv_local_profile', JSON.stringify(localProfile));
+      } catch (e) {}
+    }
   };
 
   const updateAccountMode = async (mode: 'DEMO' | 'REAL') => {
@@ -208,6 +281,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         signInWithGoogle,
         signInEmail,
         signUpEmail,
+        signInWithDerivOAuth,
         logout,
         updateAccountMode,
         updateBalances,

@@ -2,6 +2,18 @@ import { Candle, TechnicalIndicators, MarketRegime, DecisionResult } from '../ty
 import { ChartDrawing, HorizontalLineDrawing, TrendLineDrawing, RectangleDrawing, FibonacciDrawing } from '../types/drawings';
 import { SniperConfluenceResult, AgentChartToolsConfig } from '../types/sniper';
 
+function safeNumber(val: unknown, fallback = 0): number {
+  if (typeof val === 'number' && Number.isFinite(val)) return val;
+  return fallback;
+}
+
+function safeFixed(val: unknown, dec = 2, fallback = '0.00'): string {
+  if (typeof val === 'number' && Number.isFinite(val)) {
+    return val.toFixed(Math.max(0, Math.min(8, dec)));
+  }
+  return fallback;
+}
+
 /**
  * Finds local pivot highs and lows in the candle array
  */
@@ -9,19 +21,27 @@ function findPivots(candles: Candle[], leftBars = 3, rightBars = 3) {
   const highs: { index: number; price: number; epoch: number }[] = [];
   const lows: { index: number; price: number; epoch: number }[] = [];
 
+  if (!candles || candles.length < leftBars + rightBars + 1) {
+    return { highs, lows };
+  }
+
   for (let i = leftBars; i < candles.length - rightBars; i++) {
     const current = candles[i];
+    if (!current || !Number.isFinite(current.high) || !Number.isFinite(current.low)) continue;
+
     let isHigh = true;
     let isLow = true;
 
     for (let j = i - leftBars; j <= i + rightBars; j++) {
       if (j === i) continue;
-      if (candles[j].high >= current.high) isHigh = false;
-      if (candles[j].low <= current.low) isLow = false;
+      const other = candles[j];
+      if (!other || !Number.isFinite(other.high) || !Number.isFinite(other.low)) continue;
+      if (other.high >= current.high) isHigh = false;
+      if (other.low <= current.low) isLow = false;
     }
 
-    if (isHigh) highs.push({ index: i, price: current.high, epoch: current.epoch });
-    if (isLow) lows.push({ index: i, price: current.low, epoch: current.epoch });
+    if (isHigh) highs.push({ index: i, price: current.high, epoch: current.epoch || Date.now() });
+    if (isLow) lows.push({ index: i, price: current.low, epoch: current.epoch || Date.now() });
   }
 
   return { highs, lows };
@@ -40,14 +60,18 @@ export function generateAgentChartDrawings(
   sniperSetup: SniperConfluenceResult | null,
   config: AgentChartToolsConfig
 ): ChartDrawing[] {
-  if (!config.enabled || !candles || candles.length < 15) {
-    return [];
-  }
+  try {
+    if (!config?.enabled || !candles || candles.length < 15) {
+      return [];
+    }
 
-  const drawings: ChartDrawing[] = [];
-  const now = Date.now();
-  const latestCandle = candles[candles.length - 1];
-  const currentPrice = latestCandle.close;
+    const drawings: ChartDrawing[] = [];
+    const now = Date.now();
+    const latestCandle = candles[candles.length - 1];
+    if (!latestCandle || !Number.isFinite(latestCandle.close)) {
+      return [];
+    }
+    const currentPrice = latestCandle.close;
   const { highs, lows } = findPivots(candles, 2, 2);
 
   // ---------------------------------------------------------------------------
@@ -267,10 +291,18 @@ export function generateAgentChartDrawings(
   // ---------------------------------------------------------------------------
   // TOOL 5: SNIPER ENTRY, TAKE-PROFIT & STOP-LOSS BOX (Sniper Risk Agent)
   // ---------------------------------------------------------------------------
-  if (config.showSniperTargets && sniperSetup && sniperSetup.direction !== 'NEUTRAL') {
+  if (
+    config.showSniperTargets &&
+    sniperSetup &&
+    sniperSetup.direction !== 'NEUTRAL' &&
+    Number.isFinite(sniperSetup.optimalEntryPrice) &&
+    Number.isFinite(sniperSetup.takeProfitPrice) &&
+    Number.isFinite(sniperSetup.stopLossPrice)
+  ) {
     const isCall = sniperSetup.direction === 'CALL';
     const lastIdx = candles.length - 1;
     const startX = Math.max(0, lastIdx - 8);
+    const diffPts = Math.abs(sniperSetup.takeProfitPrice - sniperSetup.optimalEntryPrice);
 
     // Target Box (Take-Profit)
     const tpBox: RectangleDrawing = {
@@ -278,14 +310,14 @@ export function generateAgentChartDrawings(
       type: 'rectangle',
       p1: { time: startX, price: sniperSetup.optimalEntryPrice },
       p2: { time: lastIdx + 6, price: sniperSetup.takeProfitPrice },
-      color: isCall ? '#10b981' : '#10b981',
+      color: '#10b981',
       symbol,
       createdAt: now,
       source: 'agent',
       agentName: 'Sniper Risk Agent',
-      confidence: sniperSetup.score / 100,
-      label: `[Agent Sniper TP: +${Math.abs(sniperSetup.takeProfitPrice - sniperSetup.optimalEntryPrice).toFixed(2)} pts | R:R ${sniperSetup.riskRewardRatio}:1]`,
-      sublabel: `Take-Profit Target @ $${sniperSetup.takeProfitPrice.toFixed(2)}`,
+      confidence: (sniperSetup.score || 70) / 100,
+      label: `[Agent Sniper TP: +${safeFixed(diffPts, 2)} pts | R:R ${sniperSetup.riskRewardRatio || 1.8}:1]`,
+      sublabel: `Take-Profit Target @ $${safeFixed(sniperSetup.takeProfitPrice, 2)}`,
       isRealtime: true,
     };
     drawings.push(tpBox);
@@ -300,8 +332,8 @@ export function generateAgentChartDrawings(
       createdAt: now,
       source: 'agent',
       agentName: 'Sniper Risk Agent',
-      confidence: sniperSetup.score / 100,
-      label: `[Agent Sniper SL: $${sniperSetup.stopLossPrice.toFixed(2)}]`,
+      confidence: (sniperSetup.score || 70) / 100,
+      label: `[Agent Sniper SL: $${safeFixed(sniperSetup.stopLossPrice, 2)}]`,
       sublabel: 'Invalidation Level',
       isRealtime: true,
     };
@@ -309,4 +341,8 @@ export function generateAgentChartDrawings(
   }
 
   return drawings;
+  } catch (err) {
+    console.warn('generateAgentChartDrawings safe return on error:', err);
+    return [];
+  }
 }

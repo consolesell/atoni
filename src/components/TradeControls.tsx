@@ -44,6 +44,7 @@ interface TradeControlsProps {
   onToggleSniperTrigger?: () => void;
   trailingStopConfig?: TrailingStopConfig;
   onTrailingStopConfigChange?: (config: TrailingStopConfig) => void;
+  onOpenQuickSettings?: () => void;
 }
 
 export const TradeControls: React.FC<TradeControlsProps> = ({
@@ -71,6 +72,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
   onToggleSniperTrigger,
   trailingStopConfig = DEFAULT_TRAILING_STOP_CONFIG,
   onTrailingStopConfigChange,
+  onOpenQuickSettings,
 }) => {
   const [activeDeckTab, setActiveDeckTab] = useState<'standard' | 'sniper'>(
     sniperSetup?.isPrimed ? 'sniper' : 'standard'
@@ -126,9 +128,9 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
 
   return (
     <div className="flex flex-col gap-3.5">
-      {/* Top Deck Mode Switcher: Sniper HUD vs Standard Controls */}
-      <div className="flex items-center justify-between bg-slate-900/90 p-1.5 rounded-xl border border-slate-800">
-        <div className="grid grid-cols-2 gap-1 w-full text-xs font-mono">
+      {/* Top Deck Mode Switcher: Sniper HUD vs Standard Controls & Quick Settings */}
+      <div className="flex items-center justify-between bg-slate-900/90 p-1.5 rounded-xl border border-slate-800 gap-1.5">
+        <div className="grid grid-cols-2 gap-1 flex-1 text-xs font-mono">
           <button
             type="button"
             onClick={() => {
@@ -164,6 +166,22 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
             <span>STANDARD DECK</span>
           </button>
         </div>
+
+        {onOpenQuickSettings && (
+          <button
+            type="button"
+            onClick={() => {
+              onOpenQuickSettings();
+              sound.play('click');
+            }}
+            className="px-2.5 py-2 rounded-lg bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-500/40 hover:border-cyan-300 transition-all flex items-center gap-1 font-mono text-xs font-bold shrink-0 shadow-sm shadow-cyan-950/40 active:scale-95"
+            title="Quick Settings (Stake, Duration, AI Gate & Sync)"
+            aria-label="Quick Settings"
+          >
+            <Sliders className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Settings</span>
+          </button>
+        )}
       </div>
 
       {/* RENDER VIEW: SNIPER MODE */}

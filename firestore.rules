@@ -27,5 +27,10 @@ service cloud.firestore {
     match /notes/{noteId} {
       allow read, write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid) && request.resource.data.uid == request.auth.uid;
     }
+
+    // Auto-sync snapshots & Workspace backups (every 10 minutes)
+    match /sync_snapshots/{snapshotId} {
+      allow read, write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid) && request.resource.data.uid == request.auth.uid;
+    }
   }
 }

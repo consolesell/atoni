@@ -39,6 +39,9 @@ export interface SniperConfluenceResult {
   triggerCondition: string;
   summaryReason: string;
   suggestedStakeMultiplier: number;
+  holdReason?: string;
+  hasConsensus?: boolean;
+  consensusRatio?: number;
 }
 
 export interface AgentChartToolsConfig {
