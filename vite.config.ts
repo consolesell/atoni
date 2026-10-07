@@ -4,6 +4,39 @@ import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
+  const isCloudEnv = Boolean(
+    process.env.APP_URL ||
+    process.env.K_SERVICE ||
+    process.env.NG_ALLOWED_HOSTS ||
+    process.env.AIS_APP_URL
+  );
+
+  const rawUrl =
+    process.env.APP_URL ||
+    (process.env.NG_ALLOWED_HOSTS ? `https://${process.env.NG_ALLOWED_HOSTS}` : '');
+
+  let hmrHost: string | undefined = undefined;
+  let isHttps = false;
+
+  if (rawUrl) {
+    try {
+      const parsed = new URL(rawUrl);
+      hmrHost = parsed.hostname;
+      isHttps = parsed.protocol === 'https:';
+    } catch {
+      hmrHost = rawUrl.replace(/^https?:\/\//, '').split('/')[0];
+      isHttps = true;
+    }
+  }
+
+  const hmrConfig = process.env.DISABLE_HMR === 'true'
+    ? false
+    : {
+        protocol: isCloudEnv || isHttps ? ('wss' as const) : ('ws' as const),
+        host: hmrHost,
+        clientPort: isCloudEnv || isHttps ? 443 : 3000,
+      };
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
@@ -11,11 +44,11 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    worker: {
+      format: 'es' as const,
+    },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
+      hmr: hmrConfig,
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
   };

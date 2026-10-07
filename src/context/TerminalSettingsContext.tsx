@@ -68,6 +68,9 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
     voice.setEnabled(settings.audio.voiceEnabled);
     voice.setRateMultiplier(settings.audio.voiceRate);
     voice.setPitchMultiplier(settings.audio.voicePitch);
+    if (typeof settings.audio.useNeuralTTS === 'boolean') {
+      voice.setUseNeuralTTS(settings.audio.useNeuralTTS);
+    }
     if (settings.audio.voicePersona && (AGENT_PERSONAS as any)[settings.audio.voicePersona]) {
       voice.setPersona(settings.audio.voicePersona as AgentVoicePersonaId, false);
     }

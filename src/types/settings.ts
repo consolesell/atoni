@@ -57,6 +57,8 @@ export interface AudioSettings {
   speakTradeSignals: boolean; // default: true
   speakProfitLock: boolean; // default: true
   speakAutoReplenish: boolean; // default: true
+  kokoroVoice?: string; // 'af_heart' | 'af_bella'
+  useNeuralTTS?: boolean; // default: true
 }
 
 export interface ConnectionSettings {
@@ -145,6 +147,8 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
     speakTradeSignals: true,
     speakProfitLock: true,
     speakAutoReplenish: true,
+    kokoroVoice: 'af_heart',
+    useNeuralTTS: true,
   },
   connection: {
     derivAppId: '1089',

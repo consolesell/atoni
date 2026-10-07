@@ -22,6 +22,7 @@ import {
   DEFAULT_AGENTS,
   runAlgorithmicDecisionEngine,
 } from './lib/decisionEngine';
+import { useIndicatorWorker } from './hooks/useIndicatorWorker';
 import { sound } from './lib/soundEngine';
 import { voice } from './lib/voiceEngine';
 import { calculateCoreRiskMetrics, calculateDynamicStake, validateDerivDuration } from './lib/riskEngine';
@@ -580,30 +581,40 @@ export default function App() {
     };
   }, [selectedSymbol, granularity]);
 
-  // 2. Technical Indicators & Multi-Agent Calculation
+  // 2. Technical Indicators, Candlestick Pattern Recognition, & Multi-Agent Deliberation
+  // Offloaded to dedicated Web Worker to maintain silky 60fps UI thread performance during high-frequency tick streams
+  const {
+    indicators: workerIndicators,
+    decision: workerDecision,
+    regime: workerRegime,
+    workerStats,
+  } = useIndicatorWorker({
+    candles,
+    tickBuffer,
+    indicatorConfig: settings.indicators,
+    agents,
+    minConfidence: botState.minConfidence ?? 0.38,
+    consecutiveLosses: botState.consecutiveLosses ?? 0,
+    symbol: selectedSymbol,
+  });
+
   useEffect(() => {
-    if (candles.length < 15) return;
-
-    const calculatedIndicators = analyzeAllIndicators(candles, tickBuffer, settings.indicators);
-    const pattern = detectPattern(candles);
-    if (pattern) {
-      calculatedIndicators.pattern = pattern;
+    if (workerIndicators) {
+      setIndicators(workerIndicators);
     }
-    setIndicators(calculatedIndicators);
+  }, [workerIndicators]);
 
-    const decision = runAlgorithmicDecisionEngine(
-      candles,
-      calculatedIndicators,
-      agents,
-      botState.minConfidence ?? 0.38,
-      botState.consecutiveLosses ?? 0
-    );
-    setAlgorithmicDecision(decision);
-
-    if (decision.regime) {
-      setRegime(decision.regime);
+  useEffect(() => {
+    if (workerDecision) {
+      setAlgorithmicDecision(workerDecision);
     }
-  }, [candles, tickBuffer, agents, settings.indicators]);
+  }, [workerDecision]);
+
+  useEffect(() => {
+    if (workerRegime) {
+      setRegime(workerRegime);
+    }
+  }, [workerRegime]);
 
   // 2b. Real-Time Sniper Confluence Evaluation (Multi-Confluence Entry, TP/SL Targets, Adaptive Duration)
   const sniperSetup = useMemo(() => {
@@ -1847,6 +1858,12 @@ export default function App() {
                   <span className={`font-bold ${highestWinGate?.passed ? 'text-emerald-400' : 'text-amber-400'}`}>
                     {highestWinGate?.passed ? `PASSED (${highestWinGate.winProbabilityScore}%)` : 'SELECTIVE'}
                   </span>
+                </span>
+                <span className="text-slate-600 hidden sm:inline">•</span>
+                <span className="text-slate-300 flex items-center gap-1.5" title="Web Worker background computation latency">
+                  <span className={`w-1.5 h-1.5 rounded-full ${workerStats.isWorkerActive ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                  <span className="text-slate-400">Worker:</span>
+                  <span className="text-emerald-400 font-bold">{workerStats.calculationTimeMs.toFixed(1)}ms</span>
                 </span>
               </div>
 

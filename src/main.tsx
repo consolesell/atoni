@@ -6,7 +6,7 @@ import { ThemeProvider } from './context/ThemeContext.tsx';
 import { TerminalSettingsProvider } from './context/TerminalSettingsContext.tsx';
 import './index.css';
 
-// Intercept benign ResizeObserver loop notifications that occur during asynchronous layout recalculation
+// Intercept benign ResizeObserver loop and transient WebSocket connection notifications
 if (typeof window !== 'undefined') {
   const isResizeObserverError = (msg: unknown) => {
     if (typeof msg === 'string') {
@@ -20,9 +20,25 @@ if (typeof window !== 'undefined') {
     return false;
   };
 
+  const isBenignWebSocketOrHmrError = (err: unknown) => {
+    const text = typeof err === 'string'
+      ? err
+      : (err as any)?.message || (err as any)?.reason || String(err || '');
+    if (typeof text === 'string') {
+      return (
+        text.includes('WebSocket closed without opened') ||
+        text.includes('failed to connect to websocket') ||
+        text.includes('WebSocket connection to') ||
+        text.includes('WebSocket is already in CLOSING or CLOSED state') ||
+        text.includes('/vite/client')
+      );
+    }
+    return false;
+  };
+
   const origOnError = window.onerror;
   window.onerror = (msg, url, lineNo, columnNo, error) => {
-    if (isResizeObserverError(msg)) {
+    if (isResizeObserverError(msg) || isBenignWebSocketOrHmrError(msg) || isBenignWebSocketOrHmrError(error)) {
       return true; // Suppress notification
     }
     if (typeof origOnError === 'function') {
@@ -32,14 +48,15 @@ if (typeof window !== 'undefined') {
   };
 
   window.addEventListener('error', (event) => {
-    if (isResizeObserverError(event.message)) {
+    if (isResizeObserverError(event.message) || isBenignWebSocketOrHmrError(event.message) || isBenignWebSocketOrHmrError(event.error)) {
       event.stopImmediatePropagation();
       event.preventDefault();
     }
   }, true);
 
   window.addEventListener('unhandledrejection', (event) => {
-    if (isResizeObserverError(event.reason?.message || event.reason)) {
+    const reason = event.reason?.message || event.reason;
+    if (isResizeObserverError(reason) || isBenignWebSocketOrHmrError(reason)) {
       event.stopImmediatePropagation();
       event.preventDefault();
     }

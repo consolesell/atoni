@@ -21,6 +21,7 @@ export interface AgentVoicePersona {
   baseRate: number;
   basePitch: number;
   voiceNamePreferences: string[];
+  kokoroVoice: string;
 }
 
 export const AGENT_PERSONAS: Record<AgentVoicePersonaId, AgentVoicePersona> = {
@@ -34,6 +35,7 @@ export const AGENT_PERSONAS: Record<AgentVoicePersonaId, AgentVoicePersona> = {
     baseRate: 1.0,
     basePitch: 1.0,
     voiceNamePreferences: ['Google US English', 'Samantha', 'Daniel', 'Alex', 'en-US'],
+    kokoroVoice: 'af_heart',
   },
   sniper: {
     id: 'sniper',
@@ -45,6 +47,7 @@ export const AGENT_PERSONAS: Record<AgentVoicePersonaId, AgentVoicePersona> = {
     baseRate: 1.1,
     basePitch: 0.95,
     voiceNamePreferences: ['Alex', 'Daniel', 'Google US English', 'Fred', 'en-US'],
+    kokoroVoice: 'af_bella',
   },
   quant: {
     id: 'quant',
@@ -56,6 +59,7 @@ export const AGENT_PERSONAS: Record<AgentVoicePersonaId, AgentVoicePersona> = {
     baseRate: 0.96,
     basePitch: 1.02,
     voiceNamePreferences: ['Samantha', 'Victoria', 'Google UK English Female', 'Karen', 'en-GB'],
+    kokoroVoice: 'af_sarah',
   },
   cyber: {
     id: 'cyber',
@@ -67,6 +71,7 @@ export const AGENT_PERSONAS: Record<AgentVoicePersonaId, AgentVoicePersona> = {
     baseRate: 1.08,
     basePitch: 1.08,
     voiceNamePreferences: ['Google UK English Male', 'Daniel', 'Google US English', 'en-US'],
+    kokoroVoice: 'af_sky',
   },
 };
 
@@ -93,6 +98,11 @@ export class VoiceEngine {
   private isCurrentlySpeaking: boolean = false;
   private activeText: string = '';
   
+  // Neural TTS state (Kokoro-82M)
+  private currentAudio: HTMLAudioElement | null = null;
+  private currentAudioUrl: string | null = null;
+  private useNeuralTTS: boolean = true;
+
   // Sentence queue management to prevent browser speech cutoff
   private chunkQueue: string[] = [];
   private currentChunkIndex: number = 0;
@@ -316,7 +326,29 @@ export class VoiceEngine {
     return this.isCurrentlySpeaking;
   }
 
+  public setUseNeuralTTS(enabled: boolean) {
+    this.useNeuralTTS = enabled;
+  }
+
+  public getUseNeuralTTS(): boolean {
+    return this.useNeuralTTS;
+  }
+
   public stop() {
+    if (this.currentAudio) {
+      try {
+        this.currentAudio.pause();
+        this.currentAudio.currentTime = 0;
+      } catch (e) {}
+      this.currentAudio = null;
+    }
+    if (this.currentAudioUrl) {
+      try {
+        URL.revokeObjectURL(this.currentAudioUrl);
+      } catch (e) {}
+      this.currentAudioUrl = null;
+    }
+
     if (this.queueTimeoutId) {
       clearTimeout(this.queueTimeoutId);
       this.queueTimeoutId = null;
@@ -467,6 +499,67 @@ export class VoiceEngine {
     const finalPitch = (opts.pitch ?? persona.basePitch) * this.pitchMultiplier;
     const finalVolume = opts.volume ?? this.volume;
 
+    // 1. Try Kokoro-82M Studio Neural TTS via /api/tts endpoint first
+    if (this.useNeuralTTS && typeof window !== 'undefined') {
+      const kokoroVoice = persona.kokoroVoice || 'af_heart';
+      fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: humanized,
+          voice: kokoroVoice,
+          speed: Math.max(0.7, Math.min(1.5, finalRate)),
+          lang_code: 'a',
+        }),
+      })
+        .then(async (res) => {
+          if (res.ok && res.headers.get('content-type')?.includes('audio')) {
+            const blob = await res.blob();
+            if (blob.size > 200) {
+              const url = URL.createObjectURL(blob);
+              this.currentAudioUrl = url;
+              const audio = new Audio(url);
+              this.currentAudio = audio;
+              audio.volume = finalVolume;
+              this.notifySpeaking(true, humanized);
+
+              audio.onended = () => {
+                this.stop();
+                opts.onEnd?.();
+              };
+              audio.onerror = () => {
+                this.stop();
+                opts.onEnd?.();
+              };
+
+              try {
+                await audio.play();
+                return;
+              } catch (e) {
+                // Autoplay restriction or playback interruption: fall through to browser speech
+              }
+            }
+          }
+          this.executeBrowserSpeech(humanized, finalRate, finalPitch, finalVolume, opts.onEnd);
+        })
+        .catch(() => {
+          this.executeBrowserSpeech(humanized, finalRate, finalPitch, finalVolume, opts.onEnd);
+        });
+      return;
+    }
+
+    this.executeBrowserSpeech(humanized, finalRate, finalPitch, finalVolume, opts.onEnd);
+  }
+
+  private executeBrowserSpeech(
+    humanized: string,
+    finalRate: number,
+    finalPitch: number,
+    finalVolume: number,
+    onOverallEnd?: () => void
+  ) {
+    if (!this.synth) return;
+
     const chunks = this.splitIntoSentenceChunks(humanized);
     this.chunkQueue = chunks;
     this.currentChunkIndex = 0;
@@ -483,7 +576,7 @@ export class VoiceEngine {
       }, 10000);
     }
 
-    this.playNextChunk(finalRate, finalPitch, finalVolume, opts.onEnd);
+    this.playNextChunk(finalRate, finalPitch, finalVolume, onOverallEnd);
   }
 
   private playNextChunk(

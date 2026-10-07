@@ -1,4 +1,5 @@
 import express from "express";
+import http from "http";
 import path from "path";
 import fs from "fs";
 import { createServer as createViteServer } from "vite";
@@ -8,6 +9,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
+const httpServer = http.createServer(app);
 const PORT = 3000;
 
 app.use(express.json({ limit: "5mb" }));
@@ -276,6 +278,113 @@ app.get("/api/health", (_req, res) => {
     hasGeminiKey,
     timestamp: new Date().toISOString(),
     version: "3.0.0",
+  });
+});
+
+// Kokoro-82M Studio Neural Text-to-Speech Endpoints
+app.post("/api/tts", async (req, res) => {
+  const ttsBaseUrl = process.env.KOKORO_TTS_URL || process.env.TTS_SERVICE_URL || "http://127.0.0.1:8000";
+  const { text, voice = "af_heart", speed = 1.0, lang_code = "a" } = req.body || {};
+
+  if (!text || typeof text !== "string" || !text.trim()) {
+    return res.status(400).json({ error: "Missing or empty 'text' field in request body." });
+  }
+
+  try {
+    const upstreamRes = await fetch(`${ttsBaseUrl}/api/tts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice, speed, lang_code }),
+    });
+
+    if (!upstreamRes.ok) {
+      const errDetail = await upstreamRes.text().catch(() => "");
+      return res.status(upstreamRes.status).json({
+        error: `Kokoro TTS service returned HTTP ${upstreamRes.status}`,
+        details: errDetail,
+      });
+    }
+
+    const audioBuffer = await upstreamRes.arrayBuffer();
+    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Content-Length", audioBuffer.byteLength.toString());
+    res.setHeader("Content-Disposition", 'inline; filename="synthesized_speech.wav"');
+    res.setHeader("X-TTS-Engine", "kokoro-82m");
+    res.setHeader("X-TTS-Voice", voice);
+    return res.send(Buffer.from(audioBuffer));
+  } catch (err: any) {
+    return res.status(503).json({
+      error: "Kokoro TTS service is offline or unreachable.",
+      details: err?.message || String(err),
+      fallbackAvailable: true,
+      hint: "Run fastapi_tts_server.py locally or in Google Colab and set KOKORO_TTS_URL in .env",
+    });
+  }
+});
+
+app.get("/api/tts", async (req, res) => {
+  const ttsBaseUrl = process.env.KOKORO_TTS_URL || process.env.TTS_SERVICE_URL || "http://127.0.0.1:8000";
+  const text = (req.query.text as string) || "";
+  const voice = (req.query.voice as string) || "af_heart";
+  const speed = req.query.speed ? parseFloat(req.query.speed as string) : 1.0;
+  const lang_code = (req.query.lang_code as string) || "a";
+
+  if (!text.trim()) {
+    return res.status(400).json({ error: "Query parameter 'text' is required." });
+  }
+
+  try {
+    const url = new URL(`${ttsBaseUrl}/api/tts`);
+    url.searchParams.set("text", text);
+    url.searchParams.set("voice", voice);
+    url.searchParams.set("speed", speed.toString());
+    url.searchParams.set("lang_code", lang_code);
+
+    const upstreamRes = await fetch(url.toString());
+    if (!upstreamRes.ok) {
+      return res.status(upstreamRes.status).json({ error: "Upstream TTS service error" });
+    }
+
+    const audioBuffer = await upstreamRes.arrayBuffer();
+    res.setHeader("Content-Type", "audio/wav");
+    res.setHeader("Content-Length", audioBuffer.byteLength.toString());
+    res.setHeader("Content-Disposition", 'inline; filename="synthesized_speech.wav"');
+    res.setHeader("X-TTS-Engine", "kokoro-82m");
+    res.setHeader("X-TTS-Voice", voice);
+    return res.send(Buffer.from(audioBuffer));
+  } catch (err: any) {
+    return res.status(503).json({
+      error: "Kokoro TTS service is offline or unreachable.",
+      details: err?.message || String(err),
+      fallbackAvailable: true,
+    });
+  }
+});
+
+app.get("/api/tts/voices", async (_req, res) => {
+  const ttsBaseUrl = process.env.KOKORO_TTS_URL || process.env.TTS_SERVICE_URL || "http://127.0.0.1:8000";
+  try {
+    const upstreamRes = await fetch(`${ttsBaseUrl}/api/tts/voices`);
+    if (upstreamRes.ok) {
+      const data = await upstreamRes.json();
+      return res.json(data);
+    }
+  } catch {
+    // Return standard Kokoro voice manifest if upstream is offline
+  }
+
+  return res.json({
+    default_voice: "af_heart",
+    alternative_voice: "af_bella",
+    voices: {
+      af_heart: { name: "Heart (Studio Flagship)", gender: "female", lang: "a" },
+      af_bella: { name: "Bella (Tactical / Dynamic)", gender: "female", lang: "a" },
+      af_sarah: { name: "Sarah (Institutional)", gender: "female", lang: "a" },
+      af_nicole: { name: "Nicole (Whisper / Soft)", gender: "female", lang: "a" },
+      af_sky: { name: "Sky (Bright / Youthful)", gender: "female", lang: "a" },
+      am_adam: { name: "Adam (Authoritative Male)", gender: "male", lang: "a" },
+      am_michael: { name: "Michael (Conversational Male)", gender: "male", lang: "a" },
+    },
   });
 });
 
@@ -643,6 +752,135 @@ Provide a comprehensive trading strategy breakdown in JSON format.`;
   }
 });
 
+// -------------------------------------------------------------
+// AI Strategy Co-Pilot Chat & Streaming with Tool Calling
+// -------------------------------------------------------------
+
+const tradingFunctionDeclarations = [
+  {
+    name: "rotate_symbol",
+    description: "Rotate the terminal to a different synthetic index symbol (e.g. 1HZ100V, 1HZ75V, 1HZ50V, 1HZ25V, 1HZ10V, R_100, R_75).",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: {
+          type: Type.STRING,
+          description: "Target symbol code, e.g. '1HZ75V' or '1HZ10V'.",
+        },
+        reason: {
+          type: Type.STRING,
+          description: "Reasoning for the symbol rotation.",
+        },
+      },
+      required: ["symbol"],
+    },
+  },
+  {
+    name: "tighten_stop",
+    description: "Tighten trailing stop loss and lock in profits.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        distanceValue: {
+          type: Type.NUMBER,
+          description: "New trailing distance in ATR units (e.g. 1.0 or 1.2).",
+        },
+        distanceType: {
+          type: Type.STRING,
+          description: "Type of distance: 'ATR' or 'PERCENT'.",
+        },
+        profitLockThresholdPercent: {
+          type: Type.NUMBER,
+          description: "Profit lock percentage threshold (e.g. 40 or 50).",
+        },
+      },
+      required: ["distanceValue"],
+    },
+  },
+  {
+    name: "adjust_stake_mode",
+    description: "Adjust stake amount or Kelly position sizing mode.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        stake: {
+          type: Type.NUMBER,
+          description: "New stake amount in USD.",
+        },
+        sizingMode: {
+          type: Type.STRING,
+          description: "Sizing mode: 'KELLY_HALF', 'KELLY_QUARTER', 'FIXED', or 'EQUITY_PERCENT'.",
+        },
+      },
+    },
+  },
+  {
+    name: "execute_trade",
+    description: "Execute a calibrated Rise (CALL) or Fall (PUT) trade contract.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        direction: {
+          type: Type.STRING,
+          description: "'CALL' for Rise or 'PUT' for Fall.",
+        },
+        duration: {
+          type: Type.NUMBER,
+          description: "Duration of the contract.",
+        },
+        durationUnit: {
+          type: Type.STRING,
+          description: "'ticks', 'seconds', or 'minutes'.",
+        },
+        stake: {
+          type: Type.NUMBER,
+          description: "Stake amount in USD.",
+        },
+        rationale: {
+          type: Type.STRING,
+          description: "Reasoning for the trade.",
+        },
+      },
+      required: ["direction"],
+    },
+  },
+  {
+    name: "export_journal",
+    description: "Trigger an automatic export of the trade journal and history to CSV.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        format: {
+          type: Type.STRING,
+          description: "'csv' or 'json'.",
+        },
+      },
+    },
+  },
+  {
+    name: "propose_sbagent_update",
+    description: "Propose an autonomous self-improvement edit to sbagent.md strategy rules.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        ruleCategory: {
+          type: Type.STRING,
+          description: "Category of rule, e.g. 'Consensus Gate', 'Volatility Squeeze', or 'Sniper Reticle'.",
+        },
+        proposedRule: {
+          type: Type.STRING,
+          description: "The proposed markdown rule to add to sbagent.md.",
+        },
+        rationale: {
+          type: Type.STRING,
+          description: "Empirical learning rationale from recent trades.",
+        },
+      },
+      required: ["ruleCategory", "proposedRule", "rationale"],
+    },
+  },
+];
+
 // AI Strategy Co-Pilot Chat
 app.post("/api/ai/chat", async (req, res) => {
   try {
@@ -688,22 +926,22 @@ You encapsulate the Blackbox trading architecture (High-Speed Data Streams, Stra
    - You have integrated natural dialogue capabilities. You can seamlessly converse on general everyday topics: friendly conversations, greetings, daily thoughts, jokes, philosophy, technology, science, coding, life reflections, or casual inquiries. Respond with warmth, humor, wit, and conversational agility.
    - When asked for trading status, portfolio metrics, market stability, trade explanations, or technical analytics, effortlessly provide authoritative real-time updates and status checks backed by the live terminal context above.
    - If the user asks an everyday question (e.g. "How are you doing?", "Tell me a joke", "What's the weather like?", "Who made you?"), answer naturally and conversationally without forcing unprompted trading data, while remaining happy to provide trading updates whenever requested.
-3. Structure your response using rich, native Markdown:
-   - Use bolding for critical terms and key levels.
-   - Use formatted Markdown tables for indicators, metrics, and comparisons when discussing quantitative data.
-   - Use clean bullet points and code blocks where helpful.
-4. When discussing trades or market conditions, explain quantitative reasoning clearly, concisely, and with disciplined risk awareness (strict duration compliance, trailing stop protection, profit lock automation).`;
+3. Tool Execution Capabilities:
+   - When the user asks you to rotate symbols, tighten stop-loss, adjust stakes, execute a trade, export the journal, or propose a strategy evolution to sbagent.md, call the appropriate tool.
+4. Structure your response using rich, native Markdown with bolding, tables, bullet points, and code blocks where helpful.`;
 
     const response = await generateWithModelFallback({
       contents: prompt,
       config: {
-        systemInstruction: "You are SBAgent, an elite autonomous intelligence created and engineered by Givan (Kingvan). You possess dual conversational fluency: handling general everyday conversations with natural warmth and wit, while simultaneously delivering crisp, data-driven real-time trading updates, Blackbox status checks, and risk analysis when requested. Use rich Markdown formatting.",
+        systemInstruction: "You are SBAgent, an elite autonomous intelligence created and engineered by Givan (Kingvan). Deliver natural dialogue for everyday conversations with warmth and wit, while simultaneously delivering crisp, real-time trading updates, Blackbox status checks, and executing user tool requests when appropriate. Use structured Markdown.",
+        tools: [{ functionDeclarations: tradingFunctionDeclarations as any }],
       },
     });
 
     res.json({
       success: true,
       message: response.text,
+      toolCalls: response.functionCalls || [],
       timestamp: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -817,13 +1055,22 @@ You encapsulate the Blackbox trading architecture (High-Speed Data Streams, Stra
     const stream = await generateStreamWithModelFallback({
       contents: prompt,
       config: {
-        systemInstruction: "You are SBAgent, an elite autonomous intelligence created and engineered by Givan (Kingvan). Deliver natural dialogue for everyday conversations with warmth and wit, while simultaneously delivering crisp, real-time trading updates and Blackbox status checks when requested. Use structured Markdown.",
+        systemInstruction: "You are SBAgent, an elite autonomous intelligence created and engineered by Givan (Kingvan). Deliver natural dialogue for everyday conversations with warmth and wit, while simultaneously delivering crisp, real-time trading updates, Blackbox status checks, and executing user tool requests when appropriate. Use structured Markdown.",
+        tools: [{ functionDeclarations: tradingFunctionDeclarations as any }],
       },
     });
 
     for await (const chunk of stream) {
       if (chunk.text) {
         sendEvent("chunk", { text: chunk.text });
+      }
+      if (chunk.functionCalls) {
+        for (const call of chunk.functionCalls) {
+          sendEvent("tool_call", {
+            name: call.name,
+            args: call.args,
+          });
+        }
       }
     }
     sendEvent("done", { success: true });
@@ -1499,8 +1746,43 @@ app.get(
 
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const isCloudEnv = Boolean(
+      process.env.APP_URL ||
+      process.env.K_SERVICE ||
+      process.env.NG_ALLOWED_HOSTS ||
+      process.env.AIS_APP_URL
+    );
+    const rawUrl =
+      process.env.APP_URL ||
+      (process.env.NG_ALLOWED_HOSTS ? `https://${process.env.NG_ALLOWED_HOSTS}` : '');
+
+    let hmrHost: string | undefined = undefined;
+    let isHttps = false;
+    if (rawUrl) {
+      try {
+        const parsed = new URL(rawUrl);
+        hmrHost = parsed.hostname;
+        isHttps = parsed.protocol === 'https:';
+      } catch {
+        hmrHost = rawUrl.replace(/^https?:\/\//, '').split('/')[0];
+        isHttps = true;
+      }
+    }
+
+    const hmrConfig = process.env.DISABLE_HMR === 'true'
+      ? false
+      : {
+          server: httpServer,
+          protocol: isCloudEnv || isHttps ? ('wss' as const) : ('ws' as const),
+          host: hmrHost,
+          clientPort: isCloudEnv || isHttps ? 443 : 3000,
+        };
+
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: hmrConfig,
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -1512,7 +1794,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 Deriv AI Trader Pro Server running at http://0.0.0.0:${PORT}`);
   });
 }

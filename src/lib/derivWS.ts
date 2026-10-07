@@ -19,6 +19,7 @@ class DerivWebSocketClient {
   private currentBasePrice = 1845.25;
   private lastAuthorizeResponse: any = null;
   private linkedAccounts: DerivLinkedAccount[] = [];
+  private reconnectAttempts = 0;
 
   constructor() {
     // Check localStorage for saved credentials & linked accounts
@@ -231,6 +232,14 @@ class DerivWebSocketClient {
 
       this.ws.onopen = () => {
         this.isConnecting = false;
+        this.reconnectAttempts = 0;
+
+        // If fallback simulation was active, gracefully stop it now that real connection restored
+        if (this.simPriceInterval) {
+          clearInterval(this.simPriceInterval);
+          this.simPriceInterval = null;
+        }
+
         this.emit({ msg_type: 'connected', connected: true });
 
         // Start Keep-Alive Ping every 20 seconds
@@ -418,9 +427,21 @@ class DerivWebSocketClient {
 
   private scheduleReconnect() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectAttempts++;
+
+    // Exponential backoff: base 1500ms * 1.5^attempts, capped at 12000ms + random jitter
+    const baseDelay = Math.min(12000, 1500 * Math.pow(1.5, Math.min(this.reconnectAttempts, 5)));
+    const jitter = Math.floor(Math.random() * 600);
+    const delay = Math.round(baseDelay + jitter);
+
+    // If initial connection or multiple retries fail, start fallback simulation to keep UI responsive
+    if (this.reconnectAttempts >= 2) {
+      this.startFallbackSimulation();
+    }
+
     this.reconnectTimer = setTimeout(() => {
       this.connect();
-    }, 4000);
+    }, delay);
   }
 
   public reconnect() {
