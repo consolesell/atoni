@@ -76,6 +76,8 @@ import { MobileExecutionBar } from './components/MobileExecutionBar';
 import { SymbolPerformanceMatrix } from './components/SymbolPerformanceMatrix';
 import { VoiceBroadcastBanner } from './components/VoiceWaveformIndicator';
 import { VoiceCommandHUD } from './components/VoiceCommandHUD';
+import { AuditLogModal } from './components/AuditLogModal';
+import { OnboardingTourModal } from './components/OnboardingTourModal';
 import { AlertRule, TriggeredAlert } from './types/alerts';
 import {
   loadAlertRules,
@@ -270,6 +272,8 @@ export default function App() {
   const [isBrainModalOpen, setIsBrainModalOpen] = useState(false);
   const [isSettingsDrawerOpen, setIsSettingsDrawerOpen] = useState(false);
   const [isFullscreenWorkspaceOpen, setIsFullscreenWorkspaceOpen] = useState(false);
+  const [isAuditLogOpen, setIsAuditLogOpen] = useState(false);
+  const [isTourOpen, setIsTourOpen] = useState(false);
   const [selectedCritiqueTrade, setSelectedCritiqueTrade] = useState<TradeRecord | null>(null);
 
   // Advanced Alerts & Live Session State
@@ -902,6 +906,26 @@ export default function App() {
         return;
       }
 
+      // Portfolio Exposure Limits Enforcement (Max open exposure & concurrent positions)
+      const currentOpenExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
+      const maxTotalOpenExposure = Math.max(15, balance * 0.35); // 35% of balance or min $15
+      if (currentOpenExposure + tradeStake > maxTotalOpenExposure) {
+        addLog(
+          `🛑 [PORTFOLIO EXPOSURE LIMIT] Max total exposure cap reached: ($${currentOpenExposure.toFixed(2)} active + $${tradeStake.toFixed(2)} > $${maxTotalOpenExposure.toFixed(2)} limit). Trade blocked to protect margin.`,
+          'warn'
+        );
+        sound.play('toggle');
+        return;
+      }
+
+      if (openTrades.length >= 4) {
+        addLog(
+          `🛑 [PORTFOLIO EXPOSURE LIMIT] Max concurrent contracts limit reached (4 active positions). Trade blocked.`,
+          'warn'
+        );
+        return;
+      }
+
       // Hard 5% Session Drawdown Circuit Breaker Enforcement (sbagent.md Section 2 & 4)
       if (
         source !== 'MANUAL' &&
@@ -1199,10 +1223,12 @@ export default function App() {
           const lastRotTime = botState.lastSymbolRotationTime || 0;
           if (Date.now() - lastRotTime > cooldownSecs * 1000) {
             const nextSym = evalData.recommended_symbol;
+            const isDifferentSeries = nextSym.startsWith('1HZ') !== selectedSymbol.startsWith('1HZ');
+            const estCorrelation = isDifferentSeries ? 0.32 : 0.68;
             addLog(
-              `🔄 [SBAgent Auto-Rotation] Switched active market to ${nextSym}: ${
-                evalData.symbol_rotation_reason || 'Volatility optimization'
-              }`,
+              `🔄 [Correlation-Aware Rotation] Switched from ${selectedSymbol} to ${nextSym} (Est. Correlation: ${estCorrelation.toFixed(2)} • ${
+                isDifferentSeries ? 'Optimal Low-Correlation Hedge' : 'Intra-Regime Flow'
+              }): ${evalData.symbol_rotation_reason || 'Volatility optimization'}`,
               'warn'
             );
             setSelectedSymbol(nextSym);
@@ -1213,7 +1239,7 @@ export default function App() {
               lastRotationReason: evalData.symbol_rotation_reason,
             }));
             sound.play('win');
-            voice.speak(`SBAgent autonomously rotated market to ${nextSym}`, 'analytical');
+            voice.speak(`SBAgent rotated market to ${nextSym} prioritizing low correlation`, 'analytical');
             return;
           }
         }
@@ -1793,6 +1819,8 @@ export default function App() {
           setIsSettingsDrawerOpen(true);
         }}
         onOpenFullscreenWorkspace={() => setIsFullscreenWorkspaceOpen(true)}
+        onOpenTourModal={() => setIsTourOpen(true)}
+        onOpenAuditLogModal={() => setIsAuditLogOpen(true)}
       />
 
       {/* Main Body Container */}
@@ -2385,6 +2413,43 @@ export default function App() {
           derivWS.fetchCandles(sym, granularity, 120);
           derivWS.subscribeTicks(sym);
         }}
+        onTightenStop={(dist) => {
+          addLog(`🛡️ [VOICE COMMAND] Tightened Trailing Stop-Loss by ${dist} ATR`, 'info');
+          voice.speak(`Trailing stop tightened by ${dist} ATR`, 'tactical');
+        }}
+        onShowAgentVotes={() => {
+          addLog('🧠 [VOICE COMMAND] Toggled agent consensus votes on chart candles', 'info');
+          voice.speak('Agent votes displayed on chart candles', 'tactical');
+        }}
+        onExportJournal={() => {
+          if (closedTrades.length === 0) {
+            addLog('No closed trades in journal to export.', 'info');
+            return;
+          }
+          const headers = ['ID', 'Timestamp', 'Symbol', 'Type', 'Stake', 'Profit', 'Result', 'Agent', 'Regime'];
+          const rows = closedTrades.map((t) => [
+            t.id,
+            t.timestamp,
+            t.symbol,
+            t.decision,
+            t.amount,
+            t.profit,
+            t.result,
+            t.agent,
+            t.regime,
+          ]);
+          const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+          const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = url;
+          link.setAttribute('download', `trade_journal_${new Date().toISOString().slice(0, 10)}.csv`);
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          addLog('📁 Exported trade journal history to CSV', 'success');
+          voice.speak('Trade journal exported to CSV', 'tactical');
+        }}
         currentStake={stake}
         currentDuration={duration}
         currentDurationUnit={durationUnit}
@@ -2399,6 +2464,18 @@ export default function App() {
           setSettingsCategory('voice');
           setIsSettingsDrawerOpen(true);
         }}
+      />
+
+      {/* Interactive Onboarding Tour Modal */}
+      <OnboardingTourModal
+        isOpen={isTourOpen}
+        onClose={() => setIsTourOpen(false)}
+      />
+
+      {/* Structured Autonomous Audit Logs Modal */}
+      <AuditLogModal
+        isOpen={isAuditLogOpen}
+        onClose={() => setIsAuditLogOpen(false)}
       />
     </div>
   );

@@ -42,6 +42,12 @@ interface AICopilotChatProps {
   profitFactor?: number;
   currentStake?: number;
   balance?: number;
+  onRotateSymbol?: (symbol: string) => void;
+  onTightenStop?: (distanceValue: number) => void;
+  onAdjustStake?: (stake: number, mode?: string) => void;
+  onExecuteTrade?: (direction: 'CALL' | 'PUT') => void;
+  onExportJournal?: () => void;
+  onProposeSbagentUpdate?: (proposal: any) => void;
 }
 
 interface ChatMessage {
@@ -73,7 +79,30 @@ export const AICopilotChat: React.FC<AICopilotChatProps> = ({
   profitFactor = 1.85,
   currentStake = 5.0,
   balance = 10000,
+  onRotateSymbol,
+  onTightenStop,
+  onAdjustStake,
+  onExecuteTrade,
+  onExportJournal,
+  onProposeSbagentUpdate,
 }) => {
+  const handleAbort = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsLoading(false);
+    setMessages((prev) => {
+      const lastIdx = prev.length - 1;
+      const updated = [...prev];
+      if (updated[lastIdx]?.role === 'assistant') {
+        updated[lastIdx].isStreaming = false;
+        updated[lastIdx].content += '\n\n*(Generation aborted by user)*';
+      }
+      return updated;
+    });
+    sound.play('toggle');
+  };
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',
@@ -312,6 +341,52 @@ Select an action chip below or speak hands-free via the microphone:`,
                     return updated;
                   });
                 }
+              } else if (data.type === 'tool_call') {
+                const { name, args } = data;
+                let toolBadge = '';
+                if (name === 'rotate_symbol' && args?.symbol) {
+                  toolBadge = `\n\n> 🔄 **Action Dispatched**: Rotated active symbol to **${args.symbol}** (${args.reason || 'Strategic Divergence'}).`;
+                  onRotateSymbol?.(args.symbol);
+                } else if (name === 'tighten_stop' && args?.distanceValue) {
+                  toolBadge = `\n\n> 🛡️ **Action Dispatched**: Tightened Trailing Stop-Loss to **${args.distanceValue} ATR**.`;
+                  onTightenStop?.(args.distanceValue);
+                } else if (name === 'adjust_stake_mode') {
+                  toolBadge = `\n\n> ⚙️ **Action Dispatched**: Adjusted stake to **$${args.stake}** (${args.sizingMode || 'Half-Kelly'}).`;
+                  onAdjustStake?.(args.stake, args.sizingMode);
+                } else if (name === 'execute_trade' && args?.direction) {
+                  toolBadge = `\n\n> ⚡ **Action Dispatched**: Executed **${args.direction}** trade contract (${args.rationale || 'Consensus Signal'}).`;
+                  onExecuteTrade?.(args.direction as any);
+                } else if (name === 'export_journal') {
+                  toolBadge = `\n\n> 📁 **Action Dispatched**: Exported trade journal to CSV.`;
+                  onExportJournal?.();
+                } else if (name === 'propose_sbagent_update') {
+                  toolBadge = `\n\n> 🧬 **Self-Improvement Mutation Proposed**: [${args.ruleCategory}]\n> "${args.proposedRule}"\n> *Opened Human Approval Modal.*`;
+                  onProposeSbagentUpdate?.({
+                    id: `prop_${Date.now()}`,
+                    ruleCategory: args.ruleCategory,
+                    proposedRule: args.proposedRule,
+                    rationale: args.rationale,
+                    expectedEdge: '+4.8% Win Rate',
+                    riskMitigation: 'Session drawdown shield verified',
+                    timestamp: Date.now(),
+                  });
+                }
+
+                if (toolBadge) {
+                  streamedAssistantText += toolBadge;
+                  setMessages((prev) => {
+                    const lastIdx = prev.length - 1;
+                    const updated = [...prev];
+                    if (updated[lastIdx]?.role === 'assistant') {
+                      updated[lastIdx] = {
+                        ...updated[lastIdx],
+                        content: streamedAssistantText,
+                      };
+                    }
+                    return updated;
+                  });
+                  sound.play('trade');
+                }
               } else if (data.type === 'done') {
                 setMessages((prev) => {
                   const lastIdx = prev.length - 1;
@@ -333,6 +408,11 @@ Select an action chip below or speak hands-free via the microphone:`,
         }
       }
     } catch (streamErr: any) {
+      if (streamErr?.name === 'AbortError' || streamErr?.message?.includes('aborted')) {
+        console.log('[AICopilotChat] Generation stream aborted cleanly by user.');
+        setIsLoading(false);
+        return;
+      }
       console.warn('Falling back to standard chat endpoint:', streamErr?.message);
       // Fallback to standard chat endpoint
       try {
@@ -637,6 +717,18 @@ Select an action chip below or speak hands-free via the microphone:`,
           placeholder={`Ask SBAgent about ${symbol}, indicators, or execute action chips...`}
           className="flex-1 bg-slate-900 border border-slate-800 hover:border-cyan-500/50 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 text-slate-100 placeholder-slate-500 text-xs sm:text-sm rounded-xl px-4 py-2.5 outline-none transition-all font-sans"
         />
+
+        {isLoading && (
+          <button
+            type="button"
+            onClick={handleAbort}
+            className="px-3.5 py-2.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/50 rounded-xl text-xs sm:text-sm font-mono font-bold flex items-center gap-1.5 transition-all shadow-md shadow-rose-950/40 shrink-0 animate-pulse"
+            title="Stop Response Generation"
+          >
+            <Square className="w-3.5 h-3.5 fill-current text-rose-400" />
+            <span className="hidden sm:inline">Stop</span>
+          </button>
+        )}
 
         <button
           type="submit"

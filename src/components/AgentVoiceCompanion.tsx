@@ -359,12 +359,62 @@ export const AgentVoiceCompanion: React.FC<AgentVoiceCompanionProps> = ({
               </div>
             )}
 
-            {/* TAB 3: Settings & Pace Calibration */}
+            {/* TAB 3: Advanced Voice Synthesizing Slider Configuration */}
             {activeTab === 'settings' && (
-              <div className="flex flex-col gap-3 text-xs font-mono">
+              <div className="flex flex-col gap-3 text-xs font-mono max-h-[60vh] overflow-y-auto pr-1">
+                {/* Voice Model Selection */}
+                <div>
+                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1">
+                    <span>Neural Model / Voice Core</span>
+                    <span className="text-cyan-400 font-bold">Kokoro-82M</span>
+                  </div>
+                  <select
+                    value={voiceState.kokoroVoice || 'af_heart'}
+                    onChange={(e) => {
+                      voice.setKokoroVoice(e.target.value);
+                      sound.play('click');
+                    }}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-slate-200 text-xs font-mono focus:border-cyan-500 focus:outline-none"
+                  >
+                    <option value="af_heart">Heart (af_heart) - Studio Flagship</option>
+                    <option value="af_bella">Bella (af_bella) - Tactical & Crisp</option>
+                    <option value="af_sarah">Sarah (af_sarah) - Institutional Quant</option>
+                    <option value="af_nicole">Nicole (af_nicole) - Whisper & Smooth</option>
+                    <option value="af_sky">Sky (af_sky) - Bright & Dynamic</option>
+                    <option value="am_adam">Adam (am_adam) - Authoritative Male</option>
+                    <option value="am_michael">Michael (am_michael) - Conversational Male</option>
+                  </select>
+                </div>
+
+                {/* Emotion / Cadence Mode Chips */}
+                <div>
+                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1">
+                    <span>Synthesizer Emotion Matrix</span>
+                    <span className="text-purple-300 font-bold uppercase">{voiceState.emotion || 'tactical'}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(['tactical', 'analytical', 'calm', 'urgent', 'hyper-focused'] as const).map((em) => (
+                      <button
+                        key={em}
+                        onClick={() => {
+                          voice.setEmotion(em);
+                          sound.play('click');
+                        }}
+                        className={`py-1 px-1.5 rounded-lg text-[9px] font-mono font-bold capitalize transition-all border ${
+                          voiceState.emotion === em
+                            ? 'bg-purple-600 text-white border-purple-400 shadow-sm shadow-purple-900/40'
+                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                        }`}
+                      >
+                        {em}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
                 {/* Speech Rate Controls */}
                 <div>
-                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1.5">
+                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1">
                     <span>Speech Cadence / Speed</span>
                     <span className="text-cyan-300 font-bold">{voiceState.rateMultiplier.toFixed(2)}x</span>
                   </div>
@@ -375,9 +425,9 @@ export const AgentVoiceCompanion: React.FC<AgentVoiceCompanionProps> = ({
                     step="0.05"
                     value={voiceState.rateMultiplier}
                     onChange={(e) => voice.setRateMultiplier(parseFloat(e.target.value))}
-                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400 mb-1.5"
+                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-400 mb-1"
                   />
-                  <div className="grid grid-cols-4 gap-1.5">
+                  <div className="grid grid-cols-4 gap-1">
                     {[0.85, 1.0, 1.15, 1.3].map((r) => (
                       <button
                         key={r}
@@ -385,13 +435,13 @@ export const AgentVoiceCompanion: React.FC<AgentVoiceCompanionProps> = ({
                           voice.setRateMultiplier(r);
                           sound.play('click');
                         }}
-                        className={`py-1 rounded-lg text-[10px] font-mono font-semibold transition-all ${
+                        className={`py-0.5 rounded text-[9px] font-mono font-semibold transition-all ${
                           Math.abs(voiceState.rateMultiplier - r) < 0.05
-                            ? 'bg-cyan-500 text-slate-950'
+                            ? 'bg-cyan-500 text-slate-950 font-bold'
                             : 'bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800'
                         }`}
                       >
-                        {r === 1.0 ? '1.0x Normal' : `${r}x`}
+                        {r === 1.0 ? '1.0x' : `${r}x`}
                       </button>
                     ))}
                   </div>
@@ -399,7 +449,7 @@ export const AgentVoiceCompanion: React.FC<AgentVoiceCompanionProps> = ({
 
                 {/* Voice Pitch Controls */}
                 <div>
-                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1.5">
+                  <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1">
                     <span>Voice Pitch / Frequency</span>
                     <span className="text-teal-300 font-bold">{voiceState.pitchMultiplier.toFixed(2)}x</span>
                   </div>
@@ -410,44 +460,68 @@ export const AgentVoiceCompanion: React.FC<AgentVoiceCompanionProps> = ({
                     step="0.05"
                     value={voiceState.pitchMultiplier}
                     onChange={(e) => voice.setPitchMultiplier(parseFloat(e.target.value))}
-                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-teal-400 mb-1.5"
+                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-teal-400 mb-1"
                   />
-                  <div className="grid grid-cols-4 gap-1.5">
-                    {[0.8, 1.0, 1.15, 1.3].map((p) => (
-                      <button
-                        key={p}
-                        onClick={() => {
-                          voice.setPitchMultiplier(p);
-                          sound.play('click');
-                        }}
-                        className={`py-1 rounded-lg text-[10px] font-mono font-semibold transition-all ${
-                          Math.abs(voiceState.pitchMultiplier - p) < 0.05
-                            ? 'bg-teal-500 text-slate-950'
-                            : 'bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800'
-                        }`}
-                      >
-                        {p === 1.0 ? '1.0x Natural' : `${p}x`}
-                      </button>
-                    ))}
+                </div>
+
+                {/* Stability and Clarity Dual Sliders */}
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1">
+                      <span>Stability</span>
+                      <span className="text-amber-300 font-bold">{Math.round((voiceState.stability || 0.75) * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1.0"
+                      step="0.05"
+                      value={voiceState.stability || 0.75}
+                      onChange={(e) => voice.setStability(parseFloat(e.target.value))}
+                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-400"
+                    />
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-semibold mb-1">
+                      <span>Clarity / Treble</span>
+                      <span className="text-emerald-300 font-bold">{Math.round((voiceState.clarity || 0.85) * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.1"
+                      max="1.0"
+                      step="0.05"
+                      value={voiceState.clarity || 0.85}
+                      onChange={(e) => voice.setClarity(parseFloat(e.target.value))}
+                      className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-400"
+                    />
                   </div>
                 </div>
 
-                {/* Test Greeting Audio Button & Reset */}
+                {/* Live Preview Slider Panel & Action */}
                 <div className="flex items-center gap-2 pt-1">
                   <button
-                    onClick={() => voice.testCadence()}
-                    className="flex-1 py-2 bg-slate-900 hover:bg-slate-850 text-cyan-300 border border-cyan-500/30 rounded-xl flex items-center justify-center gap-2 font-mono text-xs font-bold transition-all shadow-sm"
+                    onClick={() => {
+                      voice.testCadence(
+                        `Synthesizer test. Kokoro 82M voice calibrated under ${voiceState.emotion || 'tactical'} emotion at ${voiceState.rateMultiplier.toFixed(2)}x speed and ${Math.round((voiceState.clarity || 0.85) * 100)}% acoustic clarity.`
+                      );
+                      sound.play('click');
+                    }}
+                    className="flex-1 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-slate-950 font-bold rounded-xl flex items-center justify-center gap-2 font-mono text-xs transition-all shadow-md shadow-cyan-950/40"
                   >
                     <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>Test Cadence</span>
+                    <span>Live Preview Synth</span>
                   </button>
                   <button
                     onClick={() => {
                       voice.resetCadence();
+                      voice.setStability(0.75);
+                      voice.setClarity(0.85);
+                      voice.setEmotion('tactical');
                       sound.play('toggle');
                     }}
                     className="px-3 py-2 bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-slate-200 border border-slate-800 rounded-xl font-mono text-xs transition-all"
-                    title="Reset to 1.0x default pitch and speed"
+                    title="Reset to factory baseline sliders"
                   >
                     Reset
                   </button>

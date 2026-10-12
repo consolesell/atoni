@@ -75,6 +75,8 @@ export const AGENT_PERSONAS: Record<AgentVoicePersonaId, AgentVoicePersona> = {
   },
 };
 
+export type VoiceEmotionMode = 'calm' | 'tactical' | 'analytical' | 'urgent' | 'hyper-focused';
+
 export interface VoiceEngineState {
   isEnabled: boolean;
   isSpeaking: boolean;
@@ -82,6 +84,10 @@ export interface VoiceEngineState {
   personaId: AgentVoicePersonaId;
   rateMultiplier: number; // 0.7 to 1.5
   pitchMultiplier: number; // 0.65 to 1.4
+  stability: number; // 0.0 to 1.0
+  clarity: number; // 0.0 to 1.0
+  emotion: VoiceEmotionMode;
+  kokoroVoice: string;
   volume: number; // 0 to 1
   selectedVoiceName: string | null;
   availableVoices: string[];
@@ -93,6 +99,10 @@ export class VoiceEngine {
   private personaId: AgentVoicePersonaId = 'executive';
   private rateMultiplier: number = 1.0;
   private pitchMultiplier: number = 1.0;
+  private stability: number = 0.75;
+  private clarity: number = 0.85;
+  private emotion: VoiceEmotionMode = 'tactical';
+  private customKokoroVoice: string = 'af_heart';
   private volume: number = 1.0;
   private voice: SpeechSynthesisVoice | null = null;
   private isCurrentlySpeaking: boolean = false;
@@ -187,10 +197,46 @@ export class VoiceEngine {
       personaId: this.personaId,
       rateMultiplier: this.rateMultiplier,
       pitchMultiplier: this.pitchMultiplier,
+      stability: this.stability,
+      clarity: this.clarity,
+      emotion: this.emotion,
+      kokoroVoice: this.customKokoroVoice || AGENT_PERSONAS[this.personaId]?.kokoroVoice || 'af_heart',
       volume: this.volume,
       selectedVoiceName: this.voice?.name || null,
       availableVoices: voices.filter((v) => v.lang.startsWith('en')).map((v) => v.name),
     };
+  }
+
+  public setStability(val: number) {
+    this.stability = Math.max(0, Math.min(1, Math.round(val * 100) / 100));
+    try {
+      localStorage.setItem('sbagent_voice_stability', String(this.stability));
+    } catch {}
+    this.notifyState();
+  }
+
+  public setClarity(val: number) {
+    this.clarity = Math.max(0, Math.min(1, Math.round(val * 100) / 100));
+    try {
+      localStorage.setItem('sbagent_voice_clarity', String(this.clarity));
+    } catch {}
+    this.notifyState();
+  }
+
+  public setEmotion(emotion: VoiceEmotionMode) {
+    this.emotion = emotion;
+    try {
+      localStorage.setItem('sbagent_voice_emotion', emotion);
+    } catch {}
+    this.notifyState();
+  }
+
+  public setKokoroVoice(voiceId: string) {
+    this.customKokoroVoice = voiceId;
+    try {
+      localStorage.setItem('sbagent_kokoro_voice', voiceId);
+    } catch {}
+    this.notifyState();
   }
 
   public setEnabled(enabled: boolean) {
@@ -463,6 +509,7 @@ export class VoiceEngine {
       | 'calm'
       | 'urgent'
       | 'analytical'
+      | 'tactical'
   ): void {
     if (!this.isEnabled || !this.synth) return;
 
@@ -480,6 +527,8 @@ export class VoiceEngine {
         opts = { rate: 0.95, pitch: 0.95 };
       } else if (options === 'urgent') {
         opts = { rate: 1.15, pitch: 1.05 };
+      } else if (options === 'tactical') {
+        opts = { rate: 1.05, pitch: 1.0, personaId: 'sniper' };
       } else {
         opts = { rate: 1.0, pitch: 1.0 };
       }
@@ -501,7 +550,7 @@ export class VoiceEngine {
 
     // 1. Try Kokoro-82M Studio Neural TTS via /api/tts endpoint first
     if (this.useNeuralTTS && typeof window !== 'undefined') {
-      const kokoroVoice = persona.kokoroVoice || 'af_heart';
+      const kokoroVoice = this.customKokoroVoice || persona.kokoroVoice || 'af_heart';
       fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

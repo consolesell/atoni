@@ -16,6 +16,7 @@ import {
 import { TechnicalIndicators, MarketRegime, CoreRiskMetrics } from '../types/trading';
 import { IndicatorWorkerStats } from '../types/worker';
 import { sound } from '../lib/soundEngine';
+import { Holographic3DVisualizer } from './Holographic3DVisualizer';
 
 interface SpatialProcessingMetricsProps {
   symbol: string;
@@ -43,6 +44,7 @@ export const SpatialProcessingMetricsView: React.FC<SpatialProcessingMetricsProp
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [spatialEntropy, setSpatialEntropy] = useState<number>(0.28);
   const [phaseState, setPhaseState] = useState<string>('DIRECTIONAL_ATTRACTOR');
+  const [viewMode, setViewMode] = useState<'3d' | '2d'>('3d');
   const [tickRate, setTickRate] = useState<number>(142);
   const [scanning, setScanning] = useState<boolean>(false);
   const [candidateScores, setCandidateScores] = useState<
@@ -206,27 +208,62 @@ export const SpatialProcessingMetricsView: React.FC<SpatialProcessingMetricsProp
         </button>
       </div>
 
-      {/* Phase Space Dynamic Canvas */}
+      {/* Phase Space Dynamic Visualizer (3D Hologram or 2D Vector Field) */}
       <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-2">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Layers className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="font-bold text-slate-200">Phase-Space Vector Field (P - EMA vs dP/dt)</span>
+            <span className="font-bold text-slate-200">Phase-Space Spatial Manifold</span>
           </div>
-          <span className="font-mono text-[10px] text-cyan-400 px-2 py-0.5 rounded bg-cyan-950/40 border border-cyan-800/40">
-            {phaseState}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className="font-mono text-[10px] text-cyan-400 px-2 py-0.5 rounded bg-cyan-950/40 border border-cyan-800/40 hidden sm:inline">
+              {phaseState}
+            </span>
+            <div className="flex items-center bg-slate-900 rounded-lg p-0.5 border border-slate-800 text-[10px] font-mono">
+              <button
+                onClick={() => setViewMode('3d')}
+                className={`px-2 py-0.5 rounded ${
+                  viewMode === '3d'
+                    ? 'bg-cyan-500 text-slate-950 font-bold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                3D Hologram
+              </button>
+              <button
+                onClick={() => setViewMode('2d')}
+                className={`px-2 py-0.5 rounded ${
+                  viewMode === '2d'
+                    ? 'bg-cyan-500 text-slate-950 font-bold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                2D Canvas
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="relative w-full h-36 bg-slate-950 rounded-lg overflow-hidden border border-slate-900 flex items-center justify-center">
-          <canvas ref={canvasRef} width={380} height={144} className="w-full h-full" />
-          <div className="absolute top-2 left-2 text-[10px] font-mono text-slate-500 pointer-events-none">
-            +dP/dt (Momentum Velocity)
+        {viewMode === '3d' ? (
+          <Holographic3DVisualizer
+            mode="spatial"
+            symbol={symbol}
+            currentPrice={currentPrice}
+            indicators={indicators}
+            regime={regime}
+            height={220}
+          />
+        ) : (
+          <div className="relative w-full h-36 bg-slate-950 rounded-lg overflow-hidden border border-slate-900 flex items-center justify-center">
+            <canvas ref={canvasRef} width={380} height={144} className="w-full h-full" />
+            <div className="absolute top-2 left-2 text-[10px] font-mono text-slate-500 pointer-events-none">
+              +dP/dt (Momentum Velocity)
+            </div>
+            <div className="absolute bottom-2 right-2 text-[10px] font-mono text-slate-500 pointer-events-none">
+              +ΔP (Price Deviation)
+            </div>
           </div>
-          <div className="absolute bottom-2 right-2 text-[10px] font-mono text-slate-500 pointer-events-none">
-            +ΔP (Price Deviation)
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Spatial Latency Breakdown Grid */}

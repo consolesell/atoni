@@ -28,6 +28,9 @@ interface VoiceCommandHUDProps {
   onToggleSniper: () => void;
   onReplenishAnchor: () => void;
   onSelectSymbol?: (symbol: string) => void;
+  onTightenStop?: (distance: number) => void;
+  onShowAgentVotes?: () => void;
+  onExportJournal?: () => void;
   currentStake: number;
   currentDuration: number;
   currentDurationUnit: 'ticks' | 'seconds' | 'minutes';
@@ -147,7 +150,40 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
             p.onSelectSymbol(cmd.payload.symbol);
             setLastExecutedCommand({
               text: cmd.rawText,
-              action: `Switched symbol to ${cmd.payload.symbol}`,
+              action: `Rotated symbol to ${cmd.payload.symbol}`,
+              timestamp: Date.now(),
+            });
+          }
+          break;
+
+        case 'TIGHTEN_STOP':
+          if (p.onTightenStop) {
+            p.onTightenStop(cmd.payload?.distance || 0.8);
+            setLastExecutedCommand({
+              text: cmd.rawText,
+              action: `Tightened Trailing Stop-Loss by ${cmd.payload?.distance || 0.8} ATR`,
+              timestamp: Date.now(),
+            });
+          }
+          break;
+
+        case 'SHOW_AGENT_VOTES':
+          if (p.onShowAgentVotes) {
+            p.onShowAgentVotes();
+            setLastExecutedCommand({
+              text: cmd.rawText,
+              action: 'Enabled Agent-Vote annotations on chart candles',
+              timestamp: Date.now(),
+            });
+          }
+          break;
+
+        case 'EXPORT_JOURNAL':
+          if (p.onExportJournal) {
+            p.onExportJournal();
+            setLastExecutedCommand({
+              text: cmd.rawText,
+              action: 'Exported trade journal history to CSV',
               timestamp: Date.now(),
             });
           }

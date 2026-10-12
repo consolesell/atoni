@@ -31,6 +31,7 @@ import {
 } from '../types/trading';
 import { SniperConfluenceResult } from '../types/sniper';
 import { sound } from '../lib/soundEngine';
+import { Holographic3DVisualizer } from './Holographic3DVisualizer';
 
 interface BlackboxHubViewProps {
   symbol: string;
@@ -139,6 +140,17 @@ export const BlackboxHubView: React.FC<BlackboxHubViewProps> = ({
           </button>
         </div>
       </div>
+
+      {/* 3D Holographic Spatial Core Visualizer */}
+      <Holographic3DVisualizer
+        mode="blackbox"
+        symbol={symbol}
+        currentPrice={currentPrice}
+        indicators={indicators}
+        regime={regime}
+        agents={agents}
+        height={260}
+      />
 
       {/* 4 Unified Architecture Pipelines */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

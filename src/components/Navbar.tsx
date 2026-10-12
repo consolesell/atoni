@@ -26,11 +26,13 @@ import {
   Radio,
   Mic,
   MicOff,
+  ChevronDown,
 } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS } from '../lib/voiceEngine';
 import { voiceInput } from '../lib/voiceInputEngine';
 import { autoSyncEngine } from '../lib/autoSyncEngine';
+import { derivWS } from '../lib/derivWS';
 import { useAuth } from '../context/AuthContext';
 import { AccountModeSwitcher } from './AuthModal';
 import { VoiceWaveform } from './VoiceWaveformIndicator';
@@ -63,6 +65,8 @@ interface NavbarProps {
   onOpenSettings?: () => void;
   onOpenTheme?: () => void;
   onOpenFullscreenWorkspace?: () => void;
+  onOpenTourModal?: () => void;
+  onOpenAuditLogModal?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -93,6 +97,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSettings,
   onOpenTheme,
   onOpenFullscreenWorkspace,
+  onOpenTourModal,
+  onOpenAuditLogModal,
 }) => {
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [voiceState, setVoiceState] = useState(voice.getState());
@@ -103,6 +109,19 @@ export const Navbar: React.FC<NavbarProps> = ({
     lastSyncTime: number | null;
   }>({ nextSyncSeconds: 600, isSyncing: false, lastSyncTime: null });
   const { user, userProfile, logout } = useAuth();
+  const [isAccountsDropdownOpen, setIsAccountsDropdownOpen] = useState(false);
+  const [linkedAccounts, setLinkedAccounts] = useState(() => derivWS.getLinkedAccounts());
+
+  useEffect(() => {
+    const unsubWs = derivWS.subscribe((msg) => {
+      if (msg.msg_type === 'linked_accounts_updated' || msg.msg_type === 'authorize_success') {
+        setLinkedAccounts(derivWS.getLinkedAccounts());
+      }
+    });
+    return () => {
+      unsubWs();
+    };
+  }, []);
 
   useEffect(() => {
     const unsub = voice.subscribeState((st) => setVoiceState(st));
@@ -263,31 +282,94 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </div>
 
-            {/* Deriv In-App Login Button */}
-            <button
-              onClick={() => {
-                onOpenTokenModal();
-                sound.play('click');
-              }}
-              className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-mono font-bold transition-all border shadow-sm ${
-                isAuthorized
-                  ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border-rose-500/40'
-                  : 'bg-gradient-to-r from-rose-600/20 to-red-600/20 hover:from-rose-600/30 hover:to-red-600/30 text-rose-400 hover:text-rose-200 border-rose-500/40'
-              }`}
-              title="Log in to Deriv without leaving the app"
-            >
-              <div className="flex items-center gap-1">
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    isAuthorized ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'
-                  }`}
-                />
-                <LogIn className="w-3 h-3 text-rose-400" />
+            {/* Deriv Log In / Log Out & Multi-Account Switcher */}
+            {isAuthorized ? (
+              <div className="relative flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-xl p-0.5 shadow-sm">
+                <button
+                  onClick={() => {
+                    if (linkedAccounts.length > 1) {
+                      setIsAccountsDropdownOpen(!isAccountsDropdownOpen);
+                    } else {
+                      onOpenTokenModal();
+                    }
+                    sound.play('click');
+                  }}
+                  className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-mono font-bold text-slate-200 hover:text-white transition-all hover:bg-slate-800"
+                  title="Switch Active Deriv Account"
+                >
+                  <span className={`w-2 h-2 rounded-full ${isReal ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                  <span className="truncate max-w-[80px] sm:max-w-[110px] text-slate-100 font-bold">
+                    {loginid || 'DERIV'}
+                  </span>
+                  {linkedAccounts.length > 1 && (
+                    <ChevronDown className="w-3 h-3 text-slate-400" />
+                  )}
+                </button>
+
+                {/* Disconnect / Logout Button */}
+                <button
+                  onClick={() => {
+                    derivWS.logout();
+                    sound.play('click');
+                  }}
+                  className="p-1 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
+                  title="Log Out / Disconnect Deriv Account (Return to Demo Sandbox)"
+                  aria-label="Disconnect Deriv Account"
+                >
+                  <LogOut className="w-3.5 h-3.5 text-rose-400" />
+                </button>
+
+                {/* Multi-Account Dropdown Menu */}
+                {isAccountsDropdownOpen && linkedAccounts.length > 1 && (
+                  <div className="absolute top-full right-0 mt-1.5 w-48 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl p-1.5 z-40 text-xs font-mono">
+                    <div className="px-2 py-1 text-[10px] text-slate-500 uppercase font-bold">
+                      Linked Deriv Accounts
+                    </div>
+                    {linkedAccounts.map((acc) => {
+                      const isActive = acc.account === loginid;
+                      return (
+                        <button
+                          key={acc.account}
+                          onClick={() => {
+                            if (acc.token) {
+                              derivWS.setCredentials(acc.token);
+                              localStorage.setItem('deriv_active_loginid', acc.account);
+                            }
+                            setIsAccountsDropdownOpen(false);
+                            sound.play('trade');
+                          }}
+                          className={`w-full text-left px-2 py-1.5 rounded-lg flex items-center justify-between transition-colors ${
+                            isActive
+                              ? 'bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40'
+                              : 'text-slate-300 hover:bg-slate-800'
+                          }`}
+                        >
+                          <span className="truncate">{acc.account}</span>
+                          <span className={`text-[9px] px-1 rounded ${acc.isVirtual ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300 font-bold'}`}>
+                            {acc.isVirtual ? 'DEMO' : 'REAL'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-              <span className="truncate max-w-[80px] sm:max-w-[120px]">
-                {isAuthorized ? loginid || 'DERIV' : 'DERIV LOGIN'}
-              </span>
-            </button>
+            ) : (
+              <button
+                onClick={() => {
+                  onOpenTokenModal();
+                  sound.play('click');
+                }}
+                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-mono font-bold transition-all border shadow-sm bg-gradient-to-r from-emerald-600/20 to-teal-600/20 hover:from-emerald-600/30 hover:to-teal-600/30 text-emerald-400 hover:text-emerald-200 border-emerald-500/40"
+                title="Connect Deriv Real or Virtual Account"
+              >
+                <div className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <LogIn className="w-3 h-3 text-emerald-400" />
+                </div>
+                <span className="truncate font-bold">CONNECT DERIV</span>
+              </button>
+            )}
 
             {/* Desktop Only Buttons */}
             <div className="hidden lg:flex items-center gap-1.5">
@@ -335,6 +417,36 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   <FileCode className="w-3.5 h-3.5 text-blue-400" />
                   <span className="hidden xl:inline">DOCS</span>
+                </button>
+              )}
+
+              {/* Interactive Onboarding Tour Trigger */}
+              {onOpenTourModal && (
+                <button
+                  onClick={() => {
+                    onOpenTourModal();
+                    sound.play('click');
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono bg-cyan-950/60 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-800/60 transition-all shadow-sm"
+                  title="Interactive Guided Tour of Platform"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="hidden xl:inline">TOUR</span>
+                </button>
+              )}
+
+              {/* Structured Audit Logs Trigger */}
+              {onOpenAuditLogModal && (
+                <button
+                  onClick={() => {
+                    onOpenAuditLogModal();
+                    sound.play('click');
+                  }}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-all shadow-sm"
+                  title="Autonomous Audit Logs & Trace"
+                >
+                  <FileText className="w-3.5 h-3.5 text-slate-400" />
+                  <span className="hidden xl:inline">AUDIT</span>
                 </button>
               )}
 

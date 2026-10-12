@@ -45,7 +45,10 @@ export type VoiceTradeCommandType =
   | 'TOGGLE_BOT'
   | 'ARM_SNIPER'
   | 'REPLENISH_ANCHOR'
-  | 'SWITCH_SYMBOL';
+  | 'SWITCH_SYMBOL'
+  | 'TIGHTEN_STOP'
+  | 'SHOW_AGENT_VOTES'
+  | 'EXPORT_JOURNAL';
 
 export interface VoiceTradeCommand {
   type: VoiceTradeCommandType;
@@ -56,6 +59,7 @@ export interface VoiceTradeCommand {
     stake?: number;
     enabled?: boolean;
     symbol?: string;
+    distance?: number;
   };
   feedbackMessage: string;
 }
@@ -234,8 +238,8 @@ export function parseVoiceTradeCommand(transcript: string): VoiceTradeCommand | 
     };
   }
 
-  // 8. Symbol Switch: "Switch to Volatility 10", "Select Volatility 100"
-  const symMatch = lower.match(/\b(?:switch to|select|trade|change to)?\s*(?:volatility|vol)\s*(10|25|50|75|100)(?:\s*(?:1s|1\s*second))?\b/i);
+  // 8. Symbol Switch / Rotation: "Rotate to Volatility 75", "Switch to Volatility 10", "Select Volatility 100"
+  const symMatch = lower.match(/\b(?:rotate(?:\s+to)?|switch(?:\s+to)?|select|trade|change\s+to)\s*(?:volatility|vol)\s*(10|25|50|75|100)(?:\s*(?:1s|1\s*second))?\b/i);
   if (symMatch) {
     const num = symMatch[1];
     const is1s = lower.includes('1s') || lower.includes('1 second');
@@ -244,7 +248,35 @@ export function parseVoiceTradeCommand(transcript: string): VoiceTradeCommand | 
       type: 'SWITCH_SYMBOL',
       rawText: text,
       payload: { symbol: symbolCode },
-      feedbackMessage: `Market switched to Volatility ${num}${is1s ? ' 1-second' : ''}.`,
+      feedbackMessage: `Market rotated to Volatility ${num}${is1s ? ' 1-second' : ''}.`,
+    };
+  }
+
+  // 9. Tighten Stop: "Tighten stop", "Tighten stop loss", "Tighten trailing stop"
+  if (/\b(?:tighten|lock\s*in|shorten)\s*(?:trailing\s*)?(?:stop|stop\s*loss|tsl)\b/i.test(lower)) {
+    return {
+      type: 'TIGHTEN_STOP',
+      rawText: text,
+      payload: { distance: 0.8 },
+      feedbackMessage: 'Trailing stop-loss tightened by 0.8 ATR.',
+    };
+  }
+
+  // 10. Show Agent Votes: "Show agent votes", "Show votes", "Display agent votes"
+  if (/\b(?:show|display|toggle|enable)\s*(?:agent\s*)?(?:votes|consensus)\b/i.test(lower)) {
+    return {
+      type: 'SHOW_AGENT_VOTES',
+      rawText: text,
+      feedbackMessage: 'Agent vote annotations enabled on chart.',
+    };
+  }
+
+  // 11. Export Journal: "Export journal", "Download journal", "Save journal"
+  if (/\b(?:export|download|save|backup)\s*(?:trade\s*)?journal\b/i.test(lower)) {
+    return {
+      type: 'EXPORT_JOURNAL',
+      rawText: text,
+      feedbackMessage: 'Exporting trade journal to CSV format.',
     };
   }
 

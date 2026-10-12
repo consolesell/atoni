@@ -1,31 +1,70 @@
 import { ChartDrawing } from '../types/drawings';
+import { db, auth, doc, setDoc, getDoc } from './firebase';
 
 const STORAGE_PREFIX = 'deriv_chart_drawings_v2_';
 
 export function loadChartDrawings(symbol: string): ChartDrawing[] {
   try {
     const raw = localStorage.getItem(`${STORAGE_PREFIX}${symbol}`);
-    if (!raw) return [];
-    return JSON.parse(raw);
+    if (raw) {
+      return JSON.parse(raw);
+    }
   } catch (err) {
     console.warn('Failed to load chart drawings from localStorage', err);
-    return [];
   }
+  return [];
 }
 
-export function saveChartDrawings(symbol: string, drawings: ChartDrawing[]): void {
+export async function syncChartDrawingsFromFirestore(
+  symbol: string,
+  onLoaded?: (drawings: ChartDrawing[]) => void
+): Promise<ChartDrawing[] | null> {
+  try {
+    const user = auth?.currentUser;
+    if (!user || !db) return null;
+
+    const docRef = doc(db, 'users', user.uid, 'chart_drawings', symbol);
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      if (Array.isArray(data.drawings)) {
+        saveChartDrawings(symbol, data.drawings, false); // save to local without re-pushing
+        if (onLoaded) onLoaded(data.drawings);
+        return data.drawings;
+      }
+    }
+  } catch (err) {
+    console.warn('Firestore drawings sync notice:', err);
+  }
+  return null;
+}
+
+export function saveChartDrawings(symbol: string, drawings: ChartDrawing[], syncRemote = true): void {
   try {
     localStorage.setItem(`${STORAGE_PREFIX}${symbol}`, JSON.stringify(drawings));
+
+    if (syncRemote) {
+      const user = auth?.currentUser;
+      if (user && db) {
+        const docRef = doc(db, 'users', user.uid, 'chart_drawings', symbol);
+        setDoc(docRef, { drawings, updatedAt: Date.now() }, { merge: true }).catch(() => {});
+      }
+    }
   } catch (err) {
-    console.warn('Failed to save chart drawings to localStorage', err);
+    console.warn('Failed to save chart drawings', err);
   }
 }
 
 export function clearChartDrawings(symbol: string): void {
   try {
     localStorage.removeItem(`${STORAGE_PREFIX}${symbol}`);
+    const user = auth?.currentUser;
+    if (user && db) {
+      const docRef = doc(db, 'users', user.uid, 'chart_drawings', symbol);
+      setDoc(docRef, { drawings: [], updatedAt: Date.now() }, { merge: true }).catch(() => {});
+    }
   } catch (err) {
-    console.warn('Failed to clear chart drawings from localStorage', err);
+    console.warn('Failed to clear chart drawings', err);
   }
 }
 

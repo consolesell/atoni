@@ -20,6 +20,9 @@ class DerivWebSocketClient {
   private lastAuthorizeResponse: any = null;
   private linkedAccounts: DerivLinkedAccount[] = [];
   private reconnectAttempts = 0;
+  private pongTimeout: any = null;
+  private pendingSendQueue: any[] = [];
+  private lastMessageTimestamp = 0;
 
   constructor() {
     // Check localStorage for saved credentials & linked accounts
@@ -242,12 +245,27 @@ class DerivWebSocketClient {
 
         this.emit({ msg_type: 'connected', connected: true });
 
-        // Start Keep-Alive Ping every 20 seconds
+        // Start Keep-Alive Ping every 20 seconds with active Heartbeat Watchdog
         if (this.pingTimer) clearInterval(this.pingTimer);
         this.pingTimer = setInterval(() => {
           this.pingStartTimestamp = Date.now();
           this.send({ ping: 1 });
+
+          // Watchdog: If no message/pong received within 12s, consider socket a zombie and reconnect
+          if (this.pongTimeout) clearTimeout(this.pongTimeout);
+          this.pongTimeout = setTimeout(() => {
+            console.warn('[derivWS] Heartbeat watchdog timeout: no pong received in 12s. Reconnecting...');
+            this.reconnect();
+          }, 12000);
         }, 20000);
+
+        // Flush any queued payloads that were buffered during disconnect
+        while (this.pendingSendQueue.length > 0) {
+          const queued = this.pendingSendQueue.shift();
+          try {
+            this.send(queued);
+          } catch {}
+        }
 
         // If user provided a real token, authorize
         if (this.token) {
@@ -274,6 +292,13 @@ class DerivWebSocketClient {
       };
 
       this.ws.onmessage = (event) => {
+        // Reset watchdog timer on any incoming message frame
+        if (this.pongTimeout) {
+          clearTimeout(this.pongTimeout);
+          this.pongTimeout = null;
+        }
+        this.lastMessageTimestamp = Date.now();
+
         try {
           const data = JSON.parse(event.data);
 
@@ -355,6 +380,11 @@ class DerivWebSocketClient {
         this.ws.send(JSON.stringify(payload));
       } catch (err) {
         console.error('Failed to send payload to Deriv WS:', err);
+      }
+    } else {
+      // Buffer payload during reconnect / connecting state (cap at 25 items)
+      if (this.pendingSendQueue.length < 25) {
+        this.pendingSendQueue.push(payload);
       }
     }
   }
@@ -451,6 +481,42 @@ class DerivWebSocketClient {
       } catch {}
     }
     this.connect();
+  }
+
+  public disconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+      this.pongTimeout = null;
+    }
+    this.token = '';
+    this.lastAuthorizeResponse = null;
+    this.isConnecting = false;
+    this.reconnectAttempts = 0;
+    this.pendingSendQueue = [];
+
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('deriv_api_token');
+      localStorage.removeItem('deriv_active_loginid');
+    }
+
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {}
+      this.ws = null;
+    }
+
+    // Reconnect cleanly in demo simulation sandbox with $10,000 USD virtual anchor
+    this.connect();
+    this.emit({ msg_type: 'logged_out', success: true });
   }
 
   // Resilient fallback generator if WebSocket network is blocked

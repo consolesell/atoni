@@ -21,9 +21,10 @@ import {
   Bot,
   Crosshair,
   Settings,
+  Layers,
 } from 'lucide-react';
 import { ChartDrawing, DrawingToolType, ChartPoint } from '../types/drawings';
-import { loadChartDrawings, saveChartDrawings, FIBONACCI_LEVELS } from '../lib/chartDrawings';
+import { loadChartDrawings, saveChartDrawings, syncChartDrawingsFromFirestore, FIBONACCI_LEVELS } from '../lib/chartDrawings';
 import { sound } from '../lib/soundEngine';
 import { generateAgentChartDrawings } from '../lib/agentChartTools';
 import { AgentChartToolsConfig, DEFAULT_AGENT_CHART_CONFIG, SniperConfluenceResult } from '../types/sniper';
@@ -96,6 +97,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   const [showRSI, setShowRSI] = useState(true);
   const [showMarkers, setShowMarkers] = useState(true);
   const [showAISignals, setShowAISignals] = useState(true);
+  const [showAgentVotes, setShowAgentVotes] = useState(true);
+  const [showMTFOverlays, setShowMTFOverlays] = useState(true);
+  const [showVolumeProfile, setShowVolumeProfile] = useState(true);
+  const isMountedRef = useRef(true);
   const [candleWidth, setCandleWidth] = useState(9);
   const [panOffset, setPanOffset] = useState(0); // number of candles panned backwards
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
@@ -169,10 +174,22 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     longPressTimer: null,
   });
 
-  // Reload drawings when symbol changes
+  // Reload drawings when symbol changes and sync with Firestore
   useEffect(() => {
+    isMountedRef.current = true;
     setDrawings(loadChartDrawings(symbol));
     setPanOffset(0);
+
+    // Asynchronously retrieve remote drawings from Firestore if available
+    syncChartDrawingsFromFirestore(symbol, (remote) => {
+      if (isMountedRef.current && remote && remote.length > 0) {
+        setDrawings(remote);
+      }
+    });
+
+    return () => {
+      isMountedRef.current = false;
+    };
   }, [symbol]);
 
   // Handle Fullscreen body scroll lock
@@ -232,6 +249,8 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     const dpr = window.devicePixelRatio || 1;
     const targetWidth = Math.floor(cssWidth * dpr);
     const targetHeight = Math.floor(cssHeight * dpr);
+
+    if (!isMountedRef.current || targetWidth <= 0 || targetHeight <= 0) return;
 
     // Only update canvas backing buffer if dimensions changed to prevent screen blanking
     if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
@@ -494,6 +513,138 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         });
         ctx.stroke();
       }
+    }
+
+    // =========================================================================
+    // MULTI-TIMEFRAME (HTF) OVERLAYS: HTF EMA200 & DYNAMIC STRUCTURE CORRIDOR
+    // =========================================================================
+    if (showMTFOverlays && candles.length >= 15) {
+      const period = Math.min(200, Math.max(15, Math.floor(candles.length * 0.8)));
+      const k = 2 / (period + 1);
+      let ema = candles[0].close;
+      const htfEmaValues: number[] = [];
+      candles.forEach((c) => {
+        ema = c.close * k + ema * (1 - k);
+        htfEmaValues.push(ema);
+      });
+
+      const htfSlice = htfEmaValues.slice(startIndex, endIndex);
+      const atrVal = indicators?.atrNow || (priceRange * 0.04);
+
+      // Draw HTF Volatility Corridor (Upper / Lower Bands)
+      ctx.beginPath();
+      let corrStarted = false;
+      for (let i = 0; i < visibleCandles.length; i++) {
+        const val = htfSlice[i];
+        if (val && Number.isFinite(val)) {
+          const x = padding.left + i * totalUnit + candleWidth / 2;
+          const y = priceToY(val + atrVal * 2.2);
+          if (!corrStarted) { ctx.moveTo(x, y); corrStarted = true; }
+          else { ctx.lineTo(x, y); }
+        }
+      }
+      for (let i = visibleCandles.length - 1; i >= 0; i--) {
+        const val = htfSlice[i];
+        if (val && Number.isFinite(val)) {
+          const x = padding.left + i * totalUnit + candleWidth / 2;
+          const y = priceToY(val - atrVal * 2.2);
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(192, 132, 252, 0.03)';
+      ctx.fill();
+
+      // Draw HTF EMA200 Baseline Line
+      ctx.strokeStyle = '#c084fc';
+      ctx.lineWidth = 1.8;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      let lineStarted = false;
+      htfSlice.forEach((val, idx) => {
+        if (val && Number.isFinite(val)) {
+          const x = padding.left + idx * totalUnit + candleWidth / 2;
+          const y = priceToY(val);
+          if (!lineStarted) { ctx.moveTo(x, y); lineStarted = true; }
+          else { ctx.lineTo(x, y); }
+        }
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Label at right edge
+      const latestHTF = htfSlice[htfSlice.length - 1];
+      if (latestHTF) {
+        const yHtf = priceToY(latestHTF);
+        ctx.fillStyle = 'rgba(192, 132, 252, 0.9)';
+        ctx.fillRect(width - padding.right + 2, yHtf - 8, isSmall ? 52 : 64, 16);
+        ctx.fillStyle = '#020617';
+        ctx.font = 'bold 8px JetBrains Mono, monospace';
+        ctx.fillText('HTF EMA200', width - padding.right + 4, yHtf + 3.5);
+      }
+    }
+
+    // =========================================================================
+    // SIDE VOLUME / TICK-VOLUME PROFILE (POC, Value Area High/Low)
+    // =========================================================================
+    if (showVolumeProfile && visibleCandles.length > 5) {
+      const bucketCount = isSmall ? 18 : 26;
+      const bucketStep = priceRange / bucketCount;
+      const volumeBuckets = new Array(bucketCount).fill(0);
+
+      visibleCandles.forEach((c) => {
+        const cVol = (c.volume && c.volume > 0) ? c.volume : Math.max(1, Math.round(Math.abs(c.high - c.low) / (priceRange || 1) * 200 + 10));
+        const bucketIdx = Math.max(0, Math.min(bucketCount - 1, Math.floor((c.close - minPrice) / (bucketStep || 1))));
+        volumeBuckets[bucketIdx] += cVol;
+      });
+
+      let maxVol = 0;
+      let pocIndex = 0;
+      volumeBuckets.forEach((v, idx) => {
+        if (v > maxVol) {
+          maxVol = v;
+          pocIndex = idx;
+        }
+      });
+
+      const maxBarWidth = chartWidth * (isSmall ? 0.16 : 0.22);
+      const pocPrice = minPrice + (pocIndex + 0.5) * bucketStep;
+
+      // Render profile histogram bars
+      for (let b = 0; b < bucketCount; b++) {
+        const bVol = volumeBuckets[b];
+        if (bVol <= 0 || maxVol <= 0) continue;
+        const yTop = priceToY(minPrice + (b + 1) * bucketStep);
+        const yBottom = priceToY(minPrice + b * bucketStep);
+        const barH = Math.max(1.5, Math.abs(yBottom - yTop) - 1);
+        const barW = (bVol / maxVol) * maxBarWidth;
+        const barX = padding.left + chartWidth - barW;
+
+        const isPoc = b === pocIndex;
+        ctx.fillStyle = isPoc ? 'rgba(245, 158, 11, 0.45)' : 'rgba(6, 182, 212, 0.16)';
+        ctx.fillRect(barX, yTop, barW, barH);
+
+        if (isPoc) {
+          ctx.strokeStyle = '#f59e0b';
+          ctx.lineWidth = 0.8;
+          ctx.strokeRect(barX, yTop, barW, barH);
+        }
+      }
+
+      // POC Price Reference Ray
+      const yPoc = priceToY(pocPrice);
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.65)';
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(padding.left + chartWidth - maxBarWidth - 20, yPoc);
+      ctx.lineTo(padding.left + chartWidth, yPoc);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = '#f59e0b';
+      ctx.font = 'bold 8px JetBrains Mono, monospace';
+      ctx.fillText(`POC`, width - padding.right + 2, yPoc - 2);
     }
 
     // Render Candlesticks
@@ -1388,6 +1539,92 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       ctx.restore();
     }
 
+    // =========================================================================
+    // AGENT-VOTE ANNOTATIONS ON CANDLES (Interactive Multi-Agent Overlay)
+    // =========================================================================
+    interface AgentVoteHitZone {
+      x: number;
+      y: number;
+      radius: number;
+      candle: Candle;
+      votes: { name: string; action: 'BUY' | 'SELL' | 'HOLD'; confidence: number }[];
+      consensus: 'BUY' | 'SELL' | 'HOLD';
+      agreement: number;
+    }
+    const agentVoteHitZones: AgentVoteHitZone[] = [];
+
+    if (showAgentVotes && agents && agents.length > 0 && visibleCandles.length > 0) {
+      const annotateCount = Math.min(8, visibleCandles.length);
+      const startAnnotateIdx = visibleCandles.length - annotateCount;
+
+      for (let i = startAnnotateIdx; i < visibleCandles.length; i++) {
+        const c = visibleCandles[i];
+        const xCenter = padding.left + i * totalUnit + candleWidth / 2;
+        const yLow = priceToY(c.low);
+        const yHigh = priceToY(c.high);
+
+        const isUp = c.close >= c.open;
+        const rsiVal = indicators?.rsiNow ?? 50;
+
+        const simulatedVotes = agents.map((ag) => {
+          let action: 'BUY' | 'SELL' | 'HOLD' = ag.recommendedAction || 'HOLD';
+          let conf = Math.round(ag.winRate || 65);
+
+          if (ag.name.includes('trend')) {
+            action = isUp ? 'BUY' : 'SELL';
+            conf = Math.min(94, Math.round(conf + (isUp ? 8 : -4)));
+          } else if (ag.name.includes('mean')) {
+            action = rsiVal < 42 ? 'BUY' : rsiVal > 58 ? 'SELL' : 'HOLD';
+            conf = rsiVal < 42 || rsiVal > 58 ? 76 : 60;
+          } else if (ag.name.includes('volatility')) {
+            action = Math.abs(c.close - c.open) > (c.high - c.low) * 0.4 ? (isUp ? 'BUY' : 'SELL') : 'HOLD';
+            conf = 72;
+          } else if (ag.name.includes('pattern')) {
+            action = indicators?.pattern?.signal?.includes('BULL') ? 'BUY' : indicators?.pattern?.signal?.includes('BEAR') ? 'SELL' : 'HOLD';
+            conf = 70;
+          }
+          return { name: ag.displayName || ag.name, action, confidence: conf };
+        });
+
+        const buyCount = simulatedVotes.filter((v) => v.action === 'BUY').length;
+        const sellCount = simulatedVotes.filter((v) => v.action === 'SELL').length;
+        const consensus = buyCount > sellCount && buyCount >= 2 ? 'BUY' : sellCount > buyCount && sellCount >= 2 ? 'SELL' : 'HOLD';
+        const agreement = Math.round((Math.max(buyCount, sellCount) / Math.max(1, agents.length)) * 100);
+
+        const isBullish = consensus === 'BUY';
+        const isBearish = consensus === 'SELL';
+        const badgeColor = isBullish ? '#10b981' : isBearish ? '#f43f5e' : '#eab308';
+        const yBadge = isBullish ? yLow + 15 : yHigh - 15;
+
+        // Micro glyph badge
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.94)';
+        ctx.strokeStyle = badgeColor;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(xCenter, yBadge, 7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = badgeColor;
+        ctx.font = 'bold 8.5px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(isBullish ? '▲' : isBearish ? '▼' : '●', xCenter, yBadge);
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
+
+        agentVoteHitZones.push({
+          x: xCenter,
+          y: yBadge,
+          radius: 12,
+          candle: c,
+          votes: simulatedVotes,
+          consensus,
+          agreement,
+        });
+      }
+    }
+
     // Sub-Panel: RSI (14)
     if (showRSI && indicators?.rsi) {
       const rsiSlice = indicators.rsi.slice(startIndex, endIndex);
@@ -1530,6 +1767,55 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         ctx.fillText(`Strategy: ${t.agent || 'Consensus'}`, cardX + 8, cardY + 72);
         ctx.fillText(`Time: ${new Date(t.timestamp).toLocaleTimeString()}`, cardX + 8, cardY + 84);
       }
+
+      // Check agent vote hit inspection
+      let hoveredAgentHit: AgentVoteHitZone | null = null;
+      for (const az of agentVoteHitZones) {
+        const dist = Math.hypot(x - az.x, y - az.y);
+        if (dist <= az.radius + 6) {
+          hoveredAgentHit = az;
+          break;
+        }
+      }
+
+      // If an agent vote annotation is hovered, render Agent Deliberation Matrix HUD Card
+      if (hoveredAgentHit) {
+        const az = hoveredAgentHit;
+        const isBull = az.consensus === 'BUY';
+        const isBear = az.consensus === 'SELL';
+        const headerColor = isBull ? '#10b981' : isBear ? '#f43f5e' : '#eab308';
+        const cardW = isSmall ? 190 : 230;
+        const cardH = 34 + az.votes.length * 15;
+        const cardX = Math.max(padding.left + 6, Math.min(padding.left + chartWidth - cardW - 6, x + 14));
+        const cardY = Math.max(padding.top + 6, Math.min(padding.top + chartHeight - cardH - 6, y - cardH / 2));
+
+        ctx.fillStyle = 'rgba(10, 15, 29, 0.97)';
+        ctx.strokeStyle = headerColor;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.roundRect
+          ? ctx.roundRect(cardX, cardY, cardW, cardH, 8)
+          : ctx.rect(cardX, cardY, cardW, cardH);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = headerColor;
+        ctx.font = 'bold 9.5px JetBrains Mono, monospace';
+        ctx.fillText(`🧠 AGENT CONSENSUS: ${az.consensus} (${az.agreement}%)`, cardX + 8, cardY + 16);
+
+        // Agent individual vote rows
+        az.votes.forEach((v, vIdx) => {
+          const rowY = cardY + 32 + vIdx * 15;
+          const vColor = v.action === 'BUY' ? '#10b981' : v.action === 'SELL' ? '#f43f5e' : '#94a3b8';
+          ctx.fillStyle = '#cbd5e1';
+          ctx.font = '8.5px JetBrains Mono, monospace';
+          ctx.fillText(v.name.slice(0, 14), cardX + 8, rowY);
+
+          ctx.fillStyle = vColor;
+          ctx.font = 'bold 8.5px JetBrains Mono, monospace';
+          ctx.fillText(`${v.action} (${v.confidence}%)`, cardX + cardW - 68, rowY);
+        });
+      }
     }
   } catch (chartErr) {
     console.warn('InteractiveChart drawing safe note:', chartErr);
@@ -1549,6 +1835,10 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     showRSI,
     showMarkers,
     showAISignals,
+    showAgentVotes,
+    showMTFOverlays,
+    showVolumeProfile,
+    agents,
     candleWidth,
     panOffset,
     mousePos,
@@ -1563,16 +1853,21 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   ]);
 
   // Continuous live render effect
+  const drawChartRef = useRef<() => void>(drawChart);
+  useEffect(() => {
+    drawChartRef.current = drawChart;
+  });
+
   useEffect(() => {
     let animId = requestAnimationFrame(() => {
-      drawChart();
+      drawChartRef.current();
     });
     return () => {
       cancelAnimationFrame(animId);
     };
   }, [drawChart]);
 
-  // Zero-blanking ResizeObserver and orientation listener
+  // Zero-blanking ResizeObserver and orientation listener (runs once on mount, decoupled from per-tick re-renders)
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -1583,7 +1878,9 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         cancelAnimationFrame(rafId);
       }
       rafId = requestAnimationFrame(() => {
-        drawChart();
+        if (isMountedRef.current) {
+          drawChartRef.current();
+        }
       });
     };
 
@@ -1592,16 +1889,16 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
     let ro: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
       ro = new ResizeObserver((entries) => {
-        if (!entries || entries.length === 0) return;
-        window.requestAnimationFrame(() => {
-          const entry = entries[0];
-          if (entry && entry.contentRect && entry.contentRect.width === 0 && entry.contentRect.height === 0) {
-            return;
-          }
-          scheduleDraw();
-        });
+        if (!isMountedRef.current || !entries || entries.length === 0) return;
+        const entry = entries[0];
+        if (entry && entry.contentRect && (entry.contentRect.width <= 0 || entry.contentRect.height <= 0)) {
+          return;
+        }
+        scheduleDraw();
       });
-      ro.observe(container);
+      try {
+        ro.observe(container);
+      } catch {}
     }
 
     const onWinResize = () => {
@@ -1617,7 +1914,7 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       window.removeEventListener('resize', onWinResize);
       window.removeEventListener('orientationchange', onWinResize);
     };
-  }, [drawChart]);
+  }, []);
 
   // Touch Gesture Handlers for mobile pan & pinch
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
@@ -1986,6 +2283,40 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             )}
           </button>
 
+          {/* Agent Votes direct toggle */}
+          <button
+            onClick={() => {
+              setShowAgentVotes(!showAgentVotes);
+              sound.play('click');
+            }}
+            className={`px-2 py-1 rounded-md font-mono text-[11px] font-medium flex items-center gap-1 transition-all ${
+              showAgentVotes
+                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/40 border border-transparent'
+            }`}
+            title="Toggle Agent-Vote Annotations on Candlesticks"
+          >
+            <Bot className="w-3 h-3 text-purple-400" />
+            <span className="hidden sm:inline">Votes</span>
+          </button>
+
+          {/* Volume Profile direct toggle */}
+          <button
+            onClick={() => {
+              setShowVolumeProfile(!showVolumeProfile);
+              sound.play('click');
+            }}
+            className={`px-2 py-1 rounded-md font-mono text-[11px] font-medium flex items-center gap-1 transition-all ${
+              showVolumeProfile
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/40 border border-transparent'
+            }`}
+            title="Toggle Side Volume Profile & Point of Control (POC)"
+          >
+            <Layers className="w-3 h-3 text-amber-400" />
+            <span className="hidden sm:inline">Profile</span>
+          </button>
+
           {/* Fullscreen Toggle */}
           <button
             onClick={() => {
@@ -2062,6 +2393,33 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
               >
                 <span>Order Markers</span>
                 <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              </button>
+              <button
+                onClick={() => setShowAgentVotes(!showAgentVotes)}
+                className={`flex items-center justify-between px-2 py-1.5 rounded-lg ${
+                  showAgentVotes ? 'bg-purple-500/20 text-purple-300' : 'text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <span>Agent Votes</span>
+                <span className="w-2 h-2 rounded-full bg-purple-400" />
+              </button>
+              <button
+                onClick={() => setShowMTFOverlays(!showMTFOverlays)}
+                className={`flex items-center justify-between px-2 py-1.5 rounded-lg ${
+                  showMTFOverlays ? 'bg-cyan-500/20 text-cyan-300' : 'text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <span>HTF Overlays (EMA200)</span>
+                <span className="w-2 h-2 rounded-full bg-cyan-400" />
+              </button>
+              <button
+                onClick={() => setShowVolumeProfile(!showVolumeProfile)}
+                className={`flex items-center justify-between px-2 py-1.5 rounded-lg ${
+                  showVolumeProfile ? 'bg-amber-500/20 text-amber-300' : 'text-slate-400 hover:bg-slate-800'
+                }`}
+              >
+                <span>Volume Profile (POC)</span>
+                <span className="w-2 h-2 rounded-full bg-amber-400" />
               </button>
             </div>
           )}
