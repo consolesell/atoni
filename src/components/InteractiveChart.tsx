@@ -2742,7 +2742,66 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       >
-        <canvas ref={canvasRef} className="w-full h-full block" />
+        <canvas
+          ref={canvasRef}
+          className={`w-full h-full block transition-opacity duration-200 ${
+            !candles || candles.length === 0 ? 'opacity-0' : 'opacity-100'
+          }`}
+        />
+
+        {/* Skeleton Loading State with Subtle Candle Placeholders */}
+        {(!candles || candles.length === 0) && (
+          <div className="absolute inset-0 z-20 flex flex-col justify-between p-4 pointer-events-none bg-slate-950/80 backdrop-blur-xs animate-in fade-in duration-150">
+            {/* Grid Line Guides */}
+            <div className="absolute inset-0 flex flex-col justify-between opacity-15 pointer-events-none p-6">
+              <div className="w-full border-b border-dashed border-cyan-400" />
+              <div className="w-full border-b border-dashed border-slate-600" />
+              <div className="w-full border-b border-dashed border-cyan-400" />
+              <div className="w-full border-b border-dashed border-slate-600" />
+              <div className="w-full border-b border-dashed border-slate-600" />
+            </div>
+
+            {/* Simulated Candlestick Shimmer Columns */}
+            <div className="relative flex-1 flex items-center justify-around gap-1.5 sm:gap-2 px-2 overflow-hidden">
+              {[
+                { h: '42%', top: '28%', wick: '64%' },
+                { h: '55%', top: '22%', wick: '72%' },
+                { h: '38%', top: '35%', wick: '54%' },
+                { h: '62%', top: '18%', wick: '80%' },
+                { h: '48%', top: '26%', wick: '68%' },
+                { h: '34%', top: '42%', wick: '50%' },
+                { h: '58%', top: '20%', wick: '76%' },
+                { h: '68%', top: '14%', wick: '88%' },
+                { h: '52%', top: '24%', wick: '70%' },
+                { h: '40%', top: '34%', wick: '58%' },
+                { h: '60%', top: '18%', wick: '78%' },
+                { h: '45%', top: '30%', wick: '62%' },
+                { h: '50%', top: '25%', wick: '69%' },
+                { h: '70%', top: '12%', wick: '90%' },
+                { h: '56%', top: '22%', wick: '74%' },
+              ].map((c, i) => (
+                <div key={i} className="flex-1 max-w-[14px] h-full flex flex-col items-center justify-center relative">
+                  <div
+                    className="w-0.5 bg-slate-700/60 rounded-full"
+                    style={{ height: c.wick }}
+                  />
+                  <div
+                    className="w-full rounded-sm skeleton-shimmer absolute"
+                    style={{ height: c.h, top: c.top }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            {/* Center Loading Indicator */}
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="px-3.5 py-1.5 rounded-full bg-slate-900/90 border border-cyan-500/30 text-cyan-300 font-mono text-xs flex items-center gap-2 shadow-2xl backdrop-blur-md">
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                <span className="font-bold tracking-wider">CONNECTING STREAM · {symbol}</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Legend Overlay at Top Left */}
         <div className="absolute top-2.5 left-2.5 sm:left-3 flex flex-wrap items-center gap-2 text-[10px] sm:text-[11px] font-mono pointer-events-none bg-slate-950/75 backdrop-blur-md px-2 py-1 rounded-lg border border-slate-800/80">

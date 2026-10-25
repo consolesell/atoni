@@ -2016,7 +2016,7 @@ export default function App() {
       />
 
       {/* Main Body Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 lg:p-6 pb-28 lg:pb-8 flex flex-col gap-3.5 sm:gap-5">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 lg:p-6 pb-36 sm:pb-32 lg:pb-8 flex flex-col gap-3.5 sm:gap-5">
         {/* Real-time Ticker & Market Header */}
         <LivePriceHeader
           selectedSymbol={selectedSymbol}
@@ -2044,190 +2044,188 @@ export default function App() {
           latencyMs={derivWS.getLastLatency()}
         />
 
-        {/* View 1: Main Trading Terminal */}
-        {activeTab === 'terminal' && (
-          <div className="flex flex-col gap-4">
-            {/* Blackbox Quick Status Ribbon */}
-            <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-900/90 border border-slate-800 rounded-xl text-xs font-mono shadow-md backdrop-blur-md">
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('blackbox')}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30 font-bold transition-all"
-                >
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                  <span>BLACKBOX HUB</span>
-                </button>
-                <span className="text-slate-600 hidden sm:inline">•</span>
-                <span className="text-slate-300 flex items-center gap-1">
-                  <span>🔒 Profit Lock:</span>
-                  <span className="text-amber-400 font-bold">
-                    {trailingStopConfig.profitLockEnabled ? `ON (${trailingStopConfig.profitLockThresholdPercent ?? 50}%)` : 'OFF'}
-                  </span>
+        {/* View 1: Main Trading Terminal (Persistently mounted to prevent chart canvas remount flash) */}
+        <div className={`flex flex-col gap-4 ${activeTab === 'terminal' ? 'block tab-crossfade-enter' : 'hidden'}`}>
+          {/* Blackbox Quick Status Ribbon */}
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-slate-900/90 border border-slate-800 rounded-xl text-xs font-mono shadow-md backdrop-blur-md">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setActiveTab('blackbox')}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-500/30 font-bold transition-all"
+              >
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                <span>BLACKBOX HUB</span>
+              </button>
+              <span className="text-slate-600 hidden sm:inline">•</span>
+              <span className="text-slate-300 flex items-center gap-1">
+                <span>🔒 Profit Lock:</span>
+                <span className="text-amber-400 font-bold">
+                  {trailingStopConfig.profitLockEnabled ? `ON (${trailingStopConfig.profitLockThresholdPercent ?? 50}%)` : 'OFF'}
                 </span>
-                <span className="text-slate-600 hidden sm:inline">•</span>
-                <span className="text-slate-300 flex items-center gap-1">
-                  <span>Martingale ($1 Anchor):</span>
-                  <span className="text-cyan-300 font-bold">
-                    ${martingaleState.currentStake.toFixed(2)} (Step {martingaleState.currentStep}/3)
-                  </span>
+              </span>
+              <span className="text-slate-600 hidden sm:inline">•</span>
+              <span className="text-slate-300 flex items-center gap-1">
+                <span>Martingale ($1 Anchor):</span>
+                <span className="text-cyan-300 font-bold">
+                  ${martingaleState.currentStake.toFixed(2)} (Step {martingaleState.currentStep}/3)
                 </span>
-                <span className="text-slate-600 hidden sm:inline">•</span>
-                <span className="text-slate-300 flex items-center gap-1">
-                  <span>Win Filter Gate:</span>
-                  <span className={`font-bold ${highestWinGate?.passed ? 'text-emerald-400' : 'text-amber-400'}`}>
-                    {highestWinGate?.passed ? `PASSED (${highestWinGate.winProbabilityScore}%)` : 'SELECTIVE'}
-                  </span>
+              </span>
+              <span className="text-slate-600 hidden sm:inline">•</span>
+              <span className="text-slate-300 flex items-center gap-1">
+                <span>Win Filter Gate:</span>
+                <span className={`font-bold ${highestWinGate?.passed ? 'text-emerald-400' : 'text-amber-400'}`}>
+                  {highestWinGate?.passed ? `PASSED (${highestWinGate.winProbabilityScore}%)` : 'SELECTIVE'}
                 </span>
-                <span className="text-slate-600 hidden sm:inline">•</span>
-                <span className="text-slate-300 flex items-center gap-1.5" title="Web Worker background computation latency">
-                  <span className={`w-1.5 h-1.5 rounded-full ${workerStats.isWorkerActive ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-                  <span className="text-slate-400">Worker:</span>
-                  <span className="text-emerald-400 font-bold">{workerStats.calculationTimeMs.toFixed(1)}ms</span>
-                </span>
-              </div>
-
-              {!isLiveMode && balance < 2.0 && (
-                <button
-                  type="button"
-                  onClick={handleReplenishVirtualAnchor}
-                  className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold hover:bg-amber-500/30 transition-all animate-pulse"
-                >
-                  Replenish Anchor ($10)
-                </button>
-              )}
+              </span>
+              <span className="text-slate-600 hidden sm:inline">•</span>
+              <span className="text-slate-300 flex items-center gap-1.5" title="Web Worker background computation latency">
+                <span className={`w-1.5 h-1.5 rounded-full ${workerStats.isWorkerActive ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                <span className="text-slate-400">Worker:</span>
+                <span className="text-emerald-400 font-bold">{workerStats.calculationTimeMs.toFixed(1)}ms</span>
+              </span>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
-              {/* Left Column: Interactive Canvas Chart & Active Positions */}
-              <div className="lg:col-span-8 flex flex-col gap-4 sm:gap-5">
-              <ChartErrorBoundary
-                fallbackSymbol={selectedSymbol}
-                onReset={() => {
+            {!isLiveMode && balance < 2.0 && (
+              <button
+                type="button"
+                onClick={handleReplenishVirtualAnchor}
+                className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold hover:bg-amber-500/30 transition-all animate-pulse"
+              >
+                Replenish Anchor ($10)
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+            {/* Left Column: Interactive Canvas Chart & Active Positions */}
+            <div className="lg:col-span-8 flex flex-col gap-4 sm:gap-5">
+            <ChartErrorBoundary
+              fallbackSymbol={selectedSymbol}
+              onReset={() => {
+                derivWS.fetchCandles(selectedSymbol, granularity, 120);
+                triggerAIScan();
+              }}
+            >
+              <InteractiveChart
+                candles={candles}
+                currentPrice={currentPrice}
+                openTrades={openTrades}
+                closedTrades={closedTrades}
+                indicators={indicators}
+                granularity={granularity}
+                onGranularityChange={(g) => setGranularity(g)}
+                onRefresh={() => {
                   derivWS.fetchCandles(selectedSymbol, granularity, 120);
                   triggerAIScan();
                 }}
-              >
-                <InteractiveChart
-                  candles={candles}
-                  currentPrice={currentPrice}
-                  openTrades={openTrades}
-                  closedTrades={closedTrades}
-                  indicators={indicators}
-                  granularity={granularity}
-                  onGranularityChange={(g) => setGranularity(g)}
-                  onRefresh={() => {
-                    derivWS.fetchCandles(selectedSymbol, granularity, 120);
-                    triggerAIScan();
-                  }}
-                  symbol={selectedSymbol}
-                  aiPrediction={aiPrediction}
-                  onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
-                  stake={stake}
-                  onStakeChange={setStake}
-                  isExecuting={isExecuting}
-                  currency={currency}
-                  algorithmicDecision={algorithmicDecision}
-                  regime={regime}
-                  agents={agents}
-                  sniperSetup={sniperSetup}
-                  onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
-                />
-              </ChartErrorBoundary>
-
-              <PositionsDrawer
-                openTrades={openTrades}
-                closedTrades={closedTrades}
-                currentPrice={currentPrice}
-                onEarlyExit={handleEarlyExit}
-                onOpenCritiqueModal={(trade) => setSelectedCritiqueTrade(trade)}
-              />
-            </div>
-
-            {/* Right Column: Autonomy Control, Trade Execution Deck & AI Intelligence Card */}
-            <div className="lg:col-span-4 flex flex-col gap-5">
-              <AutonomyCard
-                autonomyMode={autonomyMode}
-                sbagentAutonomyGrant={sbagentAutonomyGrant}
-                autonomyPreset={autonomyPreset}
-                appliedSettings={appliedAutonomySettings}
-                lastError={lastAutonomyError}
-                onRunAutonomously={handleRunAutonomously}
-                onStopAutonomy={handleStopAutonomy}
-                onConfigure={handleConfigureAutonomy}
-                currentSymbol={selectedSymbol}
-                balance={balance}
-              />
-
-              <TradeControls
+                symbol={selectedSymbol}
+                aiPrediction={aiPrediction}
+                onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
                 stake={stake}
                 onStakeChange={setStake}
-                duration={duration}
-                durationUnit={durationUnit}
-                onDurationChange={(dur, unit) => {
-                  setDuration(dur);
-                  if (unit) setDurationUnit(unit);
-                }}
-                direction={direction}
-                onDirectionChange={setDirection}
-                onExecuteTrade={(customTSL) =>
-                  executeTrade(direction, stake, duration, 'MANUAL', durationUnit, undefined, customTSL ?? trailingStopConfig)
-                }
                 isExecuting={isExecuting}
-                aiPrediction={aiPrediction}
-                algorithmicDecision={algorithmicDecision}
                 currency={currency}
-                isLiveMode={isLiveMode}
-                sizingMode={sizingMode}
-                onSizingModeChange={setSizingMode}
-                riskMetrics={coreRiskMetrics}
-                recommendedKellyStake={dynamicStake}
+                algorithmicDecision={algorithmicDecision}
+                regime={regime}
+                agents={agents}
                 sniperSetup={sniperSetup}
-                currentPrice={currentPrice}
-                trailingStopConfig={trailingStopConfig}
-                onTrailingStopConfigChange={(cfg) => {
-                  setTrailingStopConfig(cfg);
-                  updateTrailingStop(cfg);
-                }}
                 onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
-                onExecuteSniperTrade={(dir, s, dur, unit, sniperTSL) => {
-                  executeTrade(
-                    dir,
-                    s,
-                    dur,
-                    'MANUAL',
-                    unit,
-                    {
-                      isSniperTrade: true,
-                      confluenceScore: sniperSetup?.score || 85,
-                      entryTarget: sniperSetup?.optimalEntryPrice || currentPrice,
-                      takeProfitTarget: sniperSetup?.takeProfitPrice,
-                      stopLossTarget: sniperSetup?.stopLossPrice,
-                    },
-                    sniperTSL ?? trailingStopConfig
-                  );
-                }}
-                isSniperTriggerArmed={isSniperTriggerArmed}
-                onToggleSniperTrigger={() => {
-                  setIsSniperTriggerArmed(!isSniperTriggerArmed);
-                  sound.play('toggle');
-                }}
               />
+            </ChartErrorBoundary>
 
-              <AIPredictionCard
-                prediction={aiPrediction}
-                isLoading={isLoadingAI}
-                onRefresh={triggerAIScan}
-                symbol={selectedSymbol}
-              />
-            </div>
+            <PositionsDrawer
+              openTrades={openTrades}
+              closedTrades={closedTrades}
+              currentPrice={currentPrice}
+              onEarlyExit={handleEarlyExit}
+              onOpenCritiqueModal={(trade) => setSelectedCritiqueTrade(trade)}
+            />
+          </div>
+
+          {/* Right Column: Autonomy Control, Trade Execution Deck & AI Intelligence Card */}
+          <div className="lg:col-span-4 flex flex-col gap-5">
+            <AutonomyCard
+              autonomyMode={autonomyMode}
+              sbagentAutonomyGrant={sbagentAutonomyGrant}
+              autonomyPreset={autonomyPreset}
+              appliedSettings={appliedAutonomySettings}
+              lastError={lastAutonomyError}
+              onRunAutonomously={handleRunAutonomously}
+              onStopAutonomy={handleStopAutonomy}
+              onConfigure={handleConfigureAutonomy}
+              currentSymbol={selectedSymbol}
+              balance={balance}
+            />
+
+            <TradeControls
+              stake={stake}
+              onStakeChange={setStake}
+              duration={duration}
+              durationUnit={durationUnit}
+              onDurationChange={(dur, unit) => {
+                setDuration(dur);
+                if (unit) setDurationUnit(unit);
+              }}
+              direction={direction}
+              onDirectionChange={setDirection}
+              onExecuteTrade={(customTSL) =>
+                executeTrade(direction, stake, duration, 'MANUAL', durationUnit, undefined, customTSL ?? trailingStopConfig)
+              }
+              isExecuting={isExecuting}
+              aiPrediction={aiPrediction}
+              algorithmicDecision={algorithmicDecision}
+              currency={currency}
+              isLiveMode={isLiveMode}
+              sizingMode={sizingMode}
+              onSizingModeChange={setSizingMode}
+              riskMetrics={coreRiskMetrics}
+              recommendedKellyStake={dynamicStake}
+              sniperSetup={sniperSetup}
+              currentPrice={currentPrice}
+              trailingStopConfig={trailingStopConfig}
+              onTrailingStopConfigChange={(cfg) => {
+                setTrailingStopConfig(cfg);
+                updateTrailingStop(cfg);
+              }}
+              onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
+              onExecuteSniperTrade={(dir, s, dur, unit, sniperTSL) => {
+                executeTrade(
+                  dir,
+                  s,
+                  dur,
+                  'MANUAL',
+                  unit,
+                  {
+                    isSniperTrade: true,
+                    confluenceScore: sniperSetup?.score || 85,
+                    entryTarget: sniperSetup?.optimalEntryPrice || currentPrice,
+                    takeProfitTarget: sniperSetup?.takeProfitPrice,
+                    stopLossTarget: sniperSetup?.stopLossPrice,
+                  },
+                  sniperTSL ?? trailingStopConfig
+                );
+              }}
+              isSniperTriggerArmed={isSniperTriggerArmed}
+              onToggleSniperTrigger={() => {
+                setIsSniperTriggerArmed(!isSniperTriggerArmed);
+                sound.play('toggle');
+              }}
+            />
+
+            <AIPredictionCard
+              prediction={aiPrediction}
+              isLoading={isLoadingAI}
+              onRefresh={triggerAIScan}
+              symbol={selectedSymbol}
+            />
           </div>
         </div>
-      )}
+      </div>
 
         {/* View 2: Multi-Agent & Mathematical Analytics */}
         {activeTab === 'analytics' && (
-          <div className="flex flex-col gap-6">
+          <div className="flex flex-col gap-6 tab-crossfade-enter">
             {/* D3-based Daily Cumulative P&L Historical Curve & Ledger */}
             <DailyCumulativePnLChart
               closedTrades={closedTrades}
@@ -2265,7 +2263,7 @@ export default function App() {
 
         {/* View 3: Gemini Co-Pilot Chat */}
         {activeTab === 'copilot' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 tab-crossfade-enter">
             <div className="lg:col-span-8">
               <AICopilotChat
                 symbol={selectedSymbol}
@@ -2296,7 +2294,7 @@ export default function App() {
 
         {/* View 4: Market Win/Loss Matrix & Manual Rotation Decision Hub */}
         {activeTab === 'markets' && (
-          <div className="flex flex-col gap-6">
+          <div className="flex flex-col gap-6 tab-crossfade-enter">
             <SymbolPerformanceMatrix
               allowedSymbols={botState.allowedRotationSymbols}
               closedTrades={closedTrades}
@@ -2318,37 +2316,39 @@ export default function App() {
 
         {/* View 5: Autonomous Intelligence Hub (Blackbox) */}
         {activeTab === 'blackbox' && (
-          <BlackboxHubView
-            symbol={selectedSymbol}
-            currentPrice={currentPrice}
-            regime={regime}
-            indicators={indicators}
-            agents={agents}
-            decision={algorithmicDecision}
-            sniperSetup={sniperSetup}
-            highestWinGate={highestWinGate}
-            marketStability={marketStability}
-            martingaleState={martingaleState}
-            onUpdateMartingaleState={(updates) => setMartingaleState((prev) => ({ ...prev, ...updates }))}
-            trailingStopConfig={trailingStopConfig}
-            onUpdateTrailingStopConfig={setTrailingStopConfig}
-            botEnabled={botState.enabled}
-            onToggleBot={() => {
-              sound.play('toggle');
-              if (botState.enabled) {
-                handleStopAutonomy('user_button');
-              } else {
-                handleRunAutonomously();
-              }
-            }}
-            balance={balance}
-            onReplenishVirtualAnchor={handleReplenishVirtualAnchor}
-            onSelectSymbol={(sym) => {
-              setSelectedSymbol(sym);
-              derivWS.fetchCandles(sym, granularity, 120);
-              derivWS.subscribeTicks(sym);
-            }}
-          />
+          <div className="tab-crossfade-enter">
+            <BlackboxHubView
+              symbol={selectedSymbol}
+              currentPrice={currentPrice}
+              regime={regime}
+              indicators={indicators}
+              agents={agents}
+              decision={algorithmicDecision}
+              sniperSetup={sniperSetup}
+              highestWinGate={highestWinGate}
+              marketStability={marketStability}
+              martingaleState={martingaleState}
+              onUpdateMartingaleState={(updates) => setMartingaleState((prev) => ({ ...prev, ...updates }))}
+              trailingStopConfig={trailingStopConfig}
+              onUpdateTrailingStopConfig={setTrailingStopConfig}
+              botEnabled={botState.enabled}
+              onToggleBot={() => {
+                sound.play('toggle');
+                if (botState.enabled) {
+                  handleStopAutonomy('user_button');
+                } else {
+                  handleRunAutonomously();
+                }
+              }}
+              balance={balance}
+              onReplenishVirtualAnchor={handleReplenishVirtualAnchor}
+              onSelectSymbol={(sym) => {
+                setSelectedSymbol(sym);
+                derivWS.fetchCandles(sym, granularity, 120);
+                derivWS.subscribeTicks(sym);
+              }}
+            />
+          </div>
         )}
       </main>
 
@@ -2525,6 +2525,10 @@ export default function App() {
         isLiveMode={isLiveMode}
         isHoldAdvised={algorithmicDecision?.action === 'HOLD'}
         holdReason={algorithmicDecision?.reason}
+        autonomyMode={autonomyMode}
+        sbagentAutonomyGrant={sbagentAutonomyGrant}
+        onRunAutonomously={handleRunAutonomously}
+        onStopAutonomy={handleStopAutonomy}
       />
 
       {/* System Copilot Persistent FAB & Bottom-Sheet */}

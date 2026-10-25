@@ -1,8 +1,9 @@
 node_modules/
 build/
-dist/
+# dist/ - keep production build intact for Cloud Run deployment
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
+

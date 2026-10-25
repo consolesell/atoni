@@ -1794,20 +1794,59 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    if (fs.existsSync(distPath)) {
-      app.use(express.static(distPath));
-      app.get("*", (_req, res) => {
-        res.sendFile(path.join(distPath, "index.html"));
+    const indexPath = path.join(distPath, "index.html");
+
+    if (fs.existsSync(indexPath)) {
+      console.log(`📦 Serving static production build from ${distPath}`);
+      app.use(express.static(distPath, { index: false }));
+      app.get("*", (req, res, next) => {
+        if (req.path.startsWith("/api") || req.path.startsWith("/auth") || req.path === "/health") {
+          return next();
+        }
+        if (fs.existsSync(indexPath)) {
+          res.sendFile(indexPath, (err) => {
+            if (err && !res.headersSent) {
+              console.warn("Error serving dist/index.html, forwarding:", err.message);
+              next(err);
+            }
+          });
+        } else {
+          next();
+        }
       });
     } else {
-      console.warn("⚠️ Production mode active but dist/ directory not found. Serving via Vite middlewares fallback.");
+      console.warn("⚠️ Production mode active but dist/index.html not found. Serving via Vite middlewares fallback.");
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa",
       });
       app.use(vite.middlewares);
+      app.get("*", async (req, res, next) => {
+        if (req.path.startsWith("/api") || req.path.startsWith("/auth") || req.path === "/health") {
+          return next();
+        }
+        const rootIndexHtml = path.join(process.cwd(), "index.html");
+        if (fs.existsSync(rootIndexHtml)) {
+          try {
+            const template = fs.readFileSync(rootIndexHtml, "utf-8");
+            const html = await vite.transformIndexHtml(req.originalUrl, template);
+            return res.status(200).set({ "Content-Type": "text/html" }).end(html);
+          } catch (e) {
+            return next(e);
+          }
+        }
+        next();
+      });
     }
   }
+
+  // Global Express error handler to prevent container crashes on unexpected static or API errors
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error("Unhandled Express server error:", err?.message || err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal Server Error", message: err?.message || "Server Error" });
+    }
+  });
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`🚀 Deriv AI Trader Pro Server running at http://0.0.0.0:${PORT}`);

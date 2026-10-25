@@ -1,7 +1,20 @@
-import React, { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Minus, Plus, Bot, Clock, Mic, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  Plus,
+  Bot,
+  Clock,
+  Mic,
+  AlertTriangle,
+  Play,
+  Square,
+  Cpu,
+} from 'lucide-react';
 import { sound } from '../lib/soundEngine';
 import { voiceInput } from '../lib/voiceInputEngine';
+import { AutonomyMode } from '../types/autonomy';
 
 interface MobileExecutionBarProps {
   stake: number;
@@ -16,6 +29,10 @@ interface MobileExecutionBarProps {
   isLiveMode: boolean;
   isHoldAdvised?: boolean;
   holdReason?: string;
+  autonomyMode?: AutonomyMode;
+  sbagentAutonomyGrant?: boolean;
+  onRunAutonomously?: () => void;
+  onStopAutonomy?: (reason?: string) => void;
 }
 
 export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
@@ -31,13 +48,33 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
   isLiveMode,
   isHoldAdvised = false,
   holdReason,
+  autonomyMode = 'OFF',
+  sbagentAutonomyGrant = false,
+  onRunAutonomously,
+  onStopAutonomy,
 }) => {
   const [isVoiceListening, setIsVoiceListening] = useState(voiceInput.getIsListening());
   const durations = [5, 10, 15, 30];
+  const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const unsub = voiceInput.subscribe((listening) => setIsVoiceListening(listening));
     return () => unsub();
+  }, []);
+
+  // Dynamically sync real execution bar height to CSS variable for zero-overlap docking
+  useEffect(() => {
+    if (!barRef.current) return;
+    const updateHeight = () => {
+      if (barRef.current) {
+        const height = barRef.current.offsetHeight;
+        document.documentElement.style.setProperty('--mobile-exec-bar-height', `${Math.round(height)}px`);
+      }
+    };
+    updateHeight();
+    const ro = new ResizeObserver(updateHeight);
+    ro.observe(barRef.current);
+    return () => ro.disconnect();
   }, []);
 
   const handleCycleDuration = () => {
@@ -52,7 +89,10 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
   };
 
   return (
-    <div className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-slate-950/95 border-t border-slate-800/90 backdrop-blur-xl px-3 py-2 pb-safe shadow-2xl">
+    <div
+      ref={barRef}
+      className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-slate-950/95 border-t border-slate-800/90 backdrop-blur-xl px-3 py-2 pb-safe shadow-2xl"
+    >
       <div className="max-w-md mx-auto flex items-center justify-between gap-2.5">
         {/* Left: Stake Stepper & Duration */}
         <div className="flex items-center gap-1.5 shrink-0">

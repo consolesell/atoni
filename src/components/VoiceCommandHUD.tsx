@@ -275,7 +275,7 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
   };
 
   return (
-    <div className="fixed bottom-20 sm:bottom-6 left-3 sm:left-6 z-40 flex flex-col items-start gap-2 max-w-sm pointer-events-none">
+    <div className="fixed bottom-32 sm:bottom-6 left-3 sm:left-6 z-40 flex flex-col items-start gap-2 max-w-sm pointer-events-none">
       {/* Toast Notification for Executed Voice Action */}
       {lastExecutedCommand && (
         <div className="pointer-events-auto flex items-center gap-2.5 px-3.5 py-2.5 bg-slate-900/95 border border-cyan-500/40 rounded-xl shadow-2xl backdrop-blur-md text-xs font-mono text-slate-100 animate-in fade-in slide-in-from-bottom-2 duration-200">
