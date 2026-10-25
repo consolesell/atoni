@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Activity,
   Bot,
@@ -27,6 +27,7 @@ import {
   Mic,
   MicOff,
   ChevronDown,
+  Wrench,
 } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS } from '../lib/voiceEngine';
@@ -111,6 +112,18 @@ export const Navbar: React.FC<NavbarProps> = ({
   const { user, userProfile, logout } = useAuth();
   const [isAccountsDropdownOpen, setIsAccountsDropdownOpen] = useState(false);
   const [linkedAccounts, setLinkedAccounts] = useState(() => derivWS.getLinkedAccounts());
+  const [isToolsMenuOpen, setIsToolsMenuOpen] = useState(false);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (toolsMenuRef.current && !toolsMenuRef.current.contains(e.target as Node)) {
+        setIsToolsMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   useEffect(() => {
     const unsubWs = derivWS.subscribe((msg) => {
@@ -371,86 +384,230 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            {/* Desktop Only Buttons */}
+            {/* Desktop Only Buttons & Controls */}
             <div className="hidden lg:flex items-center gap-1.5">
               <AccountModeSwitcher />
 
-              {/* Brain Anatomy Modal Trigger */}
-              {onOpenBrainModal && (
+              {/* Unified Tools Dropdown Menu */}
+              <div className="relative" ref={toolsMenuRef}>
                 <button
+                  type="button"
                   onClick={() => {
-                    onOpenBrainModal();
+                    setIsToolsMenuOpen(!isToolsMenuOpen);
                     sound.play('click');
                   }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono bg-purple-950/60 hover:bg-purple-900/60 text-purple-300 border border-purple-800/60 transition-all shadow-sm"
-                  title="SBAgent Brain Anatomy & Cognitive Graph"
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-mono font-bold transition-all border shadow-sm ${
+                    isToolsMenuOpen
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-cyan-950/40'
+                      : 'bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-800'
+                  }`}
+                  title="Open Autonomous Intelligence, Reports & Audits Tools"
+                  aria-expanded={isToolsMenuOpen}
                 >
-                  <Brain className="w-3.5 h-3.5 text-purple-400" />
-                  <span className="hidden xl:inline">BRAIN</span>
+                  <Wrench className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="tracking-wide">TOOLS</span>
+                  {activeAlertsCount > 0 && (
+                    <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  )}
+                  <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isToolsMenuOpen ? 'rotate-180' : ''}`} />
                 </button>
-              )}
 
-              {/* Google Keep Trading Notes Trigger */}
-              {onOpenGoogleKeepModal && (
-                <button
-                  onClick={() => {
-                    onOpenGoogleKeepModal();
-                    sound.play('click');
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono bg-amber-950/60 hover:bg-amber-900/60 text-amber-300 border border-amber-800/60 transition-all shadow-sm"
-                  title="Google Keep & Trading Notes"
-                >
-                  <FileText className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden xl:inline">KEEP NOTES</span>
-                </button>
-              )}
+                {isToolsMenuOpen && (
+                  <div className="absolute top-full right-0 mt-2 w-72 bg-slate-950/98 border border-slate-800 rounded-2xl shadow-2xl backdrop-blur-xl p-2 z-50 animate-in fade-in zoom-in-95 duration-150 font-mono text-xs">
+                    {/* Category 1: Intelligence */}
+                    <div className="px-2.5 py-1 text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                      Autonomous Intelligence
+                    </div>
+                    {onOpenBrainModal && (
+                      <button
+                        onClick={() => {
+                          onOpenBrainModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-purple-950/40 hover:border-purple-800/50 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Brain className="w-4 h-4 text-purple-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Brain Anatomy</span>
+                        </div>
+                        <span className="text-[10px] text-purple-400/80">Cognitive</span>
+                      </button>
+                    )}
+                    {onOpenSubAgentModal && (
+                      <button
+                        onClick={() => {
+                          onOpenSubAgentModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-cyan-950/40 hover:border-cyan-800/50 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Bot className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Subagent Editor</span>
+                        </div>
+                        <span className="text-[10px] text-cyan-400/80">Nodes</span>
+                      </button>
+                    )}
+                    {onOpenEvolutionModal && (
+                      <button
+                        onClick={() => {
+                          onOpenEvolutionModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-emerald-950/40 hover:border-emerald-800/50 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Strategy Evolution</span>
+                        </div>
+                        <span className="text-[10px] text-emerald-400/80">Genetic</span>
+                      </button>
+                    )}
 
-              {/* Google Docs Report Trigger */}
-              {onOpenGoogleDocsModal && (
-                <button
-                  onClick={() => {
-                    onOpenGoogleDocsModal();
-                    sound.play('click');
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono bg-blue-950/60 hover:bg-blue-900/60 text-blue-300 border border-blue-800/60 transition-all shadow-sm"
-                  title="Google Docs Intelligence Reports"
-                >
-                  <FileCode className="w-3.5 h-3.5 text-blue-400" />
-                  <span className="hidden xl:inline">DOCS</span>
-                </button>
-              )}
+                    {/* Category 2: Reporting & Notes */}
+                    <div className="border-t border-slate-800/80 my-1.5" />
+                    <div className="px-2.5 py-1 text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                      Reporting & Notes
+                    </div>
+                    {onOpenGoogleDocsModal && (
+                      <button
+                        onClick={() => {
+                          onOpenGoogleDocsModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-blue-950/40 hover:border-blue-800/50 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <FileCode className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Google Docs Reports</span>
+                        </div>
+                        <span className="text-[10px] text-blue-400/80">Export</span>
+                      </button>
+                    )}
+                    {onOpenGoogleKeepModal && (
+                      <button
+                        onClick={() => {
+                          onOpenGoogleKeepModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-amber-950/40 hover:border-amber-800/50 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <FileText className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Google Keep Notes</span>
+                        </div>
+                        <span className="text-[10px] text-amber-400/80">Sync</span>
+                      </button>
+                    )}
 
-              {/* Interactive Onboarding Tour Trigger */}
-              {onOpenTourModal && (
-                <button
-                  onClick={() => {
-                    onOpenTourModal();
-                    sound.play('click');
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono bg-cyan-950/60 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-800/60 transition-all shadow-sm"
-                  title="Interactive Guided Tour of Platform"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                  <span className="hidden xl:inline">TOUR</span>
-                </button>
-              )}
+                    {/* Category 3: Audits & Telemetry */}
+                    <div className="border-t border-slate-800/80 my-1.5" />
+                    <div className="px-2.5 py-1 text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                      Audits & Telemetry
+                    </div>
+                    {onOpenAuditLogModal && (
+                      <button
+                        onClick={() => {
+                          onOpenAuditLogModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-900 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <FileText className="w-4 h-4 text-slate-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Structured Audit Log</span>
+                        </div>
+                        <span className="text-[10px] text-slate-500">Trace</span>
+                      </button>
+                    )}
+                    {onOpenAlertsModal && (
+                      <button
+                        onClick={() => {
+                          onOpenAlertsModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-amber-950/40 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Bell className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Alert Center</span>
+                        </div>
+                        {activeAlertsCount > 0 ? (
+                          <span className="px-1.5 py-0.5 rounded-full bg-amber-500 text-slate-950 font-bold text-[9px]">
+                            {activeAlertsCount}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-slate-500">0</span>
+                        )}
+                      </button>
+                    )}
 
-              {/* Structured Audit Logs Trigger */}
-              {onOpenAuditLogModal && (
-                <button
-                  onClick={() => {
-                    onOpenAuditLogModal();
-                    sound.play('click');
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-all shadow-sm"
-                  title="Autonomous Audit Logs & Trace"
-                >
-                  <FileText className="w-3.5 h-3.5 text-slate-400" />
-                  <span className="hidden xl:inline">AUDIT</span>
-                </button>
-              )}
+                    {/* Category 4: System & Display */}
+                    <div className="border-t border-slate-800/80 my-1.5" />
+                    <div className="px-2.5 py-1 text-[10px] uppercase font-bold text-slate-500 tracking-wider">
+                      System & Display
+                    </div>
+                    {onOpenTheme && (
+                      <button
+                        onClick={() => {
+                          onOpenTheme();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-pink-950/40 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Palette className="w-4 h-4 text-pink-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Visual Themes</span>
+                        </div>
+                        <span className="text-[10px] text-pink-400/80">6 Themes</span>
+                      </button>
+                    )}
+                    {(onOpenTourModal || onOpenHelpModal) && (
+                      <button
+                        onClick={() => {
+                          if (onOpenTourModal) onOpenTourModal();
+                          else onOpenHelpModal();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-cyan-950/40 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <HelpCircle className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Guided Platform Tour</span>
+                        </div>
+                        <span className="text-[10px] text-cyan-400/80">Help</span>
+                      </button>
+                    )}
+                    {onOpenFullscreenWorkspace && (
+                      <button
+                        onClick={() => {
+                          onOpenFullscreenWorkspace();
+                          setIsToolsMenuOpen(false);
+                          sound.play('click');
+                        }}
+                        className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-900 border border-transparent transition-colors group"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Maximize2 className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
+                          <span className="font-medium">Fullscreen Workspace</span>
+                        </div>
+                        <span className="text-[10px] text-slate-500">Expand</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
 
-              {/* Bot Toggle Button */}
+              {/* Bot Toggle Status Button */}
               <button
                 onClick={onToggleBot}
                 className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold font-mono transition-all ${
@@ -458,26 +615,11 @@ export const Navbar: React.FC<NavbarProps> = ({
                     ? 'bg-cyan-500 text-slate-950 font-bold shadow-md shadow-cyan-500/30'
                     : 'bg-slate-900 text-slate-300 border border-slate-800 hover:bg-slate-800'
                 }`}
+                title={botEnabled ? 'Bot Active - Click to stop autonomous trading' : 'Bot Idle - Click to start autonomous trading'}
               >
                 <Bot className="w-3.5 h-3.5" />
                 <span>BOT: {botEnabled ? 'ON' : 'OFF'}</span>
               </button>
-
-              {/* Alerts */}
-              {onOpenAlertsModal && (
-                <button
-                  onClick={onOpenAlertsModal}
-                  className="relative p-1.5 rounded-xl bg-slate-900 text-slate-300 border border-slate-800 hover:text-white"
-                  title="Alerts"
-                >
-                  <Bell className="w-4 h-4 text-amber-400" />
-                  {activeAlertsCount > 0 && (
-                    <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-amber-500 text-slate-950 font-mono text-[8px] font-bold flex items-center justify-center">
-                      {activeAlertsCount}
-                    </span>
-                  )}
-                </button>
-              )}
 
               {/* Agent Voice Output Toggle with live speaking wave indicator */}
               <button
@@ -565,7 +707,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               </span>
             </button>
 
-            {/* Quick Settings Button */}
+            {/* Settings Trigger */}
             {onOpenQuickSettings && (
               <button
                 onClick={() => {
@@ -581,24 +723,8 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            {/* Fullscreen Workspace Expansion Trigger */}
-            {onOpenFullscreenWorkspace && (
-              <button
-                onClick={() => {
-                  onOpenFullscreenWorkspace();
-                  sound.play('click');
-                }}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 sm:py-2 rounded-xl text-xs font-semibold font-mono bg-cyan-950/70 hover:bg-cyan-900/70 text-cyan-300 border border-cyan-600/50 hover:border-cyan-400 transition-all shadow-sm shadow-cyan-950/30"
-                title="Expand Fullscreen Workspace"
-                aria-label="Fullscreen Workspace"
-              >
-                <Maximize2 className="w-3.5 h-3.5 text-cyan-400" />
-                <span className="hidden md:inline">FULLSCREEN</span>
-              </button>
-            )}
-
-            {/* Settings Gear Drawer Trigger (Universal) */}
-            {onOpenSettings && (
+            {/* Universal Settings Drawer Trigger */}
+            {onOpenSettings && !onOpenQuickSettings && (
               <button
                 onClick={() => {
                   onOpenSettings();
@@ -609,21 +735,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                 aria-label="Settings"
               >
                 <Settings className="w-4 h-4" />
-              </button>
-            )}
-
-            {/* Themes & Visuals Quick Trigger (6 Custom Themes) */}
-            {onOpenTheme && (
-              <button
-                onClick={() => {
-                  onOpenTheme();
-                  sound.play('click');
-                }}
-                className="p-2 sm:p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-pink-400 border border-slate-800 transition-colors shadow-sm relative group"
-                title="Themes & Visuals (Dark Neon, Ocean, Forest, Sunset, Light, Purple)"
-                aria-label="Themes & Visuals"
-              >
-                <Palette className="w-4 h-4 text-pink-400 group-hover:rotate-12 transition-transform" />
               </button>
             )}
 

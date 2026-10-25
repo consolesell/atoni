@@ -11,6 +11,7 @@ import {
   Calculator,
   Crosshair,
   Sliders,
+  AlertTriangle,
 } from 'lucide-react';
 import { AIPredictionResult, DecisionResult, PositionSizingMode, CoreRiskMetrics, TrailingStopConfig } from '../types/trading';
 import { TradeDurationUnit, SniperConfluenceResult } from '../types/sniper';
@@ -677,6 +678,19 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
               <span className="text-cyan-300 font-mono text-sm">${totalPayout.toFixed(2)}</span>
             </div>
           </div>
+
+          {/* Algorithmic HOLD Safety Advisory */}
+          {algorithmicDecision?.action === 'HOLD' && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-mono">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+              <div className="flex-1 truncate">
+                <span className="font-bold">HOLD GATE: </span>
+                <span className="text-amber-200/90">
+                  {algorithmicDecision?.reason || 'Market equilibrium — no directional edge'}
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Main Execution CTA Button */}
           <button

@@ -90,16 +90,16 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dimsRef = useRef<{ width: number; height: number }>({ width: 0, height: 0 });
 
-  // View & Indicator states
+  // View & Indicator states - clean minimal defaults on boot
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [showBB, setShowBB] = useState(true);
+  const [showBB, setShowBB] = useState(false);
   const [showMAs, setShowMAs] = useState(true);
-  const [showRSI, setShowRSI] = useState(true);
+  const [showRSI, setShowRSI] = useState(false);
   const [showMarkers, setShowMarkers] = useState(true);
   const [showAISignals, setShowAISignals] = useState(true);
-  const [showAgentVotes, setShowAgentVotes] = useState(true);
-  const [showMTFOverlays, setShowMTFOverlays] = useState(true);
-  const [showVolumeProfile, setShowVolumeProfile] = useState(true);
+  const [showAgentVotes, setShowAgentVotes] = useState(false);
+  const [showMTFOverlays, setShowMTFOverlays] = useState(false);
+  const [showVolumeProfile, setShowVolumeProfile] = useState(false);
   const isMountedRef = useRef(true);
   const [candleWidth, setCandleWidth] = useState(9);
   const [panOffset, setPanOffset] = useState(0); // number of candles panned backwards
@@ -2206,22 +2206,87 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
             </button>
           )}
 
-          {/* Indicators dropdown trigger */}
-          <button
-            onClick={() => {
-              setIsIndicatorsOpen(!isIndicatorsOpen);
-              setIsDrawMenuOpen(false);
-              setIsAgentToolsMenuOpen(false);
-            }}
-            className={`px-2 py-1 rounded-md font-mono text-[11px] font-medium flex items-center gap-1 transition-all ${
-              isIndicatorsOpen
-                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
-            }`}
-          >
-            <SlidersHorizontal className="w-3 h-3 text-cyan-400" />
-            <span className="hidden sm:inline">Indicators</span>
-          </button>
+          {/* Segmented Indicator & Overlay Toolbar */}
+          <div className="flex items-center bg-slate-900/90 border border-slate-800 rounded-lg p-0.5 text-[11px] font-mono">
+            <button
+              type="button"
+              onClick={() => {
+                setShowMAs(!showMAs);
+                sound.play('click');
+              }}
+              className={`px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                showMAs ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-500 hover:text-slate-300'
+              }`}
+              title="Toggle Moving Averages (14/50)"
+            >
+              MA
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowBB(!showBB);
+                sound.play('click');
+              }}
+              className={`px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                showBB ? 'bg-sky-500/20 text-sky-300 font-bold' : 'text-slate-500 hover:text-slate-300'
+              }`}
+              title="Toggle Bollinger Bands"
+            >
+              BB
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowRSI(!showRSI);
+                sound.play('click');
+              }}
+              className={`px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                showRSI ? 'bg-indigo-500/20 text-indigo-300 font-bold' : 'text-slate-500 hover:text-slate-300'
+              }`}
+              title="Toggle Relative Strength Index (RSI 14)"
+            >
+              RSI
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowMTFOverlays(!showMTFOverlays);
+                sound.play('click');
+              }}
+              className={`px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                showMTFOverlays ? 'bg-cyan-500/20 text-cyan-300 font-bold' : 'text-slate-500 hover:text-slate-300'
+              }`}
+              title="Toggle Higher Timeframe HTF EMA200 Overlay"
+            >
+              MTF
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowVolumeProfile(!showVolumeProfile);
+                sound.play('click');
+              }}
+              className={`px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                showVolumeProfile ? 'bg-amber-500/20 text-amber-300 font-bold' : 'text-slate-500 hover:text-slate-300'
+              }`}
+              title="Toggle Volume Profile & Point of Control (POC)"
+            >
+              Vol
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowAgentVotes(!showAgentVotes);
+                sound.play('click');
+              }}
+              className={`px-1.5 sm:px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                showAgentVotes ? 'bg-purple-500/20 text-purple-300 font-bold' : 'text-slate-500 hover:text-slate-300'
+              }`}
+              title="Toggle Multi-Agent Vote Candlestick Annotations"
+            >
+              Votes
+            </button>
+          </div>
 
           {/* Draw menu trigger */}
           <button
@@ -2281,40 +2346,6 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
                 {openTrades.length + (closedTrades?.length || 0)}
               </span>
             )}
-          </button>
-
-          {/* Agent Votes direct toggle */}
-          <button
-            onClick={() => {
-              setShowAgentVotes(!showAgentVotes);
-              sound.play('click');
-            }}
-            className={`px-2 py-1 rounded-md font-mono text-[11px] font-medium flex items-center gap-1 transition-all ${
-              showAgentVotes
-                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
-                : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/40 border border-transparent'
-            }`}
-            title="Toggle Agent-Vote Annotations on Candlesticks"
-          >
-            <Bot className="w-3 h-3 text-purple-400" />
-            <span className="hidden sm:inline">Votes</span>
-          </button>
-
-          {/* Volume Profile direct toggle */}
-          <button
-            onClick={() => {
-              setShowVolumeProfile(!showVolumeProfile);
-              sound.play('click');
-            }}
-            className={`px-2 py-1 rounded-md font-mono text-[11px] font-medium flex items-center gap-1 transition-all ${
-              showVolumeProfile
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/40 border border-transparent'
-            }`}
-            title="Toggle Side Volume Profile & Point of Control (POC)"
-          >
-            <Layers className="w-3 h-3 text-amber-400" />
-            <span className="hidden sm:inline">Profile</span>
           </button>
 
           {/* Fullscreen Toggle */}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, Minus, Plus, Bot, Clock, Mic } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Plus, Bot, Clock, Mic, AlertTriangle } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
 import { voiceInput } from '../lib/voiceInputEngine';
 
@@ -14,6 +14,8 @@ interface MobileExecutionBarProps {
   isAutonomousRunning?: boolean;
   currency?: string;
   isLiveMode: boolean;
+  isHoldAdvised?: boolean;
+  holdReason?: string;
 }
 
 export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
@@ -27,6 +29,8 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
   isAutonomousRunning = false,
   currency = 'USD',
   isLiveMode,
+  isHoldAdvised = false,
+  holdReason,
 }) => {
   const [isVoiceListening, setIsVoiceListening] = useState(voiceInput.getIsListening());
   const durations = [5, 10, 15, 30];
@@ -133,6 +137,15 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
           </button>
         </div>
       </div>
+
+      {/* HOLD Safety Notice */}
+      {isHoldAdvised && (
+        <div className="flex items-center justify-center gap-1.5 pt-1 text-[10px] font-mono text-amber-300 truncate">
+          <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+          <span className="font-bold">HOLD GATE:</span>
+          <span className="truncate text-amber-200/90">{holdReason || 'Equilibrium / No clear edge'}</span>
+        </div>
+      )}
 
       {/* Subtle Auto-Trading / Autonomous Active Indicator */}
       {(botActive || isAutonomousRunning) && (

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { TradeRecord } from '../types/trading';
 import {
   TrendingUp,
@@ -11,6 +11,7 @@ import {
   ChevronUp,
   ExternalLink,
   ShieldCheck,
+  Zap,
 } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
 
@@ -33,6 +34,44 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'open' | 'history'>('open');
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
+  const [exitingTradeIds, setExitingTradeIds] = useState<Set<string>>(new Set());
+  const [justSettledIds, setJustSettledIds] = useState<Set<string>>(new Set());
+  const prevClosedCountRef = useRef(closedTrades.length);
+
+  // Track newly closed trades to trigger subtle, performant exit feedback animations
+  useEffect(() => {
+    if (closedTrades.length > prevClosedCountRef.current) {
+      const newlyAddedCount = closedTrades.length - prevClosedCountRef.current;
+      const newlyAdded = closedTrades.slice(0, newlyAddedCount);
+      const newIds = newlyAdded.map((t) => t.id);
+
+      setJustSettledIds((prev) => {
+        const next = new Set(prev);
+        newIds.forEach((id) => next.add(id));
+        return next;
+      });
+
+      // Clear the exit animation highlight after 4.5 seconds
+      const timer = setTimeout(() => {
+        setJustSettledIds((prev) => {
+          const next = new Set(prev);
+          newIds.forEach((id) => next.delete(id));
+          return next;
+        });
+      }, 4500);
+
+      prevClosedCountRef.current = closedTrades.length;
+      return () => clearTimeout(timer);
+    } else {
+      prevClosedCountRef.current = closedTrades.length;
+    }
+  }, [closedTrades]);
+
+  const handleEarlyExitClick = (tradeId: string) => {
+    setExitingTradeIds((prev) => new Set(prev).add(tradeId));
+    sound.play('click');
+    onEarlyExit(tradeId);
+  };
 
   // Stats calculation
   const wins = closedTrades.filter((t) => t.result === 'WIN').length;
@@ -76,7 +115,7 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
               setActiveTab('history');
               sound.play('click');
             }}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all flex items-center gap-1.5 ${
+            className={`relative px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all flex items-center gap-1.5 ${
               activeTab === 'history'
                 ? 'bg-cyan-500 text-slate-950 shadow-sm'
                 : 'text-slate-400 hover:text-slate-200'
@@ -90,6 +129,12 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
             >
               {closedTrades.length}
             </span>
+            {justSettledIds.size > 0 && activeTab === 'open' && (
+              <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+              </span>
+            )}
           </button>
         </div>
 
@@ -130,11 +175,16 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                 : currentPrice < trade.entryPrice;
               const estimatedReturn = inProfit ? trade.amount * 0.95 : -trade.amount;
               const isExpanded = expandedTradeId === tradeId;
+              const isExiting = exitingTradeIds.has(tradeId);
 
               return (
                 <div
                   key={tradeId}
-                  className="bg-slate-950/80 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden transition-all"
+                  className={`border rounded-xl overflow-hidden transition-all duration-300 ${
+                    isExiting
+                      ? 'bg-amber-950/20 border-amber-500/60 ring-1 ring-amber-500/30 opacity-80'
+                      : 'bg-slate-950/80 border-slate-800 hover:border-slate-700'
+                  }`}
                 >
                   <div
                     onClick={() => toggleExpand(tradeId)}
@@ -164,6 +214,12 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                           >
                             {isCall ? '↑ RISE' : '↓ FALL'} (${trade.amount})
                           </span>
+                          {isExiting && (
+                            <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border bg-amber-500/20 text-amber-300 border-amber-500/40 flex items-center gap-1 animate-pulse">
+                              <span className="w-2 h-2 border-2 border-amber-300 border-t-transparent rounded-full animate-spin" />
+                              <span>CLOSING...</span>
+                            </span>
+                          )}
                           {trade.trailingStopEnabled && (
                             <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border bg-amber-500/15 text-amber-300 border-amber-500/35 flex items-center gap-1">
                               <ShieldCheck className="w-2.5 h-2.5 text-amber-400" />
@@ -231,10 +287,22 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                         </div>
 
                         <button
-                          onClick={() => onEarlyExit(trade.id)}
-                          className="px-3 py-1 bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 rounded-lg text-xs font-mono transition-colors"
+                          onClick={() => handleEarlyExitClick(tradeId)}
+                          disabled={isExiting}
+                          className={`px-3 py-1 rounded-lg text-xs font-mono transition-colors flex items-center gap-1.5 ${
+                            isExiting
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 opacity-70 cursor-wait'
+                              : 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40'
+                          }`}
                         >
-                          Early Close
+                          {isExiting ? (
+                            <>
+                              <div className="w-2.5 h-2.5 border-2 border-amber-300 border-t-transparent rounded-full animate-spin" />
+                              <span>Closing...</span>
+                            </>
+                          ) : (
+                            <span>Early Close</span>
+                          )}
                         </button>
                       </div>
 
@@ -285,11 +353,18 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
               const isWin = trade.result === 'WIN';
               const isCall = trade.decision.includes('BUY') || trade.decision.includes('CALL');
               const isExpanded = expandedTradeId === tradeId;
+              const isJustSettled = justSettledIds.has(tradeId);
 
               return (
                 <div
                   key={tradeId}
-                  className="bg-slate-950/80 border border-slate-800/80 hover:border-slate-700 rounded-xl overflow-hidden transition-all text-xs font-mono"
+                  className={`border rounded-xl overflow-hidden transition-all duration-300 text-xs font-mono ${
+                    isJustSettled
+                      ? isWin
+                        ? 'animate-trade-in animate-settle-win bg-emerald-950/25 border-emerald-500/70 shadow-lg shadow-emerald-950/50 ring-1 ring-emerald-500/40'
+                        : 'animate-trade-in animate-settle-loss bg-rose-950/25 border-rose-500/70 shadow-lg shadow-rose-950/50 ring-1 ring-rose-500/40'
+                      : 'bg-slate-950/80 border-slate-800/80 hover:border-slate-700'
+                  }`}
                 >
                   <div
                     onClick={() => toggleExpand(tradeId)}
@@ -297,7 +372,9 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                   >
                     <div className="flex items-center gap-2.5">
                       <div
-                        className={`p-1.5 rounded-lg ${
+                        className={`p-1.5 rounded-lg transition-transform duration-300 ${
+                          isJustSettled ? 'scale-110 shadow-sm' : ''
+                        } ${
                           isWin ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
                         }`}
                       >
@@ -315,6 +392,23 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                           >
                             {isCall ? '↑ RISE' : '↓ FALL'}
                           </span>
+                          {/* Real-time exit feedback badge on trade settlement */}
+                          {isJustSettled && (
+                            <span
+                              className={`text-[9px] font-mono font-black px-2 py-0.5 rounded border flex items-center gap-1 animate-pulse ${
+                                isWin
+                                  ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/60 shadow-sm shadow-emerald-500/30'
+                                  : 'bg-rose-500/25 text-rose-300 border-rose-500/60 shadow-sm shadow-rose-500/30'
+                              }`}
+                            >
+                              {isWin ? <Sparkles className="w-2.5 h-2.5 text-emerald-300" /> : <XCircle className="w-2.5 h-2.5 text-rose-300" />}
+                              <span>
+                                {isWin
+                                  ? `+$${(trade.profit || 0).toFixed(2)} WIN`
+                                  : `-$${Math.abs(trade.profit || 0).toFixed(2)} LOSS`}
+                              </span>
+                            </span>
+                          )}
                           {trade.trailingStopEnabled && (
                             <span className="text-[9px] px-1.5 py-0.2 rounded border bg-amber-500/10 text-amber-300 border-amber-500/30 flex items-center gap-1">
                               <ShieldCheck className="w-2.5 h-2.5 text-amber-400" />
@@ -340,8 +434,12 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                     <div className="flex items-center gap-3">
                       <div className="text-right">
                         <div
-                          className={`font-black ${
-                            trade.profit > 0
+                          className={`font-black transition-colors ${
+                            isJustSettled
+                              ? isWin
+                                ? 'text-emerald-300 text-sm'
+                                : 'text-rose-300 text-sm'
+                              : trade.profit > 0
                               ? 'text-emerald-400'
                               : trade.profit < 0
                               ? 'text-rose-400'

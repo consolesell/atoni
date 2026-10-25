@@ -10,7 +10,7 @@ dotenv.config();
 
 const app = express();
 const httpServer = http.createServer(app);
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: "5mb" }));
 
@@ -270,7 +270,11 @@ Greetings! I am **SBAgent**, your autonomous quantitative trading co-pilot engin
 // API Routes
 // -------------------------------------------------------------
 
-// Health check
+// Health checks
+app.get("/health", (_req, res) => {
+  res.status(200).send("OK");
+});
+
 app.get("/api/health", (_req, res) => {
   const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY);
   res.json({
@@ -1745,10 +1749,12 @@ app.get(
 // -------------------------------------------------------------
 
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
+  const isCloudRun = Boolean(process.env.K_SERVICE || process.env.K_REVISION);
+  const isProduction = process.env.NODE_ENV === "production" || isCloudRun;
+
+  if (!isProduction) {
     const isCloudEnv = Boolean(
       process.env.APP_URL ||
-      process.env.K_SERVICE ||
       process.env.NG_ALLOWED_HOSTS ||
       process.env.AIS_APP_URL
     );
@@ -1775,7 +1781,7 @@ async function startServer() {
           server: httpServer,
           protocol: isCloudEnv || isHttps ? ('wss' as const) : ('ws' as const),
           host: hmrHost,
-          clientPort: isCloudEnv || isHttps ? 443 : 3000,
+          clientPort: isCloudEnv || isHttps ? 443 : PORT,
         };
 
     const vite = await createViteServer({
@@ -1788,10 +1794,19 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get("*", (_req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    } else {
+      console.warn("⚠️ Production mode active but dist/ directory not found. Serving via Vite middlewares fallback.");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    }
   }
 
   httpServer.listen(PORT, "0.0.0.0", () => {

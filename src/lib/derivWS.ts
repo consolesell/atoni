@@ -187,6 +187,10 @@ class DerivWebSocketClient {
     };
   }
 
+  public isConnected(): boolean {
+    return !!this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING);
+  }
+
   public refreshBalance() {
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this.token) {
       this.send({ balance: 1 });

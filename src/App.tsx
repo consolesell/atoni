@@ -78,6 +78,21 @@ import { VoiceBroadcastBanner } from './components/VoiceWaveformIndicator';
 import { VoiceCommandHUD } from './components/VoiceCommandHUD';
 import { AuditLogModal } from './components/AuditLogModal';
 import { OnboardingTourModal } from './components/OnboardingTourModal';
+import { AutonomyCard } from './components/AutonomyCard';
+import { AutonomyConfigModal } from './components/AutonomyConfigModal';
+import {
+  AutonomyMode,
+  AutonomyPreset,
+  AppliedAutonomySettings,
+  AutonomySessionContext,
+} from './types/autonomy';
+import {
+  SBAgent,
+  loadAutonomyPreset,
+  saveAutonomyPreset,
+  validateAutonomyPrerequisites,
+} from './lib/sbagentAutonomyEngine';
+import { auditLogger } from './lib/auditLogger';
 import { AlertRule, TriggeredAlert } from './types/alerts';
 import {
   loadAlertRules,
@@ -258,6 +273,14 @@ export default function App() {
     reasoning?: string;
     timestamp?: string;
   } | null>(null);
+
+  // Unified Autonomy Control & SBAgent Auto-Grant State
+  const [autonomyMode, setAutonomyMode] = useState<AutonomyMode>('OFF');
+  const [sbagentAutonomyGrant, setSbagentAutonomyGrant] = useState<boolean>(false);
+  const [autonomyPreset, setAutonomyPreset] = useState<AutonomyPreset>(() => loadAutonomyPreset());
+  const [appliedAutonomySettings, setAppliedAutonomySettings] = useState<AppliedAutonomySettings | null>(null);
+  const [lastAutonomyError, setLastAutonomyError] = useState<string[] | string | null>(null);
+  const [isAutonomyConfigOpen, setIsAutonomyConfigOpen] = useState<boolean>(false);
 
   // Modals
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
@@ -706,6 +729,134 @@ export default function App() {
     }
     addLog(`🔄 Virtual account balance anchor manually re-anchored to $${topUp.toFixed(2)} USD.`, 'success');
   }, [userProfile, updateBalances, addLog, settings.risk.virtualAnchorBalance, settings.audio.soundEnabled]);
+
+  // Unified Autonomy Handlers
+  const handleConfigureAutonomy = useCallback(() => {
+    sound.play('click');
+    setIsAutonomyConfigOpen(true);
+  }, []);
+
+  const handleSaveAutonomyPreset = useCallback((updated: AutonomyPreset) => {
+    setAutonomyPreset(updated);
+    saveAutonomyPreset(updated);
+    setAutonomyMode('ARMED');
+    setSbagentAutonomyGrant(false);
+    setLastAutonomyError(null);
+    addLog(`⚙️ Autonomy bounds updated: Max stake $${updated.risk.maxStake.toFixed(2)}, Max Drawdown ${updated.risk.sessionDrawdownCap.toFixed(1)}%. State armed.`, 'info');
+  }, [addLog]);
+
+  const handleStopAutonomy = useCallback((reason = 'user') => {
+    setBotState((b) => ({ ...b, enabled: false }));
+    setSbagentAutonomyGrant(false);
+    setAutonomyMode('OFF');
+    SBAgent.onAutonomyRevoked(reason);
+    setAppliedAutonomySettings(null);
+    sound.play('click');
+    addLog(`⏹️ Autonomy stopped (${reason}). Trading severed.`, 'info');
+    voice.speak('Autonomy stopped.', 'tactical');
+    auditLogger.record({
+      type: 'RISK_SHIELD',
+      symbol: selectedSymbol,
+      action: 'AUTONOMY_REVOKED',
+      reason: `Autonomy revoked by ${reason}.`,
+    });
+  }, [selectedSymbol, addLog]);
+
+  const handleRunAutonomously = useCallback(() => {
+    setLastAutonomyError(null);
+
+    // A) Prerequisites (hard gates — no trade if fail)
+    const blockers = validateAutonomyPrerequisites({
+      isDerivConnected: derivWS.isConnected(),
+      symbol: selectedSymbol,
+      balance,
+      preset: autonomyPreset,
+    });
+
+    if (blockers.length > 0) {
+      setLastAutonomyError(blockers);
+      sound.play('alert');
+      addLog(`❌ Autonomy prerequisites unmet: ${blockers.join(' | ')}`, 'error');
+      return;
+    }
+
+    // B) Build live session context for SBAgent
+    const openExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
+    const sessionContext: AutonomySessionContext = {
+      symbol: selectedSymbol,
+      balance,
+      accountMode: isLiveMode ? 'REAL' : 'DEMO',
+      regime: regime.type || 'NEUTRAL',
+      openExposure,
+      risk: autonomyPreset.risk,
+      allowedSymbols: autonomyPreset.allowedSymbols,
+      strategyRef: autonomyPreset.strategyProfile || 'sbagent.md-v4.1',
+    };
+
+    // C) GRANT auto autonomy to SBAgent (explicit, auditable)
+    setSbagentAutonomyGrant(true);
+    setAutonomyMode('RUNNING');
+    SBAgent.onAutonomyGranted(sessionContext);
+
+    // D) SBAgent intelligent self-configuration (before any order)
+    const configResult = SBAgent.configureForAutonomy(sessionContext);
+
+    if (!configResult.ok || !configResult.appliedSettings) {
+      setSbagentAutonomyGrant(false);
+      setAutonomyMode('ARMED');
+      setBotState((b) => ({ ...b, enabled: false }));
+      const blockErrors = configResult.blockers || ['SBAgent could not complete configuration.'];
+      setLastAutonomyError(blockErrors);
+      auditLogger.record({
+        type: 'RISK_SHIELD',
+        symbol: selectedSymbol,
+        action: 'AUTONOMY_CONFIG_FAILED',
+        reason: blockErrors.join('; '),
+      });
+      addLog(`⚠️ SBAgent configuration blockers: ${blockErrors.join(', ')}`, 'warn');
+      return;
+    }
+
+    const applied = configResult.appliedSettings;
+    setAppliedAutonomySettings(applied);
+
+    // Apply runtime settings
+    setStake(applied.calibratedStake);
+    setDuration(applied.calibratedDuration);
+    setDurationUnit(applied.calibratedDurationUnit);
+    setBotState((prev) => ({
+      ...prev,
+      enabled: true,
+      stake: applied.calibratedStake,
+      maxSessionDrawdownPercent: applied.sessionDrawdownCap,
+      maxConsecutiveLosses: applied.holdRules.consecutiveLossLimit,
+      allowedRotationSymbols: autonomyPreset.allowedSymbols,
+    }));
+
+    // E) Feedback + audit
+    sound.play('trade');
+    addLog(`🚀 Autonomy granted — SBAgent calibrated stake $${applied.calibratedStake.toFixed(2)}, ${applied.calibratedDuration}${applied.calibratedDurationUnit.charAt(0)}. Auto-trading active.`, 'success');
+    voice.speak('Autonomy granted. SBAgent is configuring and starting trading.', 'tactical');
+    auditLogger.record({
+      type: 'AUTONOMOUS_TRADE',
+      symbol: sessionContext.symbol,
+      action: 'AUTONOMY_GRANTED',
+      reason: `SBAgent self-configured and granted execution for ${sessionContext.symbol}.`,
+      metadata: {
+        stake: applied.calibratedStake,
+        duration: applied.calibratedDuration,
+        regime: sessionContext.regime,
+      },
+    });
+  }, [
+    selectedSymbol,
+    balance,
+    autonomyPreset,
+    isLiveMode,
+    regime.type,
+    openTrades,
+    addLog,
+  ]);
 
   // Autonomous Symbol Switch on Market Instability
   useEffect(() => {
@@ -1307,32 +1458,59 @@ export default function App() {
     const now = Date.now();
     if (now - lastBotTradeTimeRef.current < 8000) return;
 
-    // Hard 5% Session Drawdown Circuit Breaker Enforcement (sbagent.md Section 2 & 4)
-    if (
-      coreRiskMetrics.maxDrawdownPercent >= 5.0 ||
-      (botState.maxSessionDrawdownPercent && coreRiskMetrics.maxDrawdownPercent >= botState.maxSessionDrawdownPercent)
-    ) {
+    // Hard Session Drawdown Circuit Breaker Enforcement (sbagent.md Section 2 & 4)
+    const ddCap = appliedAutonomySettings?.sessionDrawdownCap || botState.maxSessionDrawdownPercent || 5.0;
+    if (coreRiskMetrics.maxDrawdownPercent >= ddCap) {
       addLog(
-        `🛑 [CIRCUIT BREAKER] 5% Session Drawdown limit reached (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Pausing bot.`,
+        `🛑 [CIRCUIT BREAKER] ${ddCap.toFixed(1)}% Session Drawdown limit reached (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Halting autonomy.`,
         'error'
       );
-      setBotState((b) => ({ ...b, enabled: false }));
-      voice.speak('5% session drawdown limit reached. Auto trading suspended for capital protection.', 'urgent');
-      sound.play('loss');
+      handleStopAutonomy('circuit_breaker');
       return;
     }
 
     const currentLoss = botState.currentDailyLoss ?? 0;
     if (currentLoss >= botState.maxDailyLoss) {
       addLog(`Daily loss limit reached ($${currentLoss.toFixed(2)} / $${botState.maxDailyLoss}). Pausing bot.`, 'warn');
-      setBotState((b) => ({ ...b, enabled: false }));
+      handleStopAutonomy('daily_loss_limit');
       return;
     }
 
-    if (botState.consecutiveLosses >= botState.maxConsecutiveLosses) {
-      addLog(`Consecutive loss limit reached (${botState.consecutiveLosses}). Pausing bot for risk cooldown.`, 'warn');
-      setBotState((b) => ({ ...b, enabled: false }));
+    const maxLossLimit = appliedAutonomySettings?.holdRules.consecutiveLossLimit || botState.maxConsecutiveLosses;
+    if (botState.consecutiveLosses >= maxLossLimit) {
+      addLog(`Consecutive loss limit reached (${botState.consecutiveLosses}/${maxLossLimit}). Pausing autonomy for cooldown.`, 'warn');
+      handleStopAutonomy('consecutive_loss_limit');
       return;
+    }
+
+    // Evaluate SBAgent Intelligent Autonomy Gate if granted
+    if (sbagentAutonomyGrant && autonomyMode === 'RUNNING') {
+      const currentOpenExp = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
+      const snap = {
+        symbol: selectedSymbol,
+        currentPrice,
+        candles,
+        indicators,
+        regime: regime.type,
+        consecutiveLosses: botState.consecutiveLosses,
+        openExposure: currentOpenExp,
+        balance,
+        consensusScore: algorithmicDecision?.consensus?.weightedAgreement ?? algorithmicDecision?.consensus?.agreementRatio ?? algorithmicDecision?.confidence ?? 0.65,
+        consensusDirection: (algorithmicDecision?.consensus?.consensusDirection ?? (algorithmicDecision?.action?.includes('BUY') ? 'BUY' : algorithmicDecision?.action?.includes('SELL') ? 'SELL' : 'NEUTRAL')) as any,
+        algorithmicConfidence: algorithmicDecision?.confidence ?? 0.65,
+      };
+
+      const autonomyDecision = SBAgent.decide(snap);
+      if (autonomyDecision.action === 'HOLD') {
+        auditLogger.record({
+          type: 'HOLD_DECISION',
+          symbol: selectedSymbol,
+          action: 'HOLD',
+          reason: autonomyDecision.reason,
+        });
+        addLog(`🛡️ [SBAGENT HOLD] ${autonomyDecision.reason}`, 'info');
+        return;
+      }
     }
 
     const { action, confidence, consensus } = algorithmicDecision;
@@ -1405,9 +1583,24 @@ export default function App() {
     }
 
     lastBotTradeTimeRef.current = now;
-    const effectiveStake = martingaleState.enabled
-      ? martingaleState.currentStake
-      : (botState.stake || stake || 1.0);
+    const effectiveStake = appliedAutonomySettings?.calibratedStake
+      ?? (martingaleState.enabled ? martingaleState.currentStake : (botState.stake || stake || 1.0));
+    const effectiveDuration = appliedAutonomySettings?.calibratedDuration
+      ?? (aiPrediction?.suggested_duration || algorithmicDecision.duration || 15);
+    const effectiveDurationUnit = appliedAutonomySettings?.calibratedDurationUnit || 'minutes';
+
+    auditLogger.record({
+      type: 'AUTONOMOUS_TRADE',
+      symbol: selectedSymbol,
+      action: tradeDir,
+      reason: `Autonomous trade executed: ${tradeDir} (Confidence: ${Math.round(confidence * 100)}%, Stake: $${effectiveStake.toFixed(2)})`,
+      metadata: {
+        stake: effectiveStake,
+        duration: effectiveDuration,
+        confidence,
+        regime: regime.type,
+      },
+    });
     
     if (sniperSetup?.isPrimed && sniperSetup.direction === tradeDir) {
       addLog(`🎯 Auto-Bot SNIPER signal executed: ${tradeDir} (${sniperSetup.score}% confluence, ${sniperSetup.recommendedDuration.label}, Stake $${effectiveStake.toFixed(2)})`, 'success');
@@ -1427,9 +1620,8 @@ export default function App() {
         trailingStopConfig
       );
     } else {
-      const optDuration = aiPrediction?.suggested_duration || algorithmicDecision.duration || 15;
       addLog(`Auto-Bot signal triggered: ${tradeDir} (Confidence: ${Math.round(confidence * 100)}%, Stake $${effectiveStake.toFixed(2)})`, 'info');
-      executeTrade(tradeDir, effectiveStake, optDuration, 'AUTO_BOT', 'minutes', undefined, trailingStopConfig);
+      executeTrade(tradeDir, effectiveStake, effectiveDuration, 'AUTO_BOT', effectiveDurationUnit, undefined, trailingStopConfig);
     }
   }, [
     botState,
@@ -1952,8 +2144,21 @@ export default function App() {
               />
             </div>
 
-            {/* Right Column: Trade Execution Deck & AI Intelligence Card */}
+            {/* Right Column: Autonomy Control, Trade Execution Deck & AI Intelligence Card */}
             <div className="lg:col-span-4 flex flex-col gap-5">
+              <AutonomyCard
+                autonomyMode={autonomyMode}
+                sbagentAutonomyGrant={sbagentAutonomyGrant}
+                autonomyPreset={autonomyPreset}
+                appliedSettings={appliedAutonomySettings}
+                lastError={lastAutonomyError}
+                onRunAutonomously={handleRunAutonomously}
+                onStopAutonomy={handleStopAutonomy}
+                onConfigure={handleConfigureAutonomy}
+                currentSymbol={selectedSymbol}
+                balance={balance}
+              />
+
               <TradeControls
                 stake={stake}
                 onStakeChange={setStake}
@@ -2040,7 +2245,14 @@ export default function App() {
             />
             <BotAutoTrader
               botState={botState}
-              onUpdateBotState={(updates) => setBotState((prev) => ({ ...prev, ...updates }))}
+              onUpdateBotState={(updates) => {
+                if (typeof updates.enabled === 'boolean') {
+                  if (updates.enabled) handleRunAutonomously();
+                  else handleStopAutonomy('user_button');
+                } else {
+                  setBotState((prev) => ({ ...prev, ...updates }));
+                }
+              }}
               logs={botLogs}
               onClearLogs={() => setBotLogs([])}
               martingaleState={martingaleState}
@@ -2123,7 +2335,11 @@ export default function App() {
             botEnabled={botState.enabled}
             onToggleBot={() => {
               sound.play('toggle');
-              setBotState((prev) => ({ ...prev, enabled: !prev.enabled }));
+              if (botState.enabled) {
+                handleStopAutonomy('user_button');
+              } else {
+                handleRunAutonomously();
+              }
             }}
             balance={balance}
             onReplenishVirtualAnchor={handleReplenishVirtualAnchor}
@@ -2137,6 +2353,13 @@ export default function App() {
       </main>
 
       {/* Modals */}
+      <AutonomyConfigModal
+        isOpen={isAutonomyConfigOpen}
+        onClose={() => setIsAutonomyConfigOpen(false)}
+        preset={autonomyPreset}
+        onSavePreset={handleSaveAutonomyPreset}
+      />
+
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
@@ -2300,6 +2523,8 @@ export default function App() {
         isAutonomousRunning={isAutonomousRunning}
         currency={currency}
         isLiveMode={isLiveMode}
+        isHoldAdvised={algorithmicDecision?.action === 'HOLD'}
+        holdReason={algorithmicDecision?.reason}
       />
 
       {/* System Copilot Persistent FAB & Bottom-Sheet */}
@@ -2400,9 +2625,16 @@ export default function App() {
           setStake(newStake);
         }}
         onToggleBot={() => {
-          sound.play('toggle');
-          setBotState((prev) => ({ ...prev, enabled: !prev.enabled }));
+          if (botState.enabled) {
+            handleStopAutonomy('user_button');
+          } else {
+            handleRunAutonomously();
+          }
         }}
+        onRunAutonomously={handleRunAutonomously}
+        onStopAutonomy={handleStopAutonomy}
+        autonomyMode={autonomyMode}
+        sbagentAutonomyGrant={sbagentAutonomyGrant}
         onToggleSniper={() => {
           sound.play('toggle');
           setIsSniperTriggerArmed((prev) => !prev);

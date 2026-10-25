@@ -19,12 +19,17 @@ import {
 } from 'lucide-react';
 import { voiceInput, VoiceTradeCommand } from '../lib/voiceInputEngine';
 import { sound } from '../lib/soundEngine';
+import { AutonomyMode } from '../types/autonomy';
 
 interface VoiceCommandHUDProps {
   onExecuteTrade: (direction: 'CALL' | 'PUT') => void;
   onDurationChange: (duration: number, unit?: 'ticks' | 'seconds' | 'minutes') => void;
   onStakeChange: (stake: number) => void;
   onToggleBot: () => void;
+  onRunAutonomously?: () => void;
+  onStopAutonomy?: (reason?: string) => void;
+  autonomyMode?: AutonomyMode;
+  sbagentAutonomyGrant?: boolean;
   onToggleSniper: () => void;
   onReplenishAnchor: () => void;
   onSelectSymbol?: (symbol: string) => void;
@@ -64,6 +69,14 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [showCheatSheet, setShowCheatSheet] = useState(false);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
+  const [textCommand, setTextCommand] = useState('');
+
+  const handleTextSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!textCommand.trim()) return;
+    voiceInput.processSpokenText(textCommand.trim());
+    setTextCommand('');
+  };
 
   const isSupported = voiceInput.isSupported();
 
@@ -119,10 +132,44 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
           break;
 
         case 'TOGGLE_BOT':
-          p.onToggleBot();
+          if (p.onRunAutonomously && p.onStopAutonomy) {
+            if (p.botEnabled) {
+              p.onStopAutonomy('user_voice');
+            } else {
+              p.onRunAutonomously();
+            }
+          } else {
+            p.onToggleBot();
+          }
           setLastExecutedCommand({
             text: cmd.rawText,
-            action: p.botEnabled ? 'Automated Bot stopped' : 'Automated Bot activated',
+            action: p.botEnabled ? 'Autonomous Trading stopped' : 'Autonomous Trading activated',
+            timestamp: Date.now(),
+          });
+          break;
+
+        case 'RUN_AUTONOMOUSLY':
+          if (p.onRunAutonomously) {
+            p.onRunAutonomously();
+          } else {
+            p.onToggleBot();
+          }
+          setLastExecutedCommand({
+            text: cmd.rawText,
+            action: 'Autonomy granted — SBAgent configuring and trading',
+            timestamp: Date.now(),
+          });
+          break;
+
+        case 'STOP_AUTONOMY':
+          if (p.onStopAutonomy) {
+            p.onStopAutonomy('user_voice');
+          } else {
+            p.onToggleBot();
+          }
+          setLastExecutedCommand({
+            text: cmd.rawText,
+            action: 'Autonomy stopped',
             timestamp: Date.now(),
           });
           break;
@@ -228,7 +275,7 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
   };
 
   return (
-    <div className="fixed bottom-16 sm:bottom-6 left-3 sm:left-6 z-40 flex flex-col items-start gap-2 max-w-sm pointer-events-none">
+    <div className="fixed bottom-20 sm:bottom-6 left-3 sm:left-6 z-40 flex flex-col items-start gap-2 max-w-sm pointer-events-none">
       {/* Toast Notification for Executed Voice Action */}
       {lastExecutedCommand && (
         <div className="pointer-events-auto flex items-center gap-2.5 px-3.5 py-2.5 bg-slate-900/95 border border-cyan-500/40 rounded-xl shadow-2xl backdrop-blur-md text-xs font-mono text-slate-100 animate-in fade-in slide-in-from-bottom-2 duration-200">
@@ -344,6 +391,24 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
                 <span className="text-slate-500">Tap microphone or say command to trigger actions</span>
               )}
             </div>
+
+            {/* Direct Text Command Input (Silent / Fallback Path) */}
+            <form onSubmit={handleTextSubmit} className="flex items-center gap-1.5 pt-1">
+              <input
+                type="text"
+                value={textCommand}
+                onChange={(e) => setTextCommand(e.target.value)}
+                placeholder='Type: "Start bot", "Stake 5", "Open Rise"...'
+                className="flex-1 bg-slate-950 border border-slate-700/80 rounded-xl px-2.5 py-1.5 text-[11px] text-white placeholder-slate-500 font-mono outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-all"
+              />
+              <button
+                type="submit"
+                disabled={!textCommand.trim()}
+                className="px-2.5 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-[11px] font-mono font-bold transition-all disabled:opacity-40 disabled:pointer-events-none active:scale-95"
+              >
+                Run
+              </button>
+            </form>
           </div>
 
           {/* Quick Voice Simulation Buttons */}

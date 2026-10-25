@@ -43,6 +43,8 @@ export type VoiceTradeCommandType =
   | 'SET_DURATION'
   | 'SET_STAKE'
   | 'TOGGLE_BOT'
+  | 'RUN_AUTONOMOUSLY'
+  | 'STOP_AUTONOMY'
   | 'ARM_SNIPER'
   | 'REPLENISH_ANCHOR'
   | 'SWITCH_SYMBOL'
@@ -186,21 +188,25 @@ export function parseVoiceTradeCommand(transcript: string): VoiceTradeCommand | 
     };
   }
 
-  // 5. Bot toggle: "Start bot", "Stop bot", "Activate bot"
-  if (/\b(?:start|activate|enable|turn on|run)\s+(?:the\s+)?(?:auto\s*)?bot\b/i.test(lower)) {
+  // 5. Unified Autonomy & Bot Control: "run autonomously", "start autonomy", "start bot", "run bot"
+  if (
+    /\b(?:run|start|grant|activate|launch)\s+(?:autonomously|autonomy)\b/i.test(lower) ||
+    /\b(?:start|activate|enable|turn on|run)\s+(?:the\s+)?(?:auto\s*)?bot\b/i.test(lower)
+  ) {
     return {
-      type: 'TOGGLE_BOT',
+      type: 'RUN_AUTONOMOUSLY',
       rawText: text,
-      payload: { enabled: true },
-      feedbackMessage: 'Automated trading engine activated.',
+      feedbackMessage: 'Autonomy granted. SBAgent is configuring and starting trading.',
     };
   }
-  if (/\b(?:stop|pause|disable|turn off|halt)\s+(?:the\s+)?(?:auto\s*)?bot\b/i.test(lower)) {
+  if (
+    /\b(?:stop|halt|cancel|revoke|pause|disable)\s+(?:autonomously|autonomy)\b/i.test(lower) ||
+    /\b(?:stop|pause|disable|turn off|halt)\s+(?:the\s+)?(?:auto\s*)?bot\b/i.test(lower)
+  ) {
     return {
-      type: 'TOGGLE_BOT',
+      type: 'STOP_AUTONOMY',
       rawText: text,
-      payload: { enabled: false },
-      feedbackMessage: 'Automated trading engine stopped.',
+      feedbackMessage: 'Autonomy stopped.',
     };
   }
   if (/\b(?:toggle)\s+(?:the\s+)?(?:auto\s*)?bot\b/i.test(lower)) {
