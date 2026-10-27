@@ -1,86 +1,70 @@
-# UI Transitions, Loading, Responsiveness & Adaptive Design Plan (sbatomic4.1)
+# Native Host Bridge Integration Plan (SBAtomic Host)
 
-Elevate the terminal into a cohesive, adaptive product with a unified motion language, real skeleton loading states, responsive viewport boundaries (from 360px mobile to 1440px desktop), and thumb-first mobile autonomy integration without modifying underlying trading engines.
+Seamlessly connect the sbatomic web trading terminal with its Android WebView native wrapper (**SBAtomic Host**). Provides idempotent boot loader dismissal (`notifyReady`), contextual tactile haptics, battery-conscious screen wake management during autonomous execution, and native toasts—failing soft with zero errors in standard browsers.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> All Phase 1 user decisions are confirmed and incorporated as non-negotiable architectural anchors:
-> - **Chart Loading**: Skeleton frame with subtle candle placeholders (avoiding blank canvas voids or flashing overlays).
-> - **Tab Motion**: Subtle cross-fade with slight horizontal shift (8–12px) with persistent chart mounting to prevent remount jitter.
-> - **Mobile Autonomy Presentation (< 480px)**: Compact status bar integrated directly above the sticky mobile execution deck for immediate thumb accessibility.
+> The following user preferences were confirmed in Phase 1 and are locked as core architectural commitments:
+> - **Host TTS Strategy**: Native host `speak()` is used **strictly as a fallback** when the web-based Kokoro/Web Speech synthesis is unavailable, disabled, or unconfigured, completely preventing dual-audio or overlapping voices.
+> - **Native Toasts**: The host bridge will emit native Android toasts (`showToast`) on **autonomy state changes** (Granted/Revoked/Armed) and **critical risk/circuit breaker errors**, complementing web notifications.
 
 ---
 
 ## 1. Overview & Core Concept
 
-- **What It Does**: Establishes a system-wide motion language, real event-driven loading skeletons, robust multi-tier breakpoints (`< 480px`, `480–768px`, `768–1024px`, `≥ 1024px`), and adaptive component disclosure across the platform.
-- **Target Audience**: Quantitative and manual traders operating on varying devices (mobile phones, tablets, high-resolution desktop terminals) who require continuous situational awareness, zero visual layout shift, and immediate control without sensory fatigue.
-- **Key Value**: Delivers native app fluidity and visual poise. Eliminates blank loading flashes, prevents mobile button overlap, standardizes animation timing, and keeps the trading console calm, clear, and instant.
+- **What It Does**: Establishes a lightweight, resilient TypeScript bridge client (`src/lib/nativeHost.ts`) that safely communicates with Android WebView host objects (`window.AtomicBridge` or `window.SBAtomicHost`) without polluting standard browser runtimes.
+- **Target Persona**: Mobile algorithmic traders running the terminal embedded within the dedicated Android APK/wrapper shell who need native haptic feedback on trade execution, persistent screen wake while the bot is active, and instant boot readiness handoff.
+- **Key Value**: Delivers native app poise (haptics on trade submit, device wake locking during active autonomy, instant native splash dismissal) without touching or refactoring trading math, WebSocket protocols, or Kelly sizing.
 
 ---
 
-## 2. User Experience & Visual Design
+## 2. User Experience & Native Integration
 
 ### Key User Flows
 
-1. **App Shell First Paint & Candle Load Flow**:
-   - On load or asset change, the chart area displays a geometric skeleton mirror consisting of simulated candle stems and bodies pulsating with a subtle 600ms opacity shimmer.
-   - When WebSocket ticks/candles arrive, the skeleton cross-fades into the real canvas smoothly (200ms) with zero layout reflow.
-2. **Tab Transition Flow**:
-   - Switching between `Terminal`, `Multi-Agent & Analytics`, `sbagent Co-Pilot`, `Markets`, and `Blackbox Hub` uses a 200–250ms cross-fade with a gentle 10px horizontal slide (`translate-x-2` to `translate-x-0`).
-   - The primary interactive chart container remains mounted in the background via CSS display/opacity to avoid canvas re-initialization and WebSocket re-subscription delays.
-3. **Mobile Autonomy & Execution Flow (< 480px)**:
-   - A sticky bottom bar docks cleanly against `--safe-bottom` (`pb-safe`).
-   - Directly above the Rise/Fall touch targets (min 46px height), a compact Autonomy strip displays:
-     `[AUTONOMY: RUNNING · SBAgent GRANTED] [STOP]` or `[AUTONOMY: IDLE] [RUN AUTONOMOUSLY]`.
-   - The Voice Command HUD trigger rests safely at `bottom-24`, preventing thumb collisions.
-4. **Autonomous Phase Execution Feedback**:
-   - Clicking `"Run autonomously"` on the AutonomyCard steps through real-time phase badges:
-     *Validating Prerequisites* → *Configuring SBAgent & Risk* → *Autonomous Engine Armed*.
-   - A thin Cyan progress rail provides visual confirmation of the configuration sequence.
-5. **Drawers & Modals Exit Transitions**:
-   - Slide-over drawers (Settings, Positions, Google Docs, Token Setup) animate with an enter transition (`animate-slide-up` / `scale-in`) and graceful 150ms leave transition before unmounting.
+1. **Boot & Handshake Flow**:
+   - The Android host launches with its native splash/boot loader.
+   - When the web app mounts its primary shell (`App.tsx`) and reaches an interactive state (Deriv WebSocket initialized or main UI rendered), `notifyHostReady()` fires once.
+   - The native host intercepts the call and smoothly dismisses its native loader curtain. If the web app is opened in a standard desktop or mobile browser, the call no-ops cleanly with zero console warnings.
+2. **Autonomy Start / Stop & Screen Wake Flow**:
+   - When the user taps `"Run autonomously"` or starts the trading bot:
+     - Bridge triggers `haptic('success')`.
+     - Bridge requests `keepScreenOn(true)` so the device display stays active during live automated market monitoring.
+     - Bridge displays a native toast: `"SBAtomic Autonomy: Active (SBAgent Granted)"`.
+   - When autonomy is revoked or stopped:
+     - Bridge triggers `haptic('light')`.
+     - Bridge releases wake lock via `keepScreenOn(false)`.
+     - Bridge displays a native toast: `"SBAtomic Autonomy: Stopped"`.
+3. **Trade Execution & Safety Alerts**:
+   - Tapping Rise (`CALL ↑`) or Fall (`PUT ↓`):
+     - Bridge fires `haptic('medium')` for crisp tactile confirmation.
+   - Circuit breaker tripped / risk ceiling hit / hard trade rejection:
+     - Bridge fires `haptic('error')` alongside a native toast alerting the user to check risk logs.
 
-### Visual Identity & Theme Tokens
+### Haptic Feedback Mapping
 
-```css
-/* Unified Motion Tokens */
---duration-micro: 120ms;       /* Button clicks, toggle switches, hover highlights */
---duration-ui: 220ms;          /* Dropdowns, tooltips, segmented toggles, tab shifts */
---duration-panel: 320ms;       /* Drawers, modals, bottom sheets */
---duration-hero: 600ms;        /* Skeletons, pulse glows, radar waves */
-
-/* Easing Curves */
---ease-enter: cubic-bezier(0.16, 1, 0.3, 1);  /* Smooth deceleration for elements appearing */
---ease-leave: cubic-bezier(0.4, 0, 1, 1);      /* Clean acceleration for elements exiting */
-
-/* Elevation Hierarchy */
---z-surface: 10;   /* Cards, chart panels */
---z-docked: 20;    /* Sticky mobile execution bar, chart toolbars */
---z-drawer: 40;    /* Slide-over settings drawers, tools dropdown */
---z-modal: 50;     /* Fullscreen dialogs, onboarding tour, token modals */
---z-toast: 60;     /* Voice HUD, alert toasts, error notices */
-```
-
-- **Prefers-Reduced-Motion**: Under `prefers-reduced-motion: reduce`, all translations and scale transforms are neutralized to simple opacity dissolves (`opacity: 0` to `opacity: 1`), and infinite pulse animations are halted.
-- **Tabular Figures**: All price quotes, profit & loss amounts, countdown timers, and Kelly multipliers enforce `tabular-nums` / `font-mono` to prevent horizontal jitter during rapid tick fluctuations.
+| Trigger | Bridge Call | Tactile Experience |
+| :--- | :--- | :--- |
+| **Autonomy Start / Bot Arming** | `hostHaptic('success')` | Satisfying double-pulse confirmation |
+| **Autonomy Stop / Manual Halt** | `hostHaptic('light')` | Subtle single micro-tap |
+| **Manual Rise / Fall Order Submit**| `hostHaptic('medium')` | Solid single click response |
+| **Circuit Breaker / Risk Violation** | `hostHaptic('error')` | Heavy alert buzz |
+| **Soft Warning / Limit Reached** | `hostHaptic('light')` | Subtle warning tap |
 
 ---
 
 ## 3. Key Product Decisions & Trade-Offs
 
-- **Decision 1: Skeleton Frame vs Blur Placeholder for Chart Loading**:
-  - *Chosen Approach*: Lightweight SVG/CSS candle skeleton grid that mirrors real candlestick intervals.
-  - *Why*: Eliminates the jarring black flash when switching volatility assets (e.g., from `1HZ10V` to `1HZ100V`), maintaining visual continuity.
-  - *Alternatives Considered*: Blur placeholder of previous asset (causes misleading chart perception across different volatility scales).
-- **Decision 2: Persistent Terminal Mount During Tab Transitions**:
-  - *Chosen Approach*: Keep the Terminal view mounted in the DOM (`hidden` / `opacity-0` when inactive) while animating secondary tabs.
-  - *Why*: Prevents re-creating the HTML5 2D canvas, re-measuring ResizeObservers, and re-fetching 120 candles on every tab switch.
-  - *Alternatives Considered*: Full unmount/remount on every tab (leads to 400ms white/black screen flicker and CPU spikes).
-- **Decision 3: Integrated Mobile Autonomy Strip**:
-  - *Chosen Approach*: Dock a compact Autonomy status and quick-toggle strip directly atop `MobileExecutionBar.tsx`.
-  - *Why*: Users on mobile viewports (< 480px) rarely scroll past the chart to inspect the right rail; hosting autonomy in the sticky bar ensures instantaneous emergency stop and start capability.
+- **Decision 1: Bridge Resolution & Idempotency**:
+  - *Chosen Approach*: Support both `window.AtomicBridge` and legacy alias `window.SBAtomicHost`, with flags `window.__ATOMIC_NATIVE__` / `window.__SBATOMIC_HOST__`. Wrap all calls in `try/catch` and enforce an internal `isReadySignaled` latch.
+  - *Why*: Eliminates race conditions if `atomic-ready` event fires before or after React hydration, and guarantees `notifyReady()` is only dispatched once per page lifecycle.
+  - *Alternatives Considered*: Direct unbound calls (risks crashing if bridge is injected asynchronously by WebView).
+- **Decision 2: Voice Overlap Prevention**:
+  - *Chosen Approach*: Prioritize the built-in web `voice` engine (Kokoro neural TTS / Web Speech). Only route speech to `hostSpeak()` if web speech is disabled or fails to initialize.
+  - *Why*: Prevents jarring simultaneous speech synthesis from two independent audio engines.
+- **Decision 3: Zero Secret Exposure**:
+  - *Chosen Approach*: Strictly zero tokens, credentials, or private state transmitted across the bridge. Only status messages, haptic enum styles, and boolean flags are exchanged.
 
 ---
 
@@ -88,65 +72,58 @@ Elevate the terminal into a cohesive, adaptive product with a unified motion lan
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        ADAPTIVE TOP NAVIGATION                         │
-│  [Logo] · [Status · Latency] · [Tabs] · [Balance] · [Tools ▾] [Account]│
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-         ┌──────────────────────────┴───────────────────────────┐
-         ▼                                                      ▼
-┌─────────────────────────────────┐   ┌──────────────────────────────────┐
-│   INTERACTIVE CHART CONTAINER   │   │     EXECUTION & AUTONOMY RAIL    │
-│  ┌───────────────────────────┐  │   │  ┌────────────────────────────┐  │
-│  │ Segmented Overlay Toolbar │  │   │  │ AutonomyCard               │  │
-│  │ [MAs][BB][RSI][MTF][Vol]  │  │   │  │ Phase: Validating/Active   │  │
-│  └───────────────────────────┘  │   │  │ [Run Autonomously] [Config]│  │
-│  ┌───────────────────────────┐  │   │  └────────────────────────────┘  │
-│  │ Candle Skeleton / Canvas  │  │   │  ┌────────────────────────────┐  │
-│  │ Cross-fade on Tick Stream │  │   │  │ TradeControls              │  │
-│  └───────────────────────────┘  │   │  │ HOLD Warning Advisory      │  │
-│  ┌───────────────────────────┐  │   │  │ [↑ RISE]      [↓ FALL]     │  │
-│  │ Positions Drawer          │  │   │  └────────────────────────────┘  │
-│  └───────────────────────────┘  │   └──────────────────────────────────┘
-└─────────────────────────────────┘
-                                    │
-                                    ▼ (Mobile Viewports < 768px)
+│                   WEB TRADING RUNTIME (REACT / TS)                     │
+│                                                                        │
+│  ┌───────────────────────┐             ┌────────────────────────────┐  │
+│  │   App.tsx Shell       │             │   Autonomy & Trade Engines │  │
+│  │  - Mount event        │             │  - handleRunAutonomously   │  │
+│  │  - atomic-ready event │             │  - handleStopAutonomy      │  │
+│  └───────────┬───────────┘             │  - executeTrade (CALL/PUT) │  │
+│              │                         └─────────────┬──────────────┘  │
+│              ▼                                       ▼                 │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                    src/lib/nativeHost.ts                         │  │
+│  │  - isNativeHost() : boolean                                      │  │
+│  │  - notifyHostReady() : void (idempotent)                         │  │
+│  │  - hostHaptic(style: 'light'|'medium'|'success'|'error')         │  │
+│  │  - hostKeepScreenOn(on: boolean)                                 │  │
+│  │  - hostToast(msg: string)                                        │  │
+│  │  - hostSpeak(text: string) (fallback only)                       │  │
+│  │  - hostDeviceInfo() : DeviceInfo | null                          │  │
+│  └──────────────────────────────────┬───────────────────────────────┘  │
+└─────────────────────────────────────┼──────────────────────────────────┘
+                                      │ Safe IPC (try/catch guarded)
+                                      ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                     STICKY MOBILE EXECUTION BAR                        │
-│  [Autonomy Strip: RUNNING · SBAgent Granted] [Stop Button]             │
-│  [Stake Stepper] [Duration] ── [CALL ↑ RISE] ── [PUT ↓ FALL]           │
+│                   ANDROID NATIVE HOST (WEBVIEW)                        │
+│  window.AtomicBridge || window.SBAtomicHost                            │
+│  - dismiss boot loader curtain (notifyReady)                           │
+│  - Vibrator / HapticFeedbackConstants                                  │
+│  - FLAG_KEEP_SCREEN_ON                                                 │
+│  - android.widget.Toast                                                │
+│  - TextToSpeech (fallback)                                             │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Component Upgrades
+### Module Specifications
 
-1. **`src/index.css`**:
-   - Add unified motion duration & easing utility classes (`.duration-micro`, `.duration-ui`, `.duration-panel`).
-   - Add `.tab-crossfade-enter` keyframe with subtle horizontal slide (`translate-x-2` -> `translate-x-0`).
-   - Add `.skeleton-shimmer` and `.candle-skeleton` styles for dark/light themes.
-   - Comprehensive `@media (prefers-reduced-motion: reduce)` block.
-2. **`src/components/InteractiveChart.tsx`**:
-   - Add real loading state detection (`candles.length === 0` or switching symbol).
-   - Render a high-density, themed candle skeleton grid when data is loading.
-   - Smooth 200ms opacity dissolve when candles populate.
-3. **`src/components/AutonomyCard.tsx`**:
-   - Add phase progress indicator when starting autonomy (*Validating* -> *Configuring* -> *Armed*).
-   - Fluid glow transitions between `OFF`, `ARMED`, and `RUNNING` states.
-4. **`src/components/MobileExecutionBar.tsx`**:
-   - Embed compact Autonomy status strip directly above Rise/Fall buttons.
-   - One-tap `"Run"` / `"Stop"` button synchronized with global autonomy state.
-   - Strict `touch-action: manipulation` and safe-area padding (`pb-safe`).
-5. **`src/App.tsx`**:
-   - Optimize view container transitions (`tab-crossfade-enter`).
-   - Keep Terminal view persistent to prevent canvas remounts.
-   - Pass autonomy handlers to `MobileExecutionBar`.
+1. **`src/lib/nativeHost.ts` (New Utility)**:
+   - TypeScript definitions for `NativeHostBridge`, `HostHapticStyle`, and `HostDeviceInfo`.
+   - Idempotent `notifyHostReady()` helper listening to both direct invocation and `window.addEventListener('atomic-ready', ...)`.
+   - Safe proxy wrappers for `hostHaptic`, `hostKeepScreenOn`, `hostToast`, `hostSpeak`, `hostCopy`, and `hostDeviceInfo`.
+2. **`src/App.tsx` Integration**:
+   - `useEffect` on first paint calling `notifyHostReady()`.
+   - `useEffect` watching `autonomyMode` and `botState.enabled` calling `hostKeepScreenOn(true/false)`.
+   - Cleanup on unmount resetting `hostKeepScreenOn(false)`.
+   - Wiring `handleRunAutonomously`: `hostHaptic('success')` + `hostToast('Autonomy active')`.
+   - Wiring `handleStopAutonomy`: `hostHaptic('light')` + `hostToast('Autonomy stopped')`.
+   - Wiring `executeTrade`: `hostHaptic('medium')` on entry, and `hostHaptic('error')` on rejection/blocker.
 
 ---
 
 ## 5. Rollout Order & Verification Plan
 
-1. **Phase 1: Motion Tokens & CSS Architecture**: [COMPLETED] Implemented shared timing tokens, easing curves, skeleton shimmer, and reduced-motion rules in `src/index.css`.
-2. **Phase 2: Chart Skeleton & Loading States**: [COMPLETED] Built the candle skeleton inside `src/components/InteractiveChart.tsx` with smooth canvas cross-fades.
-3. **Phase 3: Tab View Transitions & Persistent Mounting**: [COMPLETED] Updated `src/App.tsx` tab switching to use persistent DOM preservation with horizontal cross-fade animation.
-4. **Phase 4: Mobile Autonomy Integration**: [COMPLETED] Enhanced `src/components/MobileExecutionBar.tsx` with the integrated autonomy strip, one-touch start/stop, and safe-area offsets, wired directly to `App.tsx`.
-5. **Phase 5: AutonomyCard Phase Progress**: [COMPLETED] Enhanced `src/components/AutonomyCard.tsx` with stage-aware feedback indicators and phase progress tracking.
-6. **Phase 6: Verification**: [COMPLETED] Validated with `lint_applet` (`tsc --noEmit`) and `compile_applet` (100% clean production build).
+1. **Phase 1: Bridge Utility Module**: [COMPLETED] Created `src/lib/nativeHost.ts` with complete type guards and fallback safety for `window.AtomicBridge` / `window.SBAtomicHost`.
+2. **Phase 2: App Shell Ready & Screen Wake**: [COMPLETED] Wired `notifyHostReady()` on initial mount and battery-conscious `hostKeepScreenOn` observer into `src/App.tsx`.
+3. **Phase 3: Autonomy & Execution Haptics**: [COMPLETED] Wired tactile feedback and native toasts to `handleRunAutonomously`, `handleStopAutonomy`, and `executeTrade`, with `speakWithHostFallback` avoiding duplicate speech.
+4. **Phase 4: Verification & Compilation**: [COMPLETED] Validated with `lint_applet` (`tsc --noEmit`) and `compile_applet` (100% successful production build).

@@ -25,6 +25,7 @@ import {
 import { useIndicatorWorker } from './hooks/useIndicatorWorker';
 import { sound } from './lib/soundEngine';
 import { voice } from './lib/voiceEngine';
+import { notifyHostReady, hostHaptic, hostKeepScreenOn, hostToast, hostSpeak } from './lib/nativeHost';
 import { calculateCoreRiskMetrics, calculateDynamicStake, validateDerivDuration } from './lib/riskEngine';
 import { detectPattern, recordPatternOutcome } from './lib/adaptivePatternEngine';
 import {
@@ -434,6 +435,30 @@ export default function App() {
     []
   );
 
+  // Fallback speech dispatcher: uses Web TTS when enabled; falls back to native host speak if web voice is off/unavailable
+  const speakWithHostFallback = useCallback((text: string, personaStyle: any = 'tactical') => {
+    if (voice.getEnabled()) {
+      voice.speak(text, personaStyle);
+    } else {
+      hostSpeak(text);
+    }
+  }, []);
+
+  // Signal boot readiness to native Android host (dismisses native bootloader curtain once interactive)
+  useEffect(() => {
+    notifyHostReady();
+  }, []);
+
+  // Native Host Screen Wake Lock: Keep screen on in Android host while Autonomy or Bot is active
+  useEffect(() => {
+    const isAutonomyActive = autonomyMode === 'RUNNING' || botState.enabled || isAutonomousRunning;
+    hostKeepScreenOn(isAutonomyActive);
+
+    return () => {
+      hostKeepScreenOn(false);
+    };
+  }, [autonomyMode, botState.enabled, isAutonomousRunning]);
+
   // Check for Deriv OAuth tokens from popup or redirect
   useEffect(() => {
     try {
@@ -752,15 +777,17 @@ export default function App() {
     SBAgent.onAutonomyRevoked(reason);
     setAppliedAutonomySettings(null);
     sound.play('click');
+    hostHaptic('light');
+    hostToast('Autonomy stopped');
     addLog(`⏹️ Autonomy stopped (${reason}). Trading severed.`, 'info');
-    voice.speak('Autonomy stopped.', 'tactical');
+    speakWithHostFallback('Autonomy stopped.', 'tactical');
     auditLogger.record({
       type: 'RISK_SHIELD',
       symbol: selectedSymbol,
       action: 'AUTONOMY_REVOKED',
       reason: `Autonomy revoked by ${reason}.`,
     });
-  }, [selectedSymbol, addLog]);
+  }, [selectedSymbol, addLog, speakWithHostFallback]);
 
   const handleRunAutonomously = useCallback(() => {
     setLastAutonomyError(null);
@@ -776,6 +803,8 @@ export default function App() {
     if (blockers.length > 0) {
       setLastAutonomyError(blockers);
       sound.play('alert');
+      hostHaptic('error');
+      hostToast('Autonomy prerequisites unmet');
       addLog(`❌ Autonomy prerequisites unmet: ${blockers.join(' | ')}`, 'error');
       return;
     }
@@ -807,6 +836,8 @@ export default function App() {
       setBotState((b) => ({ ...b, enabled: false }));
       const blockErrors = configResult.blockers || ['SBAgent could not complete configuration.'];
       setLastAutonomyError(blockErrors);
+      hostHaptic('error');
+      hostToast('Autonomy configuration failed');
       auditLogger.record({
         type: 'RISK_SHIELD',
         symbol: selectedSymbol,
@@ -835,8 +866,10 @@ export default function App() {
 
     // E) Feedback + audit
     sound.play('trade');
+    hostHaptic('success');
+    hostToast('Autonomy active · SBAgent granted');
     addLog(`🚀 Autonomy granted — SBAgent calibrated stake $${applied.calibratedStake.toFixed(2)}, ${applied.calibratedDuration}${applied.calibratedDurationUnit.charAt(0)}. Auto-trading active.`, 'success');
-    voice.speak('Autonomy granted. SBAgent is configuring and starting trading.', 'tactical');
+    speakWithHostFallback('Autonomy granted. SBAgent is configuring and starting trading.', 'tactical');
     auditLogger.record({
       type: 'AUTONOMOUS_TRADE',
       symbol: sessionContext.symbol,
@@ -1053,6 +1086,8 @@ export default function App() {
     ) => {
       if (isExecuting) return;
       if (balance < tradeStake) {
+        hostHaptic('error');
+        hostToast(`Insufficient funds ($${balance.toFixed(2)}) for stake $${tradeStake}`);
         addLog(`Insufficient funds ($${balance.toFixed(2)}) for trade stake $${tradeStake}`, 'error');
         return;
       }
@@ -1061,6 +1096,8 @@ export default function App() {
       const currentOpenExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
       const maxTotalOpenExposure = Math.max(15, balance * 0.35); // 35% of balance or min $15
       if (currentOpenExposure + tradeStake > maxTotalOpenExposure) {
+        hostHaptic('light');
+        hostToast('Portfolio exposure cap reached');
         addLog(
           `🛑 [PORTFOLIO EXPOSURE LIMIT] Max total exposure cap reached: ($${currentOpenExposure.toFixed(2)} active + $${tradeStake.toFixed(2)} > $${maxTotalOpenExposure.toFixed(2)} limit). Trade blocked to protect margin.`,
           'warn'
@@ -1070,6 +1107,8 @@ export default function App() {
       }
 
       if (openTrades.length >= 4) {
+        hostHaptic('light');
+        hostToast('Max concurrent contracts reached (4)');
         addLog(
           `🛑 [PORTFOLIO EXPOSURE LIMIT] Max concurrent contracts limit reached (4 active positions). Trade blocked.`,
           'warn'
@@ -1083,12 +1122,14 @@ export default function App() {
         (coreRiskMetrics.maxDrawdownPercent >= 5.0 ||
           (botState.maxSessionDrawdownPercent && coreRiskMetrics.maxDrawdownPercent >= botState.maxSessionDrawdownPercent))
       ) {
+        hostHaptic('error');
+        hostToast('Circuit breaker: 5% session drawdown hit');
         addLog(
           `🛑 [CIRCUIT BREAKER] 5% Session Drawdown limit hit (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Auto-fire halted to protect equity.`,
           'error'
         );
         setBotState((b) => ({ ...b, enabled: false }));
-        voice.speak('Session drawdown limit reached. Auto trading suspended for capital protection.', 'urgent');
+        speakWithHostFallback('Session drawdown limit reached. Auto trading suspended for capital protection.', 'urgent');
         sound.play('loss');
         return;
       }
@@ -1101,6 +1142,7 @@ export default function App() {
       }
 
       setIsExecuting(true);
+      hostHaptic('medium');
       const uniqueSuffix = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 7).toUpperCase();
       const tradeId = `TRD-${uniqueSuffix}`;
       const entrySpot = currentPriceRef.current;
@@ -1232,11 +1274,13 @@ export default function App() {
 
         if (won) {
           sound.play('win');
-          voice.speak(`Contract settled with profit of $${(tradeStake * 0.95).toFixed(2)}`, 'calm');
+          hostHaptic('success');
+          speakWithHostFallback(`Contract settled with profit of $${(tradeStake * 0.95).toFixed(2)}`, 'calm');
           addLog(`✓ WON trade ${tradeId}: +$${(tradeStake * 0.95).toFixed(2)} (${tradeDirection} @ ${entrySpot.toFixed(3)} -> ${latestPrice.toFixed(3)})`, 'success');
         } else {
           sound.play('loss');
-          voice.speak(`Contract closed with loss of $${tradeStake.toFixed(2)}`, 'urgent');
+          hostHaptic('light');
+          speakWithHostFallback(`Contract closed with loss of $${tradeStake.toFixed(2)}`, 'urgent');
           addLog(`✗ LOST trade ${tradeId}: -$${tradeStake.toFixed(2)} (${tradeDirection} @ ${entrySpot.toFixed(3)} -> ${latestPrice.toFixed(3)})`, 'error');
         }
 
@@ -1322,6 +1366,7 @@ export default function App() {
       candles,
       indicators,
       decimals,
+      speakWithHostFallback,
     ]
   );
 
@@ -1983,7 +2028,11 @@ export default function App() {
         botEnabled={botState.enabled}
         onToggleBot={() => {
           sound.play('toggle');
-          setBotState((prev) => ({ ...prev, enabled: !prev.enabled }));
+          if (!botState.enabled) {
+            handleRunAutonomously();
+          } else {
+            handleStopAutonomy('navbar');
+          }
         }}
         onOpenTokenModal={() => setIsTokenModalOpen(true)}
         onOpenHelpModal={() => setIsHelpModalOpen(true)}
