@@ -209,6 +209,15 @@ export interface TradeRecord {
   profitLockSecuredAmount?: number;
   profitLockTriggerTime?: string;
   contract_id?: string | number;
+  profitPercentage?: number;
+  bidPrice?: number;
+  currentSpot?: number;
+  barrier?: number | string;
+  isDerivRealTime?: boolean;
+  dateExpiry?: number;
+  dateStart?: number;
+  isValidToSell?: boolean;
+  status?: string;
   indicators?: any;
   aiCritique?: AICritiqueResult | null;
 }

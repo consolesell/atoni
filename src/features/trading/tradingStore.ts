@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import { TradeRecord, TrailingStopConfig } from '../../types/trading';
-import { TradeDurationUnit } from '../../types/sniper';
+import { TradeRecord, TrailingStopConfig, Candle, Tick } from '../../types/trading';
+import { TradeDurationUnit, SniperConfluenceResult } from '../../types/sniper';
 
 interface TradingState {
   // Account & Execution
@@ -18,6 +18,13 @@ interface TradingState {
   duration: number;
   durationUnit: TradeDurationUnit;
   direction: 'CALL' | 'PUT';
+
+  // Market Feed State
+  currentPrice: number;
+  prevPrice: number;
+  candles: Candle[];
+  tickBuffer: Tick[];
+  sniperSetup: SniperConfluenceResult | null;
 
   // Positions
   openTrades: TradeRecord[];
@@ -40,11 +47,25 @@ interface TradingState {
   setDirection: (direction: 'CALL' | 'PUT') => void;
   setTrailingStopConfig: (config: TrailingStopConfig) => void;
 
+  setCurrentPrice: (price: number) => void;
+  setPrevPrice: (price: number) => void;
+  setCandles: (candles: Candle[] | ((prev: Candle[]) => Candle[])) => void;
+  setTickBuffer: (ticks: Tick[] | ((prev: Tick[]) => Tick[])) => void;
+  setSniperSetup: (setup: SniperConfluenceResult | null) => void;
+
   // Trade management
+  setOpenTrades: (trades: TradeRecord[] | ((prev: TradeRecord[]) => TradeRecord[])) => void;
   addOpenTrade: (trade: TradeRecord) => void;
   updateOpenTrade: (id: string, updates: Partial<TradeRecord>) => void;
-  closeTrade: (id: string, result: 'WIN' | 'LOSS' | 'SOLD', profit: number, exitPrice: number, exitReason?: string) => void;
-  setClosedTrades: (trades: TradeRecord[]) => void;
+  updateOpenTradesPnL: (updateFn: (trade: TradeRecord) => Partial<TradeRecord>) => void;
+  closeTrade: (
+    id: string,
+    result: 'WIN' | 'LOSS' | 'SOLD',
+    profit: number,
+    exitPrice: number,
+    exitReason?: string
+  ) => void;
+  setClosedTrades: (trades: TradeRecord[] | ((prev: TradeRecord[]) => TradeRecord[])) => void;
   clearHistory: () => void;
 }
 
@@ -62,6 +83,12 @@ export const useTradingStore = create<TradingState>((set) => ({
   duration: 15,
   durationUnit: 'minutes',
   direction: 'CALL',
+
+  currentPrice: 1000,
+  prevPrice: 1000,
+  candles: [],
+  tickBuffer: [],
+  sniperSetup: null,
 
   openTrades: [],
   closedTrades: [],
@@ -88,6 +115,32 @@ export const useTradingStore = create<TradingState>((set) => ({
   setDirection: (direction) => set({ direction }),
   setTrailingStopConfig: (trailingStopConfig) => set({ trailingStopConfig }),
 
+  setCurrentPrice: (currentPrice) => set({ currentPrice }),
+  setPrevPrice: (prevPrice) => set({ prevPrice }),
+  setCandles: (candlesOrUpdater) =>
+    set((state) => ({
+      candles:
+        typeof candlesOrUpdater === 'function'
+          ? candlesOrUpdater(state.candles)
+          : candlesOrUpdater,
+    })),
+  setTickBuffer: (ticksOrUpdater) =>
+    set((state) => ({
+      tickBuffer:
+        typeof ticksOrUpdater === 'function'
+          ? ticksOrUpdater(state.tickBuffer)
+          : ticksOrUpdater,
+    })),
+  setSniperSetup: (sniperSetup) => set({ sniperSetup }),
+
+  setOpenTrades: (tradesOrUpdater) =>
+    set((state) => ({
+      openTrades:
+        typeof tradesOrUpdater === 'function'
+          ? tradesOrUpdater(state.openTrades)
+          : tradesOrUpdater,
+    })),
+
   addOpenTrade: (trade) =>
     set((state) => ({ openTrades: [trade, ...state.openTrades] })),
 
@@ -95,6 +148,24 @@ export const useTradingStore = create<TradingState>((set) => ({
     set((state) => ({
       openTrades: state.openTrades.map((t) => (t.id === id ? { ...t, ...updates } : t)),
     })),
+
+  updateOpenTradesPnL: (updateFn) =>
+    set((state) => {
+      if (state.openTrades.length === 0) return state;
+      let changed = false;
+      const updated = state.openTrades.map((t) => {
+        const changes = updateFn(t);
+        const hasChange = Object.keys(changes).some(
+          (k) => (changes as any)[k] !== (t as any)[k]
+        );
+        if (hasChange) {
+          changed = true;
+          return { ...t, ...changes };
+        }
+        return t;
+      });
+      return changed ? { openTrades: updated } : state;
+    }),
 
   closeTrade: (id, result, profit, exitPrice, exitReason) =>
     set((state) => {
@@ -117,6 +188,13 @@ export const useTradingStore = create<TradingState>((set) => ({
       };
     }),
 
-  setClosedTrades: (closedTrades) => set({ closedTrades }),
+  setClosedTrades: (tradesOrUpdater) =>
+    set((state) => ({
+      closedTrades:
+        typeof tradesOrUpdater === 'function'
+          ? tradesOrUpdater(state.closedTrades)
+          : tradesOrUpdater,
+    })),
+
   clearHistory: () => set({ closedTrades: [] }),
 }));

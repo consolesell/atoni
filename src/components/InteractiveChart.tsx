@@ -817,12 +817,18 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
         }
 
         // D. Right-Axis Live ITM / OTM Unrealized PnL Tag
-        const isITM = isCall ? currentPrice > trade.entryPrice : currentPrice < trade.entryPrice;
-        const livePnl = isITM ? trade.amount * 0.95 : -trade.amount;
-        const pnlText = `${isITM ? '▲ ITM +' : '▼ OTM -'}$${safeFixed(Math.abs(livePnl), 2)}`;
+        const hasRealtimeProfit = typeof trade.profit === 'number' && trade.profit !== 0;
+        const livePnl = hasRealtimeProfit
+          ? trade.profit!
+          : (isCall ? currentPrice > trade.entryPrice : currentPrice < trade.entryPrice)
+            ? trade.amount * 0.95
+            : -trade.amount;
+        const isITM = livePnl >= 0;
+        const tagWidth = isSmall ? 68 : 82;
+        const pnlText = `${isITM ? '▲ +' : '▼ -'}$${safeFixed(Math.abs(livePnl), 2)}${trade.isDerivRealTime ? ' • D' : ''}`;
 
         ctx.fillStyle = isITM ? '#059669' : '#dc2626';
-        ctx.fillRect(width - padding.right + 2, yEntry - 9, isSmall ? 58 : 72, 18);
+        ctx.fillRect(width - padding.right + 2, yEntry - 9, tagWidth, 18);
         ctx.fillStyle = '#ffffff';
         ctx.font = `bold ${isSmall ? '8px' : '9px'} JetBrains Mono, monospace`;
         ctx.fillText(pnlText, width - padding.right + 4, yEntry + 4);

@@ -42,20 +42,25 @@ import { db, collection, query, where, orderBy, limit, getDocs, setDoc, doc, Tim
 import { TradeDurationUnit, SniperConfluenceResult } from './types/sniper';
 import { evaluateSniperConfluence } from './lib/sniperEngine';
 import { AgenticMartingaleState } from './types/trading';
+import { calculateDerivRealtimePnL } from './lib/derivPnL';
+import { useConfigStore } from './features/config/configStore';
 
 // Components
 import { Navbar } from './components/Navbar';
 import { LivePriceHeader } from './components/LivePriceHeader';
-import { InteractiveChart } from './components/InteractiveChart';
-import { TradeControls } from './components/TradeControls';
+import { TerminalView } from './components/TerminalView';
 import { AIPredictionCard } from './components/AIPredictionCard';
 import { MultiAgentMatrix } from './components/MultiAgentMatrix';
 import { BotAutoTrader } from './components/BotAutoTrader';
-import { PositionsDrawer } from './components/PositionsDrawer';
 import { TechnicalAnalyticsView } from './components/TechnicalAnalyticsView';
 import { AICopilotChat } from './components/AICopilotChat';
-import { BlackboxHubView } from './components/BlackboxHubView';
+import { BlackboxSkeleton } from './components/BlackboxSkeleton';
 import { AccountTokenModal } from './components/AccountTokenModal';
+
+// Lazy-loaded heavy 3D visualizations
+const BlackboxHubView = React.lazy(() =>
+  import('./components/BlackboxHubView').then((m) => ({ default: m.BlackboxHubView }))
+);
 import { TradeCritiqueModal } from './components/TradeCritiqueModal';
 import { PlatformHelpModal } from './components/PlatformHelpModal';
 import { AuthModal } from './components/AuthModal';
@@ -64,7 +69,6 @@ import { AgentEvolutionModal } from './components/AgentEvolutionModal';
 import { GoogleDocsModal } from './components/GoogleDocsModal';
 import { GoogleKeepNotesModal } from './components/GoogleKeepNotesModal';
 import { QuickSettingsModal } from './components/QuickSettingsModal';
-import { ChartErrorBoundary } from './components/ChartErrorBoundary';
 import { autoSyncEngine } from './lib/autoSyncEngine';
 import { BrainAnatomyModal } from './components/BrainAnatomyModal';
 import { DailyCumulativePnLChart } from './components/DailyCumulativePnLChart';
@@ -79,7 +83,6 @@ import { VoiceBroadcastBanner } from './components/VoiceWaveformIndicator';
 import { VoiceCommandHUD } from './components/VoiceCommandHUD';
 import { AuditLogModal } from './components/AuditLogModal';
 import { OnboardingTourModal } from './components/OnboardingTourModal';
-import { AutonomyCard } from './components/AutonomyCard';
 import { AutonomyConfigModal } from './components/AutonomyConfigModal';
 import {
   AutonomyMode,
@@ -478,6 +481,73 @@ export default function App() {
     }
   }, [addLog]);
 
+  // Deriv contract live settlement handler for proposal_open_contract events
+  const handleDerivContractSettled = useCallback((poc: any) => {
+    const contractId = poc.contract_id;
+    if (!contractId) return;
+
+    let trade: TradeRecord | undefined;
+    setOpenTrades((currOpen) => {
+      trade = currOpen.find((t) => t.contract_id === contractId || t.id === String(contractId));
+      if (!trade) return currOpen;
+      return currOpen.filter((t) => t.contract_id !== contractId && t.id !== String(contractId));
+    });
+
+    if (!trade) return;
+
+    // Clear simulation timeout if one was running for this trade
+    const timer = tradeTimeoutsRef.current.get(trade.id);
+    if (timer) {
+      clearTimeout(timer);
+      tradeTimeoutsRef.current.delete(trade.id);
+    }
+
+    const won = poc.status === 'won' || (poc.profit !== undefined && poc.profit > 0);
+    const profit = typeof poc.profit === 'number' ? Number(poc.profit.toFixed(2)) : (won ? trade.amount * 0.95 : -trade.amount);
+    const exitPrice = typeof poc.exit_tick === 'number' ? poc.exit_tick : (poc.current_spot ?? currentPriceRef.current);
+    const returnCredit = won ? Number((trade.amount + profit).toFixed(2)) : 0;
+
+    if (returnCredit > 0) {
+      setBalance((prevBal) => {
+        const nextBal = Number((prevBal + returnCredit).toFixed(2));
+        if (userProfile) {
+          if (userProfile.accountMode === 'REAL') {
+            updateBalances(undefined, nextBal);
+          } else {
+            updateBalances(nextBal, undefined);
+          }
+        }
+        return nextBal;
+      });
+    }
+
+    const settled: TradeRecord = {
+      ...trade,
+      profit,
+      profitPercentage: typeof poc.profit_percentage === 'number' ? poc.profit_percentage : (won ? 95 : -100),
+      exitPrice,
+      result: won ? 'WIN' : 'LOSS',
+      holdMs: Math.max(1000, Date.now() - new Date(trade.timestamp).getTime()),
+      status: poc.status,
+    };
+
+    if (user) {
+      setDoc(doc(db, 'trades', trade.id), {
+        ...settled,
+        uid: user.uid,
+      }).catch((err) => console.warn('Firestore settle persist note:', err));
+    }
+
+    setClosedTrades((currClosed) => [settled, ...currClosed.filter((t) => t.id !== trade!.id)]);
+
+    sound.play(won ? 'win' : 'loss');
+    hostHaptic(won ? 'success' : 'error');
+    addLog(
+      `Deriv contract #${contractId} settled: ${won ? 'WIN (+$' + profit.toFixed(2) + ')' : 'LOSS (-$' + Math.abs(profit).toFixed(2) + ')'} (Exit: ${exitPrice})`,
+      won ? 'success' : 'error'
+    );
+  }, [user, userProfile, updateBalances, addLog]);
+
   // 1. Initial Candles Generator & Deriv Connection
   useEffect(() => {
     const details = getSymbolDetails(selectedSymbol);
@@ -534,6 +604,33 @@ export default function App() {
 
         setPrevPrice(currentPriceRef.current);
         setCurrentPrice(newQuote);
+
+        // Continuous Deriv real-time P/L calculation for active contracts on every incoming tick
+        setOpenTrades((prev) => {
+          if (prev.length === 0) return prev;
+          let changed = false;
+          const next = prev.map((t) => {
+            const pnl = calculateDerivRealtimePnL(t, newQuote);
+            if (
+              t.profit !== pnl.profit ||
+              t.profitPercentage !== pnl.profitPercentage ||
+              t.bidPrice !== pnl.bidPrice ||
+              t.currentSpot !== pnl.currentSpot
+            ) {
+              changed = true;
+              return {
+                ...t,
+                profit: pnl.profit,
+                profitPercentage: pnl.profitPercentage,
+                bidPrice: pnl.bidPrice,
+                currentSpot: pnl.currentSpot,
+                isValidToSell: pnl.isValidToSell,
+              };
+            }
+            return t;
+          });
+          return changed ? next : prev;
+        });
 
         setTickBuffer((prev) => [...prev.slice(-40), { epoch: tick.epoch || Math.floor(Date.now() / 1000), quote: newQuote, symbol: selectedSymbol }]);
 
@@ -616,6 +713,66 @@ export default function App() {
           setLoginid(data.balance.loginid);
         }
         setIsRefreshingBalance(false);
+      } else if (data.msg_type === 'proposal_open_contract' && data.proposal_open_contract) {
+        const poc = data.proposal_open_contract;
+        const contractId = poc.contract_id;
+
+        setOpenTrades((prev) => {
+          let matched = false;
+          const next = prev.map((trade) => {
+            const isMatch =
+              trade.contract_id === contractId ||
+              trade.id === String(contractId) ||
+              (prev.length === 1 && !trade.contract_id);
+            if (isMatch) {
+              matched = true;
+              return {
+                ...trade,
+                contract_id: contractId,
+                profit: typeof poc.profit === 'number' ? Number(poc.profit.toFixed(2)) : trade.profit,
+                profitPercentage:
+                  typeof poc.profit_percentage === 'number'
+                    ? Number(poc.profit_percentage.toFixed(1))
+                    : trade.profitPercentage,
+                bidPrice: typeof poc.bid_price === 'number' ? poc.bid_price : trade.bidPrice,
+                currentSpot: typeof poc.current_spot === 'number' ? poc.current_spot : trade.currentSpot,
+                barrier: poc.barrier ?? trade.barrier,
+                isDerivRealTime: true,
+                isValidToSell: Boolean(poc.is_valid_to_sell),
+                status: poc.status,
+                dateExpiry: poc.date_expiry,
+                dateStart: poc.date_start,
+              };
+            }
+            return trade;
+          });
+          return matched ? next : prev;
+        });
+
+        if (poc.is_sold === 1 || poc.status === 'won' || poc.status === 'lost') {
+          handleDerivContractSettled(poc);
+        }
+      } else if (data.msg_type === 'buy' && data.buy) {
+        const buyData = data.buy;
+        const contractId = buyData.contract_id;
+        if (contractId) {
+          setOpenTrades((prev) => {
+            let linked = false;
+            return prev.map((t) => {
+              if (!linked && !t.contract_id) {
+                linked = true;
+                return {
+                  ...t,
+                  contract_id: contractId,
+                  isDerivRealTime: true,
+                };
+              }
+              return t;
+            });
+          });
+          derivWS.subscribeProposalOpenContract(contractId);
+          addLog(`Deriv contract #${contractId} confirmed. Streaming live real-time P/L.`, 'info');
+        }
       } else if (data.msg_type === 'deriv_logout') {
         setIsAuthorized(false);
         setLoginid('VRTC_VIRTUAL_10');
@@ -631,7 +788,7 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [selectedSymbol, granularity]);
+  }, [selectedSymbol, granularity, handleDerivContractSettled]);
 
   // 2. Technical Indicators, Candlestick Pattern Recognition, & Multi-Agent Deliberation
   // Offloaded to dedicated Web Worker to maintain silky 60fps UI thread performance during high-frequency tick streams
@@ -1092,9 +1249,13 @@ export default function App() {
         return;
       }
 
-      // Portfolio Exposure Limits Enforcement (Max open exposure & concurrent positions)
+      // Portfolio Exposure Limits Enforcement (Configurable via Zod centralized schema)
+      const config = useConfigStore.getState().config;
       const currentOpenExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
-      const maxTotalOpenExposure = Math.max(15, balance * 0.35); // 35% of balance or min $15
+      const maxTotalOpenExposure = Math.max(
+        config.risk.minPortfolioExposureFloorUSD,
+        balance * config.risk.maxPortfolioExposurePercent * 5
+      );
       if (currentOpenExposure + tradeStake > maxTotalOpenExposure) {
         hostHaptic('light');
         hostToast('Portfolio exposure cap reached');
@@ -1106,26 +1267,27 @@ export default function App() {
         return;
       }
 
-      if (openTrades.length >= 4) {
+      const maxConcurrent = config.risk.maxConcurrentPositions;
+      if (openTrades.length >= maxConcurrent) {
         hostHaptic('light');
-        hostToast('Max concurrent contracts reached (4)');
+        hostToast(`Max concurrent contracts reached (${maxConcurrent})`);
         addLog(
-          `🛑 [PORTFOLIO EXPOSURE LIMIT] Max concurrent contracts limit reached (4 active positions). Trade blocked.`,
+          `🛑 [PORTFOLIO EXPOSURE LIMIT] Max concurrent contracts limit reached (${maxConcurrent} active positions). Trade blocked.`,
           'warn'
         );
         return;
       }
 
-      // Hard 5% Session Drawdown Circuit Breaker Enforcement (sbagent.md Section 2 & 4)
+      // Hard Session Drawdown Circuit Breaker Enforcement
+      const maxAllowedDrawdown = botState.maxSessionDrawdownPercent || config.risk.maxSessionDrawdownPercent;
       if (
         source !== 'MANUAL' &&
-        (coreRiskMetrics.maxDrawdownPercent >= 5.0 ||
-          (botState.maxSessionDrawdownPercent && coreRiskMetrics.maxDrawdownPercent >= botState.maxSessionDrawdownPercent))
+        coreRiskMetrics.maxDrawdownPercent >= maxAllowedDrawdown
       ) {
         hostHaptic('error');
-        hostToast('Circuit breaker: 5% session drawdown hit');
+        hostToast(`Circuit breaker: ${maxAllowedDrawdown}% session drawdown hit`);
         addLog(
-          `🛑 [CIRCUIT BREAKER] 5% Session Drawdown limit hit (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Auto-fire halted to protect equity.`,
+          `🛑 [CIRCUIT BREAKER] ${maxAllowedDrawdown}% Session Drawdown limit hit (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Auto-fire halted to protect equity.`,
           'error'
         );
         setBotState((b) => ({ ...b, enabled: false }));
@@ -1217,6 +1379,23 @@ export default function App() {
       };
 
       setOpenTrades((prev) => [newTrade, ...prev]);
+
+      // If connected & authorized with Deriv, dispatch contract purchase for live real-time proposal stream
+      if (derivWS.isConnected() && isAuthorized) {
+        const durUnit: 't' | 's' | 'm' = tradeDurationUnit === 'ticks' ? 't' : tradeDurationUnit === 'seconds' ? 's' : 'm';
+        try {
+          derivWS.buyContractDirect({
+            contract_type: tradeDirection,
+            symbol: selectedSymbol,
+            duration: validDuration,
+            duration_unit: durUnit,
+            amount: tradeStake,
+            currency: currency || 'USD',
+          });
+        } catch (err) {
+          console.warn('Deriv direct contract purchase error:', err);
+        }
+      }
 
       const unitSuffix = tradeDurationUnit === 'ticks' ? 't' : tradeDurationUnit === 'seconds' ? 's' : 'm';
       const sniperTag = sniperData?.isSniperTrade ? ` [SNIPER ${sniperData.confluenceScore}%]` : '';
@@ -1702,11 +1881,30 @@ export default function App() {
 
     if (!trade) return;
 
+    // Disptach Deriv live contract early sell to market if contract_id exists
+    if (trade.contract_id) {
+      try {
+        derivWS.sellContract(trade.contract_id, 0);
+        addLog(`Deriv contract #${trade.contract_id} resale order dispatched to market bid price.`, 'info');
+      } catch (err) {
+        console.warn('Deriv sellContract error:', err);
+      }
+    }
+
     const latestPrice = currentPriceRef.current;
     const isCall = trade.decision.includes('BUY') || trade.decision.includes('CALL');
     const inProfit = isCall ? latestPrice > trade.entryPrice : latestPrice < trade.entryPrice;
-    const returnAmount = inProfit ? trade.amount * 1.5 : trade.amount * 0.3;
-    const profit = returnAmount - trade.amount;
+
+    // Prioritize Deriv live bidPrice or real-time continuous calculation
+    const liveCalc = calculateDerivRealtimePnL(trade, latestPrice);
+    const returnAmount =
+      trade.bidPrice !== undefined && trade.bidPrice > 0
+        ? trade.bidPrice
+        : liveCalc.resaleValue;
+    const profit =
+      trade.profit !== undefined && trade.profit !== 0
+        ? trade.profit
+        : Number((returnAmount - trade.amount).toFixed(2));
 
     setBalance((prevBal) => {
       const nextBal = Number((prevBal + returnAmount).toFixed(2));
@@ -1724,7 +1922,8 @@ export default function App() {
       ...trade,
       exitPrice: latestPrice,
       profit,
-      result: inProfit ? ('WIN' as const) : ('LOSS' as const),
+      profitPercentage: Number(((profit / trade.amount) * 100).toFixed(1)),
+      result: profit >= 0 ? ('WIN' as const) : ('LOSS' as const),
       holdMs: Math.max(1000, Date.now() - new Date(trade.timestamp).getTime()),
     };
 
@@ -1737,8 +1936,14 @@ export default function App() {
 
     setClosedTrades((currClosed) => [settled, ...currClosed.filter((t) => t.id !== tradeId)]);
 
-    sound.play(inProfit ? 'win' : 'loss');
-    addLog(`Early closed position ${tradeId} at ${latestPrice.toFixed(3)} (P&L: ${profit >= 0 ? `+$${profit.toFixed(2)}` : `-$${Math.abs(profit).toFixed(2)}`})`, 'info');
+    sound.play(profit >= 0 ? 'win' : 'loss');
+    hostHaptic(profit >= 0 ? 'success' : 'light');
+    addLog(
+      `Early closed position ${tradeId} at ${latestPrice.toFixed(3)} (P&L: ${
+        profit >= 0 ? `+$${profit.toFixed(2)}` : `-$${Math.abs(profit).toFixed(2)}`
+      }, Resale: $${returnAmount.toFixed(2)})`,
+      'info'
+    );
   };
 
   // 4b. Trailing Stop-Loss Real-Time Ratchet & Exit Evaluation Loop
@@ -2135,142 +2340,69 @@ export default function App() {
               </span>
             </div>
 
-            {!isLiveMode && balance < 2.0 && (
-              <button
-                type="button"
-                onClick={handleReplenishVirtualAnchor}
-                className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold hover:bg-amber-500/30 transition-all animate-pulse"
-              >
-                Replenish Anchor ($10)
-              </button>
-            )}
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
-            {/* Left Column: Interactive Canvas Chart & Active Positions */}
-            <div className="lg:col-span-8 flex flex-col gap-4 sm:gap-5">
-            <ChartErrorBoundary
-              fallbackSymbol={selectedSymbol}
-              onReset={() => {
-                derivWS.fetchCandles(selectedSymbol, granularity, 120);
-                triggerAIScan();
-              }}
-            >
-              <InteractiveChart
-                candles={candles}
-                currentPrice={currentPrice}
-                openTrades={openTrades}
-                closedTrades={closedTrades}
-                indicators={indicators}
-                granularity={granularity}
-                onGranularityChange={(g) => setGranularity(g)}
-                onRefresh={() => {
-                  derivWS.fetchCandles(selectedSymbol, granularity, 120);
-                  triggerAIScan();
-                }}
-                symbol={selectedSymbol}
-                aiPrediction={aiPrediction}
-                onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
-                stake={stake}
-                onStakeChange={setStake}
-                isExecuting={isExecuting}
-                currency={currency}
-                algorithmicDecision={algorithmicDecision}
-                regime={regime}
-                agents={agents}
-                sniperSetup={sniperSetup}
-                onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
-              />
-            </ChartErrorBoundary>
-
-            <PositionsDrawer
-              openTrades={openTrades}
-              closedTrades={closedTrades}
-              currentPrice={currentPrice}
-              onEarlyExit={handleEarlyExit}
-              onOpenCritiqueModal={(trade) => setSelectedCritiqueTrade(trade)}
-            />
-          </div>
-
-          {/* Right Column: Autonomy Control, Trade Execution Deck & AI Intelligence Card */}
-          <div className="lg:col-span-4 flex flex-col gap-5">
-            <AutonomyCard
-              autonomyMode={autonomyMode}
-              sbagentAutonomyGrant={sbagentAutonomyGrant}
-              autonomyPreset={autonomyPreset}
-              appliedSettings={appliedAutonomySettings}
-              lastError={lastAutonomyError}
-              onRunAutonomously={handleRunAutonomously}
-              onStopAutonomy={handleStopAutonomy}
-              onConfigure={handleConfigureAutonomy}
-              currentSymbol={selectedSymbol}
-              balance={balance}
-            />
-
-            <TradeControls
-              stake={stake}
-              onStakeChange={setStake}
-              duration={duration}
-              durationUnit={durationUnit}
-              onDurationChange={(dur, unit) => {
-                setDuration(dur);
-                if (unit) setDurationUnit(unit);
-              }}
-              direction={direction}
-              onDirectionChange={setDirection}
-              onExecuteTrade={(customTSL) =>
-                executeTrade(direction, stake, duration, 'MANUAL', durationUnit, undefined, customTSL ?? trailingStopConfig)
-              }
-              isExecuting={isExecuting}
-              aiPrediction={aiPrediction}
-              algorithmicDecision={algorithmicDecision}
-              currency={currency}
-              isLiveMode={isLiveMode}
-              sizingMode={sizingMode}
-              onSizingModeChange={setSizingMode}
-              riskMetrics={coreRiskMetrics}
-              recommendedKellyStake={dynamicStake}
-              sniperSetup={sniperSetup}
-              currentPrice={currentPrice}
-              trailingStopConfig={trailingStopConfig}
-              onTrailingStopConfigChange={(cfg) => {
-                setTrailingStopConfig(cfg);
-                updateTrailingStop(cfg);
-              }}
-              onOpenQuickSettings={() => setIsQuickSettingsOpen(true)}
-              onExecuteSniperTrade={(dir, s, dur, unit, sniperTSL) => {
-                executeTrade(
-                  dir,
-                  s,
-                  dur,
-                  'MANUAL',
-                  unit,
-                  {
-                    isSniperTrade: true,
-                    confluenceScore: sniperSetup?.score || 85,
-                    entryTarget: sniperSetup?.optimalEntryPrice || currentPrice,
-                    takeProfitTarget: sniperSetup?.takeProfitPrice,
-                    stopLossTarget: sniperSetup?.stopLossPrice,
-                  },
-                  sniperTSL ?? trailingStopConfig
-                );
-              }}
-              isSniperTriggerArmed={isSniperTriggerArmed}
-              onToggleSniperTrigger={() => {
-                setIsSniperTriggerArmed(!isSniperTriggerArmed);
-                sound.play('toggle');
-              }}
-            />
-
-            <AIPredictionCard
-              prediction={aiPrediction}
-              isLoading={isLoadingAI}
-              onRefresh={triggerAIScan}
-              symbol={selectedSymbol}
-            />
-          </div>
+          <TerminalView
+            candles={candles}
+            currentPrice={currentPrice}
+            indicators={indicators}
+            granularity={granularity}
+            onGranularityChange={(g) => setGranularity(g)}
+            onRefreshChart={() => {
+              derivWS.fetchCandles(selectedSymbol, granularity, 120);
+              triggerAIScan();
+            }}
+            symbol={selectedSymbol}
+            decimals={decimals}
+            currency={currency}
+            isLiveMode={isLiveMode}
+            aiPrediction={aiPrediction}
+            isLoadingAI={isLoadingAI}
+            onRefreshAI={triggerAIScan}
+            algorithmicDecision={algorithmicDecision}
+            regime={regime}
+            agents={agents}
+            sniperSetup={sniperSetup}
+            stake={stake}
+            onStakeChange={setStake}
+            duration={duration}
+            durationUnit={durationUnit}
+            onDurationChange={(dur, unit) => {
+              setDuration(dur);
+              if (unit) setDurationUnit(unit);
+            }}
+            direction={direction}
+            onDirectionChange={setDirection}
+            isExecuting={isExecuting}
+            onExecuteTrade={executeTrade}
+            openTrades={openTrades}
+            closedTrades={closedTrades}
+            onEarlyExit={handleEarlyExit}
+            onOpenCritiqueModal={(trade) => setSelectedCritiqueTrade(trade)}
+            sizingMode={sizingMode}
+            onSizingModeChange={setSizingMode}
+            coreRiskMetrics={coreRiskMetrics}
+            dynamicStake={dynamicStake}
+            trailingStopConfig={trailingStopConfig}
+            onTrailingStopConfigChange={(cfg) => {
+              setTrailingStopConfig(cfg);
+              updateTrailingStop(cfg);
+            }}
+            isSniperTriggerArmed={isSniperTriggerArmed}
+            onToggleSniperTrigger={() => setIsSniperTriggerArmed(!isSniperTriggerArmed)}
+            autonomyMode={autonomyMode}
+            sbagentAutonomyGrant={sbagentAutonomyGrant}
+            autonomyPreset={autonomyPreset}
+            appliedSettings={appliedAutonomySettings}
+            lastError={lastAutonomyError}
+            onRunAutonomously={handleRunAutonomously}
+            onStopAutonomy={handleStopAutonomy}
+            onConfigureAutonomy={handleConfigureAutonomy}
+            balance={balance}
+            handleReplenishVirtualAnchor={handleReplenishVirtualAnchor}
+            setIsQuickSettingsOpen={setIsQuickSettingsOpen}
+          />
         </div>
-      </div>
 
         {/* View 2: Multi-Agent & Mathematical Analytics */}
         {activeTab === 'analytics' && (
@@ -2366,37 +2498,39 @@ export default function App() {
         {/* View 5: Autonomous Intelligence Hub (Blackbox) */}
         {activeTab === 'blackbox' && (
           <div className="tab-crossfade-enter">
-            <BlackboxHubView
-              symbol={selectedSymbol}
-              currentPrice={currentPrice}
-              regime={regime}
-              indicators={indicators}
-              agents={agents}
-              decision={algorithmicDecision}
-              sniperSetup={sniperSetup}
-              highestWinGate={highestWinGate}
-              marketStability={marketStability}
-              martingaleState={martingaleState}
-              onUpdateMartingaleState={(updates) => setMartingaleState((prev) => ({ ...prev, ...updates }))}
-              trailingStopConfig={trailingStopConfig}
-              onUpdateTrailingStopConfig={setTrailingStopConfig}
-              botEnabled={botState.enabled}
-              onToggleBot={() => {
-                sound.play('toggle');
-                if (botState.enabled) {
-                  handleStopAutonomy('user_button');
-                } else {
-                  handleRunAutonomously();
-                }
-              }}
-              balance={balance}
-              onReplenishVirtualAnchor={handleReplenishVirtualAnchor}
-              onSelectSymbol={(sym) => {
-                setSelectedSymbol(sym);
-                derivWS.fetchCandles(sym, granularity, 120);
-                derivWS.subscribeTicks(sym);
-              }}
-            />
+            <React.Suspense fallback={<BlackboxSkeleton />}>
+              <BlackboxHubView
+                symbol={selectedSymbol}
+                currentPrice={currentPrice}
+                regime={regime}
+                indicators={indicators}
+                agents={agents}
+                decision={algorithmicDecision}
+                sniperSetup={sniperSetup}
+                highestWinGate={highestWinGate}
+                marketStability={marketStability}
+                martingaleState={martingaleState}
+                onUpdateMartingaleState={(updates) => setMartingaleState((prev) => ({ ...prev, ...updates }))}
+                trailingStopConfig={trailingStopConfig}
+                onUpdateTrailingStopConfig={setTrailingStopConfig}
+                botEnabled={botState.enabled}
+                onToggleBot={() => {
+                  sound.play('toggle');
+                  if (botState.enabled) {
+                    handleStopAutonomy('user_button');
+                  } else {
+                    handleRunAutonomously();
+                  }
+                }}
+                balance={balance}
+                onReplenishVirtualAnchor={handleReplenishVirtualAnchor}
+                onSelectSymbol={(sym) => {
+                  setSelectedSymbol(sym);
+                  derivWS.fetchCandles(sym, granularity, 120);
+                  derivWS.subscribeTicks(sym);
+                }}
+              />
+            </React.Suspense>
           </div>
         )}
       </main>

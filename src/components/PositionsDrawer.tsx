@@ -14,6 +14,12 @@ import {
   Zap,
 } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
+import {
+  calculateDerivRealtimePnL,
+  aggregateOpenTradesPnL,
+  formatPnL,
+  formatPnLPercentage,
+} from '../lib/derivPnL';
 
 interface PositionsDrawerProps {
   openTrades: TradeRecord[];
@@ -22,6 +28,7 @@ interface PositionsDrawerProps {
   onEarlyExit: (tradeId: string) => void;
   onOpenCritiqueModal: (trade: TradeRecord) => void;
   decimals?: number;
+  currency?: string;
 }
 
 export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
@@ -31,6 +38,7 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
   onEarlyExit,
   onOpenCritiqueModal,
   decimals = 3,
+  currency = 'USD',
 }) => {
   const [activeTab, setActiveTab] = useState<'open' | 'history'>('open');
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
@@ -138,25 +146,60 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
           </button>
         </div>
 
-        {/* History Quick Stats */}
-        <div className="flex items-center gap-3 text-xs font-mono">
-          <div className="flex items-center gap-1">
-            <span className="text-slate-500">Win Rate:</span>
-            <span className={`font-bold ${winRate >= 50 ? 'text-emerald-400' : 'text-slate-300'}`}>
-              {winRate.toFixed(1)}%
-            </span>
+        {/* Segmented Stats Header */}
+        {activeTab === 'open' ? (
+          (() => {
+            const openStats = aggregateOpenTradesPnL(openTrades, currentPrice);
+            return (
+              <div className="flex items-center gap-3 text-xs font-mono">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-slate-500">Unrealized P&L:</span>
+                  <span
+                    className={`font-black ${
+                      openStats.totalProfit > 0
+                        ? 'text-emerald-400'
+                        : openStats.totalProfit < 0
+                        ? 'text-rose-400'
+                        : 'text-slate-300'
+                    }`}
+                  >
+                    {formatPnL(openStats.totalProfit, currency)}{' '}
+                    <span className="text-[10px] font-bold">
+                      ({formatPnLPercentage(openStats.totalPercentage)})
+                    </span>
+                  </span>
+                </div>
+                {openTrades.length > 0 && (
+                  <div className="hidden sm:flex items-center gap-1">
+                    <span className="text-slate-500">Resale:</span>
+                    <span className="font-bold text-cyan-300 font-mono">
+                      ${openStats.totalResaleValue.toFixed(2)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })()
+        ) : (
+          <div className="flex items-center gap-3 text-xs font-mono">
+            <div className="flex items-center gap-1">
+              <span className="text-slate-500">Win Rate:</span>
+              <span className={`font-bold ${winRate >= 50 ? 'text-emerald-400' : 'text-slate-300'}`}>
+                {winRate.toFixed(1)}%
+              </span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-500">Net P&L:</span>
+              <span
+                className={`font-black ${
+                  netPnL > 0 ? 'text-emerald-400' : netPnL < 0 ? 'text-rose-400' : 'text-slate-300'
+                }`}
+              >
+                {netPnL >= 0 ? `+$${netPnL.toFixed(2)}` : `-$${Math.abs(netPnL).toFixed(2)}`}
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-1">
-            <span className="text-slate-500">Net P&L:</span>
-            <span
-              className={`font-black ${
-                netPnL > 0 ? 'text-emerald-400' : netPnL < 0 ? 'text-rose-400' : 'text-slate-300'
-              }`}
-            >
-              {netPnL >= 0 ? `+$${netPnL.toFixed(2)}` : `-$${Math.abs(netPnL).toFixed(2)}`}
-            </span>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Tab 1: Active Open Positions */}
@@ -170,10 +213,7 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
             openTrades.map((trade, i) => {
               const tradeId = trade.id || `open_${i}`;
               const isCall = trade.decision.includes('BUY') || trade.decision.includes('CALL');
-              const inProfit = isCall
-                ? currentPrice > trade.entryPrice
-                : currentPrice < trade.entryPrice;
-              const estimatedReturn = inProfit ? trade.amount * 0.95 : -trade.amount;
+              const livePnL = calculateDerivRealtimePnL(trade, currentPrice);
               const isExpanded = expandedTradeId === tradeId;
               const isExiting = exitingTradeIds.has(tradeId);
 
@@ -214,6 +254,19 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                           >
                             {isCall ? '↑ RISE' : '↓ FALL'} (${trade.amount})
                           </span>
+                          {trade.isDerivRealTime ? (
+                            <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border bg-cyan-500/15 text-cyan-300 border-cyan-500/35 flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-ping" />
+                              <span>DERIV LIVE</span>
+                              {trade.contract_id && (
+                                <span className="text-slate-400 font-normal">#{trade.contract_id}</span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-[9px] font-mono font-medium px-1.5 py-0.2 rounded border bg-slate-800 text-slate-400 border-slate-700">
+                              SYNTHETIC P/L
+                            </span>
+                          )}
                           {isExiting && (
                             <span className="text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border bg-amber-500/20 text-amber-300 border-amber-500/40 flex items-center gap-1 animate-pulse">
                               <span className="w-2 h-2 border-2 border-amber-300 border-t-transparent rounded-full animate-spin" />
@@ -241,6 +294,10 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                           <span>Entry: {trade.entryPrice.toFixed(decimals)}</span>
                           <span>•</span>
                           <span>Now: {currentPrice.toFixed(decimals)}</span>
+                          <span>•</span>
+                          <span className={livePnL.isITM ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                            Δ {currentPrice >= trade.entryPrice ? '+' : ''}{(currentPrice - trade.entryPrice).toFixed(decimals)}
+                          </span>
                           {trade.trailingStopEnabled && trade.currentTrailingStopPrice && (
                             <>
                               <span>•</span>
@@ -256,16 +313,23 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                     <div className="flex items-center gap-3">
                       <div className="text-right font-mono">
                         <div
-                          className={`text-xs font-black ${
-                            inProfit ? 'text-emerald-400' : 'text-rose-400'
+                          className={`text-xs font-black transition-colors ${
+                            livePnL.profit > 0
+                              ? 'text-emerald-400'
+                              : livePnL.profit < 0
+                              ? 'text-rose-400'
+                              : 'text-slate-300'
                           }`}
                         >
-                          {inProfit
-                            ? `+$${estimatedReturn.toFixed(2)}`
-                            : `-$${trade.amount.toFixed(2)}`}
+                          {formatPnL(livePnL.profit, currency)}
                         </div>
-                        <div className="text-[9px] text-slate-500 font-semibold">
-                          {inProfit ? 'IN PROFIT' : 'OUT OF MONEY'}
+                        <div className="text-[9px] font-semibold flex items-center justify-end gap-1">
+                          <span className={livePnL.profit >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                            {formatPnLPercentage(livePnL.profitPercentage)}
+                          </span>
+                          <span className="text-slate-500">
+                            {livePnL.isITM ? '• ITM' : '• OTM'}
+                          </span>
                         </div>
                       </div>
                       {isExpanded ? (
@@ -282,7 +346,9 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                       <div className="flex flex-wrap items-center justify-between gap-3 text-slate-400 text-[11px]">
                         <div className="flex flex-wrap items-center gap-3">
                           <span>Duration: {trade.duration}{trade.durationUnit === 'ticks' ? 't' : trade.durationUnit === 'seconds' ? 's' : 'm'}</span>
-                          <span>Mode: {trade.mode}</span>
+                          <span>
+                            Resale Cashout: <strong className="text-cyan-300 font-mono">${livePnL.resaleValue.toFixed(2)}</strong>
+                          </span>
                           <span>Time: {new Date(trade.timestamp).toLocaleTimeString()}</span>
                         </div>
 
@@ -301,7 +367,7 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                               <span>Closing...</span>
                             </>
                           ) : (
-                            <span>Early Close</span>
+                            <span>Early Close (${livePnL.resaleValue.toFixed(2)})</span>
                           )}
                         </button>
                       </div>

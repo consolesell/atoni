@@ -340,8 +340,9 @@ class DerivWebSocketClient {
               this.setLinkedAccounts(newAccounts);
             }
 
-            // Immediately subscribe to continuous balance updates
+            // Immediately subscribe to continuous balance updates and open contracts
             this.send({ balance: 1, subscribe: 1 });
+            this.send({ proposal_open_contract: 1, subscribe: 1 });
             this.emit({ msg_type: 'authorize_success', authorize: data.authorize });
           }
 
@@ -456,6 +457,58 @@ class DerivWebSocketClient {
       buy: proposalId,
       price,
       subscribe: 1,
+    });
+  }
+
+  public buyContractDirect(params: {
+    contract_type: 'CALL' | 'PUT';
+    symbol: string;
+    duration: number;
+    duration_unit: 't' | 's' | 'm';
+    amount: number;
+    currency?: string;
+  }) {
+    this.send({
+      buy: 1,
+      price: params.amount,
+      parameters: {
+        amount: params.amount,
+        basis: 'stake',
+        contract_type: params.contract_type,
+        currency: params.currency || 'USD',
+        duration: params.duration,
+        duration_unit: params.duration_unit,
+        symbol: params.symbol,
+      },
+      subscribe: 1,
+    });
+  }
+
+  public subscribeProposalOpenContract(contractId?: number | string) {
+    if (contractId !== undefined && contractId !== null) {
+      this.send({
+        proposal_open_contract: 1,
+        contract_id: Number(contractId),
+        subscribe: 1,
+      });
+    } else {
+      this.send({
+        proposal_open_contract: 1,
+        subscribe: 1,
+      });
+    }
+  }
+
+  public forgetProposalOpenContract(subscriptionId?: string) {
+    if (subscriptionId) {
+      this.send({ forget: subscriptionId });
+    }
+  }
+
+  public sellContract(contractId: number | string, price: number = 0) {
+    this.send({
+      sell: Number(contractId),
+      price: price,
     });
   }
 
