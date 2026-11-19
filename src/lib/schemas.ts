@@ -87,7 +87,7 @@ export const GeminiToolCallSchema = z.object({
 export const TradeRecordSchema = z.object({
   id: z.string(),
   timestamp: z.string(),
-  mode: z.enum(['SIMULATION', 'LIVE']),
+  mode: z.enum(['DEMO', 'REAL', 'LIVE', 'SIMULATION']),
   symbol: z.string(),
   amount: z.number().positive(),
   decision: z.string(),

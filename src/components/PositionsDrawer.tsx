@@ -29,6 +29,7 @@ interface PositionsDrawerProps {
   onOpenCritiqueModal: (trade: TradeRecord) => void;
   decimals?: number;
   currency?: string;
+  balance?: number;
 }
 
 export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
@@ -39,6 +40,7 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
   onOpenCritiqueModal,
   decimals = 3,
   currency = 'USD',
+  balance,
 }) => {
   const [activeTab, setActiveTab] = useState<'open' | 'history'>('open');
   const [expandedTradeId, setExpandedTradeId] = useState<string | null>(null);
@@ -177,6 +179,12 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                     </span>
                   </div>
                 )}
+                {typeof balance === 'number' && (
+                  <div className="hidden md:flex items-center gap-1 pl-2 border-l border-slate-800">
+                    <span className="text-slate-500">Live Bal:</span>
+                    <span className="font-bold text-slate-200">${balance.toFixed(2)}</span>
+                  </div>
+                )}
               </div>
             );
           })()
@@ -198,6 +206,12 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                 {netPnL >= 0 ? `+$${netPnL.toFixed(2)}` : `-$${Math.abs(netPnL).toFixed(2)}`}
               </span>
             </div>
+            {typeof balance === 'number' && (
+              <div className="hidden md:flex items-center gap-1 pl-2 border-l border-slate-800">
+                <span className="text-slate-500">Live Bal:</span>
+                <span className="font-bold text-slate-200">${balance.toFixed(2)}</span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -264,7 +278,7 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                             </span>
                           ) : (
                             <span className="text-[9px] font-mono font-medium px-1.5 py-0.2 rounded border bg-slate-800 text-slate-400 border-slate-700">
-                              SYNTHETIC P/L
+                              AWAITING POC
                             </span>
                           )}
                           {isExiting && (
@@ -354,10 +368,19 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
 
                         <button
                           onClick={() => handleEarlyExitClick(tradeId)}
-                          disabled={isExiting}
+                          disabled={isExiting || !trade.contract_id || trade.isValidToSell === false}
+                          title={
+                            !trade.contract_id
+                              ? 'Awaiting Deriv contract confirmation'
+                              : trade.isValidToSell === false
+                              ? 'Contract cannot be resold before expiry on Deriv'
+                              : 'Sell contract at current Deriv bid price'
+                          }
                           className={`px-3 py-1 rounded-lg text-xs font-mono transition-colors flex items-center gap-1.5 ${
                             isExiting
                               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 opacity-70 cursor-wait'
+                              : !trade.contract_id || trade.isValidToSell === false
+                              ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed opacity-60'
                               : 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40'
                           }`}
                         >
@@ -366,6 +389,10 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                               <div className="w-2.5 h-2.5 border-2 border-amber-300 border-t-transparent rounded-full animate-spin" />
                               <span>Closing...</span>
                             </>
+                          ) : !trade.contract_id ? (
+                            <span>Awaiting Contract...</span>
+                          ) : trade.isValidToSell === false ? (
+                            <span>Resale Unavailable</span>
                           ) : (
                             <span>Early Close (${livePnL.resaleValue.toFixed(2)})</span>
                           )}
@@ -531,7 +558,14 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                   {isExpanded && (
                     <div className="px-3.5 py-2.5 bg-slate-900/90 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2.5">
                       <div className="text-[11px] text-slate-400 space-y-0.5">
-                        <div>Stake: ${trade.amount} | Duration: {trade.duration}m</div>
+                        <div>
+                          Stake: ${trade.amount} | Duration: {trade.duration}
+                          {trade.durationUnit === 'ticks'
+                            ? 't'
+                            : trade.durationUnit === 'seconds'
+                            ? 's'
+                            : 'm'}
+                        </div>
                         <div>Contract Mode: {trade.mode}</div>
                       </div>
 

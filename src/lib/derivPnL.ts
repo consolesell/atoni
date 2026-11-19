@@ -27,34 +27,34 @@ export interface AggregatePnLResult {
 }
 
 /**
- * Calculates continuous, realistic Deriv-grade real-time P/L for a running contract.
- * If the contract has a live stream from Deriv API (proposal_open_contract), those exact values are prioritized.
- * Otherwise, calculates a continuous Black-Scholes-anchored fair value based on current spot, entry price,
- * elapsed duration, and market volatility.
+ * Computes real-time P/L strictly from Deriv's live proposal_open_contract stream.
+ * Never fabricates synthetic Black-Scholes P/L or artificial bid prices.
  */
 export function calculateDerivRealtimePnL(
   trade: TradeRecord,
   currentPrice: number,
-  volatility = 0.002
+  _volatility = 0.002
 ): RealtimePnLResult {
   const isCall = trade.decision.includes('BUY') || trade.decision.includes('CALL');
   const entry = trade.entryPrice || currentPrice;
-  const stake = trade.amount || 1;
-  const payout = trade.payout || stake * 1.95;
+  const stake = trade.amount || 0;
+  const currentSpot = typeof trade.currentSpot === 'number' ? trade.currentSpot : currentPrice;
+  const priceDelta = isCall ? currentSpot - entry : entry - currentSpot;
 
-  // 1. If this trade has an active real-time stream from Deriv's proposal_open_contract
   if (trade.isDerivRealTime && typeof trade.profit === 'number') {
     const profit = Number(trade.profit.toFixed(2));
-    const profitPercentage = typeof trade.profitPercentage === 'number'
-      ? Number(trade.profitPercentage.toFixed(2))
-      : (stake > 0 ? Number(((profit / stake) * 100).toFixed(2)) : 0);
-    const bidPrice = typeof trade.bidPrice === 'number'
-      ? Number(trade.bidPrice.toFixed(2))
-      : Math.max(0, Number((stake + profit).toFixed(2)));
+    const profitPercentage =
+      typeof trade.profitPercentage === 'number'
+        ? Number(trade.profitPercentage.toFixed(2))
+        : stake > 0
+          ? Number(((profit / stake) * 100).toFixed(2))
+          : 0;
+    const bidPrice =
+      typeof trade.bidPrice === 'number'
+        ? Number(trade.bidPrice.toFixed(2))
+        : Math.max(0, Number((stake + profit).toFixed(2)));
     const inProfit = profit > 0;
-    const priceDelta = isCall ? currentPrice - entry : entry - currentPrice;
-    const currentSpot = typeof trade.currentSpot === 'number' ? trade.currentSpot : currentPrice;
-    const isValidToSell = trade.isValidToSell ?? true;
+    const isValidToSell = Boolean(trade.isValidToSell);
 
     return {
       profit,
@@ -70,69 +70,23 @@ export function calculateDerivRealtimePnL(
     };
   }
 
-  // 2. Continuous Deriv Fair-Value Simulation for active running contracts
-  // Converts duration to seconds
-  let totalDurationSec = 60;
-  if (trade.durationUnit === 'ticks') {
-    totalDurationSec = Math.max(2, (trade.duration || 5) * 2);
-  } else if (trade.durationUnit === 'seconds') {
-    totalDurationSec = Math.max(5, trade.duration || 15);
-  } else {
-    // minutes
-    totalDurationSec = Math.max(15, (trade.duration || 1) * 60);
-  }
-
-  const tradeStartMs = new Date(trade.timestamp).getTime();
-  const elapsedSec = Math.max(0, (Date.now() - tradeStartMs) / 1000);
-  const timeProgress = Math.min(0.999, elapsedSec / totalDurationSec);
-  const timeRemainingRatio = Math.max(0.001, 1 - timeProgress);
-
-  // Price distance in direction of contract
-  const rawDiff = isCall ? currentPrice - entry : entry - currentPrice;
-  const percentDiff = entry > 0 ? rawDiff / entry : 0;
-
-  // Normalized sigma scale
-  const effectiveVol = Math.max(0.0002, volatility * Math.sqrt(Math.max(1, totalDurationSec / 60)));
-  const zScore = percentDiff / (effectiveVol * Math.sqrt(timeRemainingRatio) + 0.0001);
-
-  // Logistic cumulative distribution approximation of option win probability
-  const winProb = 1 / (1 + Math.exp(-Math.max(-8, Math.min(8, 1.7 * zScore))));
-
-  // Deriv bid price has a small spread/vig margin of ~2-3%
-  const vig = 0.975;
-  let rawBid = payout * winProb * vig;
-
-  // As expiry nears, binary convergence accelerates towards full payout or 0
-  if (timeRemainingRatio < 0.15) {
-    if (percentDiff > 0) {
-      rawBid = Math.max(rawBid, payout * (1 - timeRemainingRatio * 0.5));
-    } else {
-      rawBid = Math.min(rawBid, payout * timeRemainingRatio * 0.4);
-    }
-  }
-
-  const bidPrice = Math.max(0, Math.min(payout, Number(rawBid.toFixed(2))));
-  const profit = Number((bidPrice - stake).toFixed(2));
-  const profitPercentage = stake > 0 ? Number(((profit / stake) * 100).toFixed(2)) : 0;
-  const inProfit = profit > 0;
-  const isValidToSell = trade.isValidToSell ?? true;
-
+  // Awaiting initial proposal_open_contract tick from Deriv
   return {
-    profit,
-    profitPercentage,
-    bidPrice,
-    resaleValue: bidPrice,
-    inProfit,
-    isITM: inProfit,
-    priceDelta: rawDiff,
+    profit: 0,
+    profitPercentage: 0,
+    bidPrice: 0,
+    resaleValue: 0,
+    inProfit: false,
+    isITM: priceDelta > 0,
+    priceDelta,
     isRealDerivStream: false,
-    currentSpot: currentPrice,
-    isValidToSell,
+    currentSpot,
+    isValidToSell: false,
   };
 }
 
 /**
- * Aggregates real-time P/L across all currently open contracts.
+ * Aggregates real-time P/L across all currently open Deriv contracts.
  */
 export function aggregateOpenTradesPnL(
   openTrades: TradeRecord[],
@@ -156,6 +110,7 @@ export function aggregateOpenTradesPnL(
 
   let totalProfit = 0;
   let totalInvested = 0;
+  let totalResaleValue = 0;
   let inProfitCount = 0;
   let outOfMoneyCount = 0;
   let hasLiveDerivStream = false;
@@ -164,15 +119,15 @@ export function aggregateOpenTradesPnL(
     const pnl = calculateDerivRealtimePnL(trade, currentPrice, volatility);
     totalProfit += pnl.profit;
     totalInvested += trade.amount || 0;
+    totalResaleValue += pnl.isRealDerivStream ? pnl.bidPrice : trade.amount || 0;
     if (pnl.inProfit) inProfitCount++;
-    else outOfMoneyCount++;
+    else if (pnl.isRealDerivStream && pnl.profit < 0) outOfMoneyCount++;
     if (pnl.isRealDerivStream) hasLiveDerivStream = true;
   });
 
-  const totalCurrentValue = Math.max(0, totalInvested + totalProfit);
-  const totalProfitPercentage = totalInvested > 0
-    ? Number(((totalProfit / totalInvested) * 100).toFixed(2))
-    : 0;
+  const totalCurrentValue = Math.max(0, totalResaleValue);
+  const totalProfitPercentage =
+    totalInvested > 0 ? Number(((totalProfit / totalInvested) * 100).toFixed(2)) : 0;
 
   return {
     totalProfit: Number(totalProfit.toFixed(2)),
@@ -180,7 +135,7 @@ export function aggregateOpenTradesPnL(
     totalPercentage: totalProfitPercentage,
     totalInvested: Number(totalInvested.toFixed(2)),
     totalCurrentValue: Number(totalCurrentValue.toFixed(2)),
-    totalResaleValue: Number(totalCurrentValue.toFixed(2)),
+    totalResaleValue: Number(totalResaleValue.toFixed(2)),
     inProfitCount,
     outOfMoneyCount,
     hasOpenPositions: true,

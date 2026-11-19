@@ -101,7 +101,6 @@ interface SettingsDrawerProps {
   initialCategory?: SettingsCategory;
   trailingStopConfig?: TrailingStopConfig;
   onTrailingStopConfigChange?: (config: TrailingStopConfig) => void;
-  onReplenishVirtualAnchor?: () => void;
 }
 
 export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
@@ -136,7 +135,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   initialCategory = 'overview',
   trailingStopConfig,
   onTrailingStopConfigChange,
-  onReplenishVirtualAnchor,
 }) => {
   const {
     settings,
@@ -162,6 +160,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   const [isTestingPing, setIsTestingPing] = useState(false);
   const [pingTestLatency, setPingTestLatency] = useState<number | null>(null);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [newApiKeyInput, setNewApiKeyInput] = useState('');
 
   React.useEffect(() => {
     const unsub = voice.subscribeState((st) => setVoiceState({ ...st }));
@@ -173,6 +172,15 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
       setActiveCategory(initialCategory);
     }
   }, [isOpen, initialCategory]);
+
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
 
   // Available markets
   const symbols = [
@@ -206,7 +214,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
     {
       id: 'risk',
       title: 'Risk & Capital Shield',
-      description: 'Max daily loss, Kelly sizing, $10 virtual anchor & loss streak guard',
+      description: 'Max daily loss, Kelly sizing & loss streak guard',
       icon: ShieldAlert,
       color: 'text-rose-400 bg-rose-500/10',
     },
@@ -341,15 +349,30 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
     }, 450);
   };
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+    <div
+      className={`fixed inset-0 z-50 flex justify-end transition-opacity duration-300 ${
+        isOpen ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+      }`}
+      aria-hidden={!isOpen}
+    >
       {/* Backdrop click to close */}
-      <div className="absolute inset-0" onClick={onClose} />
+      <div
+        className={`absolute inset-0 bg-slate-950/75 backdrop-blur-sm transition-opacity duration-300 ${
+          isOpen ? 'opacity-100' : 'opacity-0'
+        }`}
+        onClick={onClose}
+      />
 
-      {/* Drawer Container */}
-      <div className="relative w-full max-w-lg h-full bg-slate-900 border-l border-slate-800 flex flex-col shadow-2xl z-10 animate-slide-left text-slate-100">
+      {/* Right-Hand Slide-In / Slide-Out Drawer Container */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Terminal Configuration Hub"
+        className={`relative w-full max-w-lg h-full bg-slate-900 border-l border-slate-800 flex flex-col shadow-2xl z-10 text-slate-100 transform transition-transform duration-300 ease-out will-change-transform ${
+          isOpen ? 'translate-x-0' : 'translate-x-full'
+        }`}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3.5 border-b border-slate-800 bg-slate-950/80 pt-safe shrink-0">
           <div className="flex items-center gap-2">
@@ -631,29 +654,6 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   ))}
                 </div>
               </div>
-
-              {/* Virtual Account Anchor & Auto-Replenishment */}
-              <div className="bg-emerald-950/30 p-4 rounded-xl border border-emerald-500/40 space-y-3">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span className="font-bold text-slate-100">Virtual Account Anchor Protocol</span>
-                </div>
-                <p className="text-[11px] text-slate-300">
-                  Standardized virtual account balance is anchored at <strong>${settings.risk.virtualAnchorBalance.toFixed(2)} USD</strong>.
-                  Depleted accounts automatically replenish back to $10 immediately.
-                </p>
-                {onReplenishVirtualAnchor && (
-                  <button
-                    onClick={() => {
-                      onReplenishVirtualAnchor();
-                      sound.play('win');
-                    }}
-                    className="w-full py-2 bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 rounded-lg font-mono font-bold transition-all"
-                  >
-                    Force Replenish Virtual Anchor ($10.00 USD)
-                  </button>
-                )}
-              </div>
             </div>
           )}
 
@@ -751,7 +751,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                     <div>
                       <span className="font-bold text-slate-100 block">Profit Lock Automation</span>
                       <span className="text-[11px] text-slate-300">
-                        Credit gains into main balance while position runs
+                        Ratchet trailing stop defense to protect open gains
                       </span>
                     </div>
                   </div>
@@ -1068,6 +1068,102 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   </div>
                 </div>
               </div>
+
+              {/* Gemini API Key Management & Model Selector */}
+              <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-3 font-sans">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-100 flex items-center gap-1.5">
+                    <Key className="w-4 h-4 text-cyan-400" />
+                    Gemini API Keys & Model Selector
+                  </span>
+                  <span className="text-[10px] font-mono text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/30">
+                    Smart Fallback Active
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Add one or more Gemini API keys for high-availability streaming and auto-rotation. Select preferred model or keep Auto.
+                </p>
+
+                {/* Model Selector */}
+                <div className="space-y-1.5 pt-2 border-t border-slate-800 font-mono text-xs">
+                  <span className="text-slate-300 font-bold block">Active Model Strategy</span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[
+                      { id: 'auto', label: '🤖 Auto (Smart Router)' },
+                      { id: 'gemini-4-hydrogen', label: '⚡ Gemini 4 Hydrogen' },
+                      { id: 'gemini-3.7-flash', label: '🔥 Gemini 3.7 Flash' },
+                      { id: 'gemini-flash-latest', label: '🚀 Flash Latest' },
+                      { id: 'gemini-3.1-flash-lite', label: '💡 Flash Lite' },
+                      { id: 'gemini-4-argon', label: '🧠 Gemini 4 Argon (Pro)' },
+                      { id: 'gemini-4-carbon', label: '🔬 Gemini 4 Carbon' },
+                    ].map((m) => (
+                      <button
+                        key={m.id}
+                        onClick={() => {
+                          updateAI({ selectedModel: m.id });
+                          sound.play('click');
+                        }}
+                        className={`py-2 px-2.5 rounded-lg border text-left font-bold transition-all ${
+                          (settings.ai.selectedModel || 'auto') === m.id
+                            ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-sm'
+                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+                        }`}
+                      >
+                        {m.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* API Key Management */}
+                <div className="space-y-2 pt-2 border-t border-slate-800">
+                  <span className="text-slate-300 font-bold text-xs block">Configured API Keys ({settings.ai.geminiApiKeys?.length || 0})</span>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={newApiKeyInput}
+                      onChange={(e) => setNewApiKeyInput(e.target.value)}
+                      placeholder="Paste Gemini API Key (AIza...)"
+                      className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-200 outline-none focus:border-cyan-500"
+                    />
+                    <button
+                      onClick={() => {
+                        const trimmed = newApiKeyInput.trim();
+                        if (!trimmed) return;
+                        const existing = settings.ai.geminiApiKeys || [];
+                        const keys = existing.includes(trimmed) ? existing : [...existing, trimmed];
+                        updateAI({ geminiApiKeys: keys });
+                        setNewApiKeyInput('');
+                        sound.play('win');
+                      }}
+                      className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-mono font-bold rounded-lg text-xs"
+                    >
+                      Add Key
+                    </button>
+                  </div>
+                  {settings.ai.geminiApiKeys && settings.ai.geminiApiKeys.length > 0 && (
+                    <div className="space-y-1.5 max-h-32 overflow-y-auto pt-1">
+                      {settings.ai.geminiApiKeys.map((k, idx) => (
+                        <div key={idx} className="flex items-center justify-between bg-slate-900 border border-slate-800 px-2.5 py-1.5 rounded-lg font-mono text-xs">
+                          <span className="text-slate-300 truncate max-w-[220px]">
+                            {k.slice(0, 6)}...{k.slice(-4)}
+                          </span>
+                          <button
+                            onClick={() => {
+                              const keys = settings.ai.geminiApiKeys.filter((_, i) => i !== idx);
+                              updateAI({ geminiApiKeys: keys });
+                              sound.play('click');
+                            }}
+                            className="text-rose-400 hover:text-rose-300 text-[10px] font-bold"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -1275,10 +1371,10 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-slate-100 font-sans">Deriv App ID</span>
                   <button
-                    onClick={() => updateConnection({ derivAppId: '1089' })}
+                    onClick={() => updateConnection({ derivAppId: '33zsnNh6YJ2HWm30oZZJR' })}
                     className="text-[10px] text-cyan-400 underline"
                   >
-                    Reset (1089)
+                    Reset (33zsnNh6YJ2HWm30oZZJR)
                   </button>
                 </div>
                 <input
@@ -1286,6 +1382,25 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   value={settings.connection.derivAppId}
                   onChange={(e) => updateConnection({ derivAppId: e.target.value.trim() })}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 outline-none font-mono"
+                />
+
+                <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+                  <span className="font-bold text-slate-100 font-sans">OAuth Redirect URL</span>
+                  <button
+                    onClick={() =>
+                      updateConnection({ derivRedirectUrl: 'https://deriv-ai-trader-pro.ai.studio/' })
+                    }
+                    className="text-[10px] text-cyan-400 underline"
+                  >
+                    Reset Default
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={settings.connection.derivRedirectUrl || 'https://deriv-ai-trader-pro.ai.studio/'}
+                  onChange={(e) => updateConnection({ derivRedirectUrl: e.target.value.trim() })}
+                  placeholder="https://deriv-ai-trader-pro.ai.studio/"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-slate-200 outline-none font-mono text-xs"
                 />
               </div>
 

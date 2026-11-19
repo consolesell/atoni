@@ -75,10 +75,16 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
       voice.setPersona(settings.audio.voicePersona as AgentVoicePersonaId, false);
     }
 
-    // 2. Sync Deriv App ID if changed
+    // 2. Sync Deriv App ID & Redirect URL if changed
     const currentCreds = derivWS.getCredentials();
     if (settings.connection.derivAppId && currentCreds.appId !== settings.connection.derivAppId) {
       derivWS.setCredentials(currentCreds.token || '', settings.connection.derivAppId);
+    }
+    if (
+      settings.connection.derivRedirectUrl &&
+      currentCreds.redirectUrl !== settings.connection.derivRedirectUrl
+    ) {
+      derivWS.setRedirectUrl(settings.connection.derivRedirectUrl);
     }
   }, [settings]);
 

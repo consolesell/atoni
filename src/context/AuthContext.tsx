@@ -1,19 +1,20 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { 
-  User, 
-  auth, 
-  googleProvider, 
+import {
+  User,
+  auth,
+  googleProvider,
   GoogleAuthProvider,
-  signInWithPopup, 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
+  signInWithPopup,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
   firebaseSignOut,
   onAuthStateChanged,
   db,
   doc,
   getDoc,
   setDoc,
-  updateDoc
+  OperationType,
+  handleFirestoreError,
 } from '../lib/firebase';
 import { UserProfile } from '../types/trading';
 
@@ -48,6 +49,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
 
   const fetchOrCreateProfile = async (firebaseUser: User) => {
+    const path = `users/${firebaseUser.uid}`;
     try {
       const userRef = doc(db, 'users', firebaseUser.uid);
       const snap = await getDoc(userRef);
@@ -56,14 +58,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const data = snap.data() as UserProfile;
         setUserProfile(data);
       } else {
-        // Create initial default profile (Standardized Virtual Account Anchor: $10 USD)
         const initialProfile: UserProfile = {
           uid: firebaseUser.uid,
           email: firebaseUser.email,
           displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Trader',
           photoURL: firebaseUser.photoURL,
           accountMode: 'DEMO',
-          demoBalance: 10,
+          demoBalance: 0,
           realBalance: 0,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -72,15 +73,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUserProfile(initialProfile);
       }
     } catch (err) {
-      console.error('Error fetching user profile from Firestore:', err);
-      // Fallback local memory profile (Standardized Virtual Account Anchor: $10 USD)
+      try {
+        handleFirestoreError(err, OperationType.GET, path);
+      } catch {
+        // Maintain fallback profile in memory if Firestore rules block unconfigured collections
+      }
       setUserProfile({
         uid: firebaseUser.uid,
         email: firebaseUser.email,
         displayName: firebaseUser.displayName || 'Trader',
         photoURL: firebaseUser.photoURL,
         accountMode: 'DEMO',
-        demoBalance: 10,
+        demoBalance: 0,
         realBalance: 0,
       });
     }
@@ -92,7 +96,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (currentUser) {
         await fetchOrCreateProfile(currentUser);
       } else {
-        // Check if there is an active local Deriv OAuth profile saved
         try {
           const savedLocalProfile = localStorage.getItem('deriv_local_profile');
           if (savedLocalProfile) {
@@ -100,7 +103,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           } else {
             setUserProfile(null);
           }
-        } catch (e) {
+        } catch {
           setUserProfile(null);
         }
         setGoogleAccessToken(null);
@@ -165,45 +168,61 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setGoogleAccessToken(null);
     try {
       localStorage.removeItem('deriv_local_profile');
-    } catch (e) {}
+      localStorage.removeItem('deriv_api_token');
+      localStorage.removeItem('deriv_active_loginid');
+      localStorage.removeItem('deriv_linked_accounts');
+    } catch {}
   };
 
   const signInWithDerivOAuth = async (
     accounts: any[],
     primaryToken: string,
     primaryAccount: string,
-    appId: string = '1089'
+    appId: string = '33zsnNh6YJ2HWm30oZZJR'
   ) => {
     const isVirtual = primaryAccount.startsWith('VRTC') || primaryAccount.includes('VR');
     const mode: 'DEMO' | 'REAL' = isVirtual ? 'DEMO' : 'REAL';
+    const activeAcctObj = Array.isArray(accounts)
+      ? accounts.find((a: any) => a?.account === primaryAccount) || accounts[0]
+      : null;
+    const liveBalanceFromAcct =
+      typeof activeAcctObj?.balance === 'number' && Number.isFinite(activeAcctObj.balance)
+        ? activeAcctObj.balance
+        : undefined;
 
     if (user) {
-      // User is logged into Firebase Auth -> sync with Firestore
+      const path = `users/${user.uid}`;
+      const updates: any = {
+        uid: user.uid,
+        derivApiToken: primaryToken,
+        derivAppId: appId,
+        derivAccounts: accounts,
+        derivActiveAccount: primaryAccount,
+        accountMode: mode,
+        updatedAt: new Date().toISOString(),
+      };
+      if (typeof liveBalanceFromAcct === 'number') {
+        if (isVirtual) updates.demoBalance = liveBalanceFromAcct;
+        else updates.realBalance = liveBalanceFromAcct;
+      }
+      setUserProfile((prev) => (prev ? { ...prev, ...updates } : null));
       try {
         const userRef = doc(db, 'users', user.uid);
-        const updates: any = {
-          derivApiToken: primaryToken,
-          derivAppId: appId,
-          derivAccounts: accounts,
-          derivActiveAccount: primaryAccount,
-          accountMode: mode,
-          updatedAt: new Date().toISOString(),
-        };
-        await updateDoc(userRef, updates);
-        setUserProfile((prev) => prev ? { ...prev, ...updates } : null);
+        await setDoc(userRef, updates, { merge: true });
       } catch (err) {
-        console.warn('Silent fallback on Firestore profile update:', err);
+        try {
+          handleFirestoreError(err, OperationType.WRITE, path);
+        } catch {}
       }
     } else {
-      // User is logging in directly via Deriv OAuth
       const localProfile: UserProfile = {
         uid: `deriv-${primaryAccount}`,
         email: `${primaryAccount.toLowerCase()}@deriv.user`,
         displayName: primaryAccount,
         photoURL: null,
         accountMode: mode,
-        demoBalance: isVirtual ? 10000 : 10,
-        realBalance: isVirtual ? 0 : 100,
+        demoBalance: isVirtual ? (liveBalanceFromAcct ?? 0) : 0,
+        realBalance: !isVirtual ? (liveBalanceFromAcct ?? 0) : 0,
         derivApiToken: primaryToken,
         derivAppId: appId,
         derivAccounts: accounts,
@@ -214,53 +233,87 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUserProfile(localProfile);
       try {
         localStorage.setItem('deriv_local_profile', JSON.stringify(localProfile));
-      } catch (e) {}
+      } catch {}
     }
   };
 
   const updateAccountMode = async (mode: 'DEMO' | 'REAL') => {
-    if (!user) {
-      setUserProfile((prev) => prev ? { ...prev, accountMode: mode } : null);
-      return;
-    }
+    const updatedAt = new Date().toISOString();
+    setUserProfile((prev) => {
+      if (!prev) return null;
+      const next = { ...prev, accountMode: mode, updatedAt };
+      if (!user) {
+        try {
+          localStorage.setItem('deriv_local_profile', JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
+    if (!user) return;
+    const path = `users/${user.uid}`;
     try {
       const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, { accountMode: mode, updatedAt: new Date().toISOString() });
-      setUserProfile((prev) => prev ? { ...prev, accountMode: mode } : null);
+      await setDoc(userRef, { accountMode: mode, updatedAt }, { merge: true });
     } catch (err) {
-      console.error('Failed to update account mode in Firestore:', err);
-      setUserProfile((prev) => prev ? { ...prev, accountMode: mode } : null);
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } catch {}
     }
   };
 
   const updateBalances = async (demoBal?: number, realBal?: number) => {
-    if (!userProfile) return;
     const updates: Partial<UserProfile> = { updatedAt: new Date().toISOString() };
-    if (typeof demoBal === 'number') updates.demoBalance = demoBal;
-    if (typeof realBal === 'number') updates.realBalance = realBal;
+    if (typeof demoBal === 'number' && Number.isFinite(demoBal)) updates.demoBalance = demoBal;
+    if (typeof realBal === 'number' && Number.isFinite(realBal)) updates.realBalance = realBal;
 
-    setUserProfile((prev) => prev ? { ...prev, ...updates } : null);
+    setUserProfile((prev) => {
+      if (!prev) return null;
+      const next = { ...prev, ...updates };
+      if (!user) {
+        try {
+          localStorage.setItem('deriv_local_profile', JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
 
     if (user) {
+      const path = `users/${user.uid}`;
       try {
         const userRef = doc(db, 'users', user.uid);
-        await updateDoc(userRef, updates);
+        await setDoc(userRef, updates, { merge: true });
       } catch (err) {
-        console.warn('Silent fallback on balance sync:', err);
+        try {
+          handleFirestoreError(err, OperationType.UPDATE, path);
+        } catch {}
       }
     }
   };
 
   const updateDerivCredentials = async (token: string, appId?: string) => {
+    const updates: any = { derivApiToken: token, updatedAt: new Date().toISOString() };
+    if (appId) updates.derivAppId = appId;
+
+    setUserProfile((prev) => {
+      if (!prev) return null;
+      const next = { ...prev, ...updates };
+      if (!user) {
+        try {
+          localStorage.setItem('deriv_local_profile', JSON.stringify(next));
+        } catch {}
+      }
+      return next;
+    });
+
     if (!user) return;
+    const path = `users/${user.uid}`;
     try {
       const userRef = doc(db, 'users', user.uid);
-      const updates: any = { derivApiToken: token, updatedAt: new Date().toISOString() };
-      if (appId) updates.derivAppId = appId;
-      await updateDoc(userRef, updates);
-      setUserProfile((prev) => prev ? { ...prev, ...updates } : null);
+      await setDoc(userRef, updates, { merge: true });
     } catch (err) {
-      console.error('Failed to update Deriv credentials:', err);
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, path);
+      } catch {}
     }
   };
 

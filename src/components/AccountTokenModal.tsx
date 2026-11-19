@@ -19,7 +19,11 @@ import {
   Layers,
   HelpCircle,
 } from 'lucide-react';
-import { derivWS } from '../lib/derivWS';
+import {
+  derivWS,
+  DEFAULT_DERIV_APP_ID,
+  DEFAULT_DERIV_REDIRECT_URL,
+} from '../lib/derivWS';
 import { sound } from '../lib/soundEngine';
 import { DerivLinkedAccount } from '../types/trading';
 
@@ -37,9 +41,12 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
   onToggleLiveMode,
 }) => {
   const currentCreds = derivWS.getCredentials();
-  const [activeTab, setActiveTab] = useState<'oauth' | 'token' | 'virtual' | 'accounts'>('oauth');
+  const [activeTab, setActiveTab] = useState<'oauth' | 'token' | 'accounts'>('oauth');
   const [tokenInput, setTokenInput] = useState(currentCreds.token || '');
-  const [appIdInput, setAppIdInput] = useState(String(currentCreds.appId || 1089));
+  const [appIdInput, setAppIdInput] = useState(String(currentCreds.appId || DEFAULT_DERIV_APP_ID));
+  const [redirectUrlInput, setRedirectUrlInput] = useState(
+    String(currentCreds.redirectUrl || DEFAULT_DERIV_REDIRECT_URL)
+  );
   const [pastedUrlInput, setPastedUrlInput] = useState('');
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
@@ -56,7 +63,8 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
     if (isOpen) {
       const creds = derivWS.getCredentials();
       setTokenInput(creds.token || '');
-      setAppIdInput(String(creds.appId || 1089));
+      setAppIdInput(String(creds.appId || DEFAULT_DERIV_APP_ID));
+      setRedirectUrlInput(String(creds.redirectUrl || DEFAULT_DERIV_REDIRECT_URL));
       setLinkedAccounts(derivWS.getLinkedAccounts());
       setTestResult(null);
       setSaveMessage(null);
@@ -68,7 +76,7 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
   useEffect(() => {
     const handleAuthMessage = (event: MessageEvent) => {
       if (event.data?.type === 'DERIV_OAUTH_SUCCESS') {
-        const { accounts, token, account } = event.data;
+        const { accounts, token, primaryToken, account, primaryAccount } = event.data;
         setIsOAuthWaiting(false);
         sound.play('win');
 
@@ -77,13 +85,15 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
           setLinkedAccounts(accounts);
         }
 
-        const effectiveToken = token || (accounts && accounts[0] ? accounts[0].token : '');
-        const cleanAppId = appIdInput.trim() || '1089';
+        const effectiveToken = primaryToken || token || (accounts && accounts[0] ? accounts[0].token : '');
+        const effectiveAccount = primaryAccount || account || (accounts && accounts[0] ? accounts[0].account : '');
+        const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
+        const cleanRedirectUrl = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
 
         if (effectiveToken) {
-          derivWS.setCredentials(effectiveToken, cleanAppId);
+          derivWS.setCredentials(effectiveToken, cleanAppId, cleanRedirectUrl);
           setTokenInput(effectiveToken);
-          setSaveMessage(`Successfully connected Deriv account ${account || ''}!`);
+          setSaveMessage(`Successfully connected Deriv account ${effectiveAccount || ''}!`);
           setTimeout(() => {
             setSaveMessage(null);
             onClose();
@@ -94,7 +104,7 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
 
     window.addEventListener('message', handleAuthMessage);
     return () => window.removeEventListener('message', handleAuthMessage);
-  }, [appIdInput, onClose]);
+  }, [appIdInput, redirectUrlInput, onClose]);
 
   if (!isOpen) return null;
 
@@ -104,8 +114,13 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
 
   // Launch Deriv OAuth popup without leaving app
   const handleLaunchDerivOAuth = () => {
-    const cleanAppId = appIdInput.trim() || '1089';
-    const oauthUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${encodeURIComponent(cleanAppId)}&l=en&brand=deriv`;
+    const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
+    const rawRedirect = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
+    derivWS.setRedirectUrl(rawRedirect);
+    const redirectUri = rawRedirect.includes('/auth/')
+      ? rawRedirect
+      : `${rawRedirect.replace(/\/$/, '')}/auth/deriv/callback`;
+    const oauthUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${encodeURIComponent(cleanAppId)}&l=en&brand=deriv&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
     setIsOAuthWaiting(true);
     sound.play('click');
@@ -176,7 +191,11 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
 
       if (singleToken) {
         setTokenInput(singleToken);
-        derivWS.setCredentials(singleToken, appIdInput.trim() || '1089');
+        derivWS.setCredentials(
+          singleToken,
+          appIdInput.trim() || DEFAULT_DERIV_APP_ID,
+          redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL
+        );
         setSaveMessage(`Imported ${accounts.length > 0 ? accounts.length : 1} account(s)! Connected as ${singleAcct}.`);
         sound.play('win');
         setTimeout(() => {
@@ -208,15 +227,34 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
     setTestResult(null);
     sound.play('click');
 
-    const cleanAppId = appIdInput.trim() || '1089';
+    const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
+    const cleanRedirectUrl = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
     const res = await derivWS.testToken(tokenInput.trim(), cleanAppId);
 
     setIsTesting(false);
     if (res.success && res.authorize) {
       sound.play('win');
-      derivWS.setCredentials(tokenInput.trim(), cleanAppId);
+      derivWS.setCredentials(tokenInput.trim(), cleanAppId, cleanRedirectUrl);
       const isVirtual = Boolean(res.authorize.is_virtual);
       onToggleLiveMode(!isVirtual);
+
+      if (res.authorize.loginid) {
+        const existingLinked = derivWS.getLinkedAccounts();
+        const existingIdx = existingLinked.findIndex((a) => a.account === res.authorize.loginid);
+        const updatedAcc: DerivLinkedAccount = {
+          account: res.authorize.loginid,
+          token: tokenInput.trim(),
+          currency: res.authorize.currency || 'USD',
+          isVirtual,
+          balance: Number(res.authorize.balance ?? 0),
+        };
+        const mergedLinked =
+          existingIdx >= 0
+            ? existingLinked.map((a, idx) => (idx === existingIdx ? { ...a, ...updatedAcc } : a))
+            : [updatedAcc, ...existingLinked];
+        derivWS.setLinkedAccounts(mergedLinked);
+        setLinkedAccounts(mergedLinked);
+      }
 
       setTestResult({
         success: true,
@@ -240,19 +278,6 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
     }
   };
 
-  // Switch to standardized Virtual Account Anchor ($10 USD)
-  const handleSelectVirtualAnchor = () => {
-    derivWS.logout();
-    setTokenInput('');
-    onToggleLiveMode(false);
-    sound.play('toggle');
-    setSaveMessage('Switched to Standardized Virtual Demo Account ($10.00 USD Anchor with Auto-Replenishment).');
-    setTimeout(() => {
-      setSaveMessage(null);
-      onClose();
-    }, 1200);
-  };
-
   // Quick switch between linked accounts
   const handleSwitchLinkedAccount = (acc: DerivLinkedAccount) => {
     sound.play('click');
@@ -266,10 +291,11 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
     }, 1200);
   };
 
-  // Fill example test credentials
+  // Pre-fill production gateway defaults so user only pastes their API token
   const handleLoadExample = () => {
-    setAppIdInput('34ipe1l5uHyeefpKPRKbL');
-    setTokenInput('pat_5665fba729f270de38225d8892084a545cb2dc3118e20f3f07a05b8ad6ec435b');
+    setAppIdInput(DEFAULT_DERIV_APP_ID);
+    setRedirectUrlInput(DEFAULT_DERIV_REDIRECT_URL);
+    derivWS.setRedirectUrl(DEFAULT_DERIV_REDIRECT_URL);
     sound.play('click');
   };
 
@@ -278,7 +304,7 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
     derivWS.logout();
     setTokenInput('');
     onToggleLiveMode(false);
-    setSaveMessage('Disconnected from Deriv. Running in Virtual Simulation mode.');
+    setSaveMessage('Disconnected from Deriv. Connect a Demo or Real account to trade.');
     setTimeout(() => {
       setSaveMessage(null);
     }, 1500);
@@ -329,7 +355,7 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
               <strong className={isCurrentlyAuthorized ? 'text-emerald-400' : 'text-amber-400'}>
                 {isCurrentlyAuthorized
                   ? `Authorized (${authorizedInfo?.loginid || 'CR_USER'})`
-                  : 'Virtual Simulation'}
+                  : 'Not Connected'}
               </strong>
             </span>
             {authorizedInfo?.balance !== undefined && (
@@ -377,18 +403,6 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
           >
             <Key className="w-3.5 h-3.5" />
             <span>Direct API Token</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('virtual')}
-            className={`flex-1 py-2.5 px-3 text-center border-b-2 font-bold transition-all flex items-center justify-center gap-1.5 ${
-              activeTab === 'virtual'
-                ? 'border-cyan-400 text-cyan-300 bg-cyan-500/5'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Virtual $10 Anchor</span>
           </button>
 
           {linkedAccounts.length > 0 && (
@@ -453,14 +467,27 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
                 </div>
 
                 <div className="flex flex-col gap-2 pt-2 border-t border-slate-800/80">
-                  <div className="flex items-center justify-between text-xs font-mono">
-                    <span className="text-slate-400">Deriv App ID:</span>
+                  <div className="flex items-center justify-between gap-2 text-xs font-mono">
+                    <span className="text-slate-400 shrink-0">Deriv App ID:</span>
                     <input
                       type="text"
                       value={appIdInput}
                       onChange={(e) => setAppIdInput(e.target.value)}
-                      placeholder="1089"
-                      className="w-32 bg-slate-950 border border-slate-700 text-right px-2.5 py-1 rounded-lg text-slate-200 outline-none font-mono"
+                      placeholder={DEFAULT_DERIV_APP_ID}
+                      className="w-48 bg-slate-950 border border-slate-700 text-right px-2.5 py-1 rounded-lg text-slate-200 outline-none font-mono"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-xs font-mono">
+                    <span className="text-slate-400 shrink-0">Redirect URL:</span>
+                    <input
+                      type="text"
+                      value={redirectUrlInput}
+                      onChange={(e) => {
+                        setRedirectUrlInput(e.target.value);
+                        derivWS.setRedirectUrl(e.target.value);
+                      }}
+                      placeholder={DEFAULT_DERIV_REDIRECT_URL}
+                      className="flex-1 bg-slate-950 border border-slate-700 text-right px-2.5 py-1 rounded-lg text-slate-200 outline-none font-mono text-[11px]"
                     />
                   </div>
 
@@ -531,7 +558,7 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
                     className="text-cyan-400 hover:text-cyan-300 text-[11px] underline flex items-center gap-1"
                   >
                     <Sparkles className="w-3 h-3" />
-                    Fill Example Credentials
+                    Reset Production Defaults
                   </button>
                 </div>
                 <input
@@ -557,13 +584,13 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
 
               <div className="flex flex-col gap-1.5">
                 <label className="text-slate-300 font-medium text-xs">
-                  Deriv App ID (Default: 1089)
+                  Deriv App ID (Default: 33zsnNh6YJ2HWm30oZZJR)
                 </label>
                 <input
                   type="text"
                   value={appIdInput}
                   onChange={(e) => setAppIdInput(e.target.value)}
-                  placeholder="1089 or custom registered app ID"
+                  placeholder="33zsnNh6YJ2HWm30oZZJR or custom registered app ID"
                   className="bg-slate-950 border border-slate-700 text-slate-100 rounded-xl px-4 py-2 text-xs outline-none"
                 />
               </div>
@@ -585,43 +612,6 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
                     <span>Test & Connect Deriv Live</span>
                   </>
                 )}
-              </button>
-            </div>
-          )}
-
-          {/* TAB 3: STANDARDIZED VIRTUAL ANCHOR ($10 USD) */}
-          {activeTab === 'virtual' && (
-            <div className="flex flex-col gap-3 font-mono">
-              <div className="p-4 bg-emerald-950/40 border border-emerald-500/40 rounded-xl flex flex-col gap-2.5">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck className="w-5 h-5 text-emerald-400" />
-                  <span className="font-bold text-sm text-emerald-300 font-sans">
-                    Standardized Virtual Account Anchor: $10.00 USD
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-300 leading-relaxed font-sans">
-                  The virtual environment is calibrated with a strict <strong>$10 USD initial balance</strong> and <strong>real-time auto-replenishment</strong>.
-                  Whenever depleted, the system automatically triggers a top-up back to $10 USD.
-                </p>
-                <div className="grid grid-cols-2 gap-2 mt-1 pt-2 border-t border-emerald-500/30 text-xs">
-                  <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800">
-                    <span className="text-slate-400 text-[10px]">Anchor Stake:</span>
-                    <div className="text-emerald-400 font-bold">$10.00 USD</div>
-                  </div>
-                  <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800">
-                    <span className="text-slate-400 text-[10px]">Auto-Replenish:</span>
-                    <div className="text-emerald-400 font-bold">INSTANT (&lt; $0.50)</div>
-                  </div>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={handleSelectVirtualAnchor}
-                className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs rounded-xl shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 transition-all"
-              >
-                <Check className="w-4 h-4" />
-                <span>Switch to Virtual $10 USD Anchor</span>
               </button>
             </div>
           )}
@@ -696,8 +686,8 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
         {/* Modal Footer */}
         <div className="flex items-center justify-between px-5 sm:px-6 py-3 bg-slate-950/90 border-t border-slate-800 text-xs font-mono">
           <div className="text-slate-400 text-[11px]">
-            Execution: <span className={isLiveMode ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
-              {isLiveMode ? 'REAL MONEY' : 'VIRTUAL ANCHOR'}
+            Execution: <span className={!isCurrentlyAuthorized ? 'text-slate-400 font-bold' : isLiveMode ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>
+              {!isCurrentlyAuthorized ? 'NOT CONNECTED' : isLiveMode ? 'REAL MONEY' : 'DEMO ACCOUNT'}
             </span>
           </div>
 

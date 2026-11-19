@@ -46,7 +46,6 @@ export type VoiceTradeCommandType =
   | 'RUN_AUTONOMOUSLY'
   | 'STOP_AUTONOMY'
   | 'ARM_SNIPER'
-  | 'REPLENISH_ANCHOR'
   | 'SWITCH_SYMBOL'
   | 'TIGHTEN_STOP'
   | 'SHOW_AGENT_VOTES'
@@ -113,7 +112,6 @@ export const STRATEGIC_VOICE_COMMANDS: { triggers: string[]; command: string; pr
  * - "Set stake to 5 dollars" / "Stake 10" / "Amount 2 dollars"
  * - "Start bot" / "Stop bot" / "Toggle bot"
  * - "Arm sniper" / "Disarm sniper"
- * - "Replenish anchor" / "Replenish balance"
  * - "Switch to Volatility 10" / "Select Volatility 100"
  */
 export function parseVoiceTradeCommand(transcript: string): VoiceTradeCommand | null {
@@ -235,16 +233,7 @@ export function parseVoiceTradeCommand(transcript: string): VoiceTradeCommand | 
     };
   }
 
-  // 7. Replenish Anchor: "Replenish balance", "Reset balance", "Replenish anchor"
-  if (/\b(?:replenish|top up|reload|re-anchor|reset)\s*(?:virtual\s*)?(?:balance|anchor|account)\b/i.test(lower)) {
-    return {
-      type: 'REPLENISH_ANCHOR',
-      rawText: text,
-      feedbackMessage: 'Virtual account balance replenished to $10.00 anchor.',
-    };
-  }
-
-  // 8. Symbol Switch / Rotation: "Rotate to Volatility 75", "Switch to Volatility 10", "Select Volatility 100"
+  // 7. Symbol Switch / Rotation: "Rotate to Volatility 75", "Switch to Volatility 10", "Select Volatility 100"
   const symMatch = lower.match(/\b(?:rotate(?:\s+to)?|switch(?:\s+to)?|select|trade|change\s+to)\s*(?:volatility|vol)\s*(10|25|50|75|100)(?:\s*(?:1s|1\s*second))?\b/i);
   if (symMatch) {
     const num = symMatch[1];

@@ -7,7 +7,6 @@ import {
   Crosshair,
   Lock,
   ArrowRight,
-  RefreshCw,
   Sliders,
   Sparkles,
   Layers,
@@ -50,7 +49,6 @@ interface BlackboxHubViewProps {
   botEnabled: boolean;
   onToggleBot: () => void;
   balance: number;
-  onReplenishVirtualAnchor?: () => void;
   onSelectSymbol?: (symbol: string) => void;
 }
 
@@ -71,7 +69,6 @@ export const BlackboxHubView: React.FC<BlackboxHubViewProps> = ({
   botEnabled,
   onToggleBot,
   balance,
-  onReplenishVirtualAnchor,
   onSelectSymbol,
 }) => {
   const stability = marketStability?.stabilityIndex ?? 82;
@@ -103,20 +100,11 @@ export const BlackboxHubView: React.FC<BlackboxHubViewProps> = ({
           </div>
         </div>
 
-        {/* Master Bot & Anchor Top Actions */}
+        {/* Master Bot & Live Equity Actions */}
         <div className="flex items-center gap-2.5 z-10">
-          {balance < 2.0 && onReplenishVirtualAnchor && (
-            <button
-              onClick={() => {
-                sound.play('click');
-                onReplenishVirtualAnchor();
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-xl font-mono text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 hover:bg-amber-500/30 transition-all animate-pulse"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              Replenish Anchor ($10)
-            </button>
-          )}
+          <div className="px-3 py-2 rounded-xl bg-slate-950/80 border border-slate-800 font-mono text-xs text-slate-300">
+            Bal: <strong className="text-emerald-400">${balance.toFixed(2)}</strong>
+          </div>
 
           <button
             onClick={onToggleBot}
@@ -318,11 +306,11 @@ export const BlackboxHubView: React.FC<BlackboxHubViewProps> = ({
                 <h3 className="text-sm font-bold text-white font-mono flex items-center gap-1.5">
                   PROFIT LOCK AUTOMATION
                   <span className="text-[10px] text-amber-400 bg-amber-950/80 px-2 py-0.5 rounded border border-amber-500/40">
-                    REAL-TIME CREDITING
+                    TRAILING STOP DEFENSE
                   </span>
                 </h3>
                 <p className="text-[11px] text-slate-400 font-sans">
-                  Secures open gains directly into main balance when threshold is reached, while trade runs behind trailing stop.
+                  Ratchets trailing stop protection when threshold is reached and executes live Deriv market resale upon stop trigger.
                 </p>
               </div>
             </div>
@@ -376,7 +364,7 @@ export const BlackboxHubView: React.FC<BlackboxHubViewProps> = ({
               ))}
             </div>
             <p className="text-[10px] text-slate-500 font-mono mt-1">
-              • Once open contract reaches {trailingStopConfig.profitLockThresholdPercent ?? 50}%, that exact portion is credited to balance immediately.
+              • Once open contract reaches {trailingStopConfig.profitLockThresholdPercent ?? 50}% target threshold, trailing stop defense tightens to protect gains until settlement or resale.
             </p>
           </div>
         </div>

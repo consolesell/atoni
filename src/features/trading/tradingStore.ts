@@ -70,9 +70,9 @@ interface TradingState {
 }
 
 export const useTradingStore = create<TradingState>((set) => ({
-  balance: 10.0,
+  balance: 0,
   currency: 'USD',
-  loginid: 'VRTC_VIRTUAL_10',
+  loginid: '',
   isAuthorized: false,
   isLiveMode: false,
   isExecuting: false,
@@ -84,8 +84,8 @@ export const useTradingStore = create<TradingState>((set) => ({
   durationUnit: 'minutes',
   direction: 'CALL',
 
-  currentPrice: 1000,
-  prevPrice: 1000,
+  currentPrice: 0,
+  prevPrice: 0,
   candles: [],
   tickBuffer: [],
   sniperSetup: null,

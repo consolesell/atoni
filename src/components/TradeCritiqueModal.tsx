@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Sparkles, CheckCircle2, XCircle, Trophy, Star, ArrowRight, ShieldAlert } from 'lucide-react';
 import { AICritiqueResult, TradeRecord } from '../types/trading';
+import { getAIRequestHeaders } from '../lib/aiClientConfig';
 
 interface TradeCritiqueModalProps {
   trade: TradeRecord | null;
@@ -29,7 +30,7 @@ export const TradeCritiqueModal: React.FC<TradeCritiqueModalProps> = ({ trade, i
     try {
       const res = await fetch('/api/ai/trade-critique', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
         body: JSON.stringify({ trade: targetTrade }),
       });
       const data = await res.json();
@@ -88,7 +89,8 @@ export const TradeCritiqueModal: React.FC<TradeCritiqueModalProps> = ({ trade, i
               </div>
               <div>
                 <div className="text-sm font-bold text-slate-100">
-                  {trade.symbol} ({trade.duration}m Contract)
+                  {trade.symbol} ({trade.duration}
+                  {trade.durationUnit === 'ticks' ? 't' : trade.durationUnit === 'seconds' ? 's' : 'm'} Contract)
                 </div>
                 <div className="text-slate-400 text-[11px]">
                   Entry: {trade.entryPrice?.toFixed(3)} → Exit: {trade.exitPrice?.toFixed(3) || 'Expired'}

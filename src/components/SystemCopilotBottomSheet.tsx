@@ -29,6 +29,7 @@ import {
 import { sound } from '../lib/soundEngine';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { voiceInput } from '../lib/voiceInputEngine';
+import { getAIRequestHeaders } from '../lib/aiClientConfig';
 
 interface SystemCopilotBottomSheetProps {
   symbol: string;
@@ -212,7 +213,7 @@ How can I assist your execution or risk audit?`,
 
       const res = await fetch('/api/ai/chat-stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
         body: JSON.stringify({
           messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
           context: fullContext,
@@ -302,7 +303,7 @@ How can I assist your execution or risk audit?`,
       try {
         const res = await fetch('/api/ai/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
           body: JSON.stringify({
             messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
             context: fullContext,

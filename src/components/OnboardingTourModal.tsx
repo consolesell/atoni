@@ -38,7 +38,7 @@ const TOUR_STEPS: TourStep[] = [
       'sbatomic4.1 connects directly to Deriv WebSockets for millisecond-level tick ingestion across Volatility 10 to 100 indices, with automatic exponential backoff resilience and tick buffering.',
     keyFeatures: [
       'Zero-latency spot ticks and live candle generation',
-      'Dual Virtual Sandbox ($10.00 USD anchor) and Real Deriv account switching',
+      'Dual Deriv Demo (VRTC) and Real (CR) live account switching',
       'Continuous ping/pong heartbeat watchdog monitoring',
     ],
     actionHint: 'Look at the top navbar to switch markets or inspect latency in real time.',

@@ -240,7 +240,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
                     : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                 }`}
               >
-                {isLiveMode ? 'REAL MONEY' : 'SIMULATOR'}
+                {isLiveMode ? 'REAL MONEY' : 'DEMO ACCOUNT'}
               </span>
             </div>
           </div>

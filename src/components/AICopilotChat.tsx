@@ -28,6 +28,7 @@ import { voiceInput } from '../lib/voiceInputEngine';
 import { sound } from '../lib/soundEngine';
 import { voice } from '../lib/voiceEngine';
 import { VoiceWaveform, VoiceTalkingRadar } from './VoiceWaveformIndicator';
+import { getAIRequestHeaders } from '../lib/aiClientConfig';
 
 interface AICopilotChatProps {
   symbol: string;
@@ -78,7 +79,7 @@ export const AICopilotChat: React.FC<AICopilotChatProps> = ({
   maxDrawdown = 0.0,
   profitFactor = 1.85,
   currentStake = 5.0,
-  balance = 10000,
+  balance = 10,
   onRotateSymbol,
   onTightenStop,
   onAdjustStake,
@@ -274,7 +275,7 @@ Select an action chip below or speak hands-free via the microphone:`,
 
       const response = await fetch('/api/ai/chat-stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
         body: JSON.stringify({
           messages: newHistory.map((m) => ({ role: m.role, content: m.content })),
           context: payloadContext,
@@ -418,7 +419,7 @@ Select an action chip below or speak hands-free via the microphone:`,
       try {
         const res = await fetch('/api/ai/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
           body: JSON.stringify({
             messages: newHistory.map((m) => ({ role: m.role, content: m.content })),
             context: payloadContext,

@@ -31,7 +31,6 @@ interface VoiceCommandHUDProps {
   autonomyMode?: AutonomyMode;
   sbagentAutonomyGrant?: boolean;
   onToggleSniper: () => void;
-  onReplenishAnchor: () => void;
   onSelectSymbol?: (symbol: string) => void;
   onTightenStop?: (distance: number) => void;
   onShowAgentVotes?: () => void;
@@ -179,15 +178,6 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
           setLastExecutedCommand({
             text: cmd.rawText,
             action: p.isSniperArmed ? 'Sniper trigger disarmed' : 'Sniper trigger armed',
-            timestamp: Date.now(),
-          });
-          break;
-
-        case 'REPLENISH_ANCHOR':
-          p.onReplenishAnchor();
-          setLastExecutedCommand({
-            text: cmd.rawText,
-            action: 'Virtual account anchor replenished ($10.00)',
             timestamp: Date.now(),
           });
           break;
@@ -482,7 +472,6 @@ export const VoiceCommandHUD: React.FC<VoiceCommandHUDProps> = (props) => {
                 <li><strong className="text-amber-300">"Set stake to $5"</strong> – Calibrates position size</li>
                 <li><strong className="text-blue-300">"Start bot" / "Stop bot"</strong> – Toggles automated bot</li>
                 <li><strong className="text-indigo-300">"Arm sniper"</strong> – Arms confluence entry trigger</li>
-                <li><strong className="text-teal-300">"Replenish anchor"</strong> – Resets $10 virtual capital</li>
               </ul>
             </div>
           )}

@@ -3,15 +3,8 @@ import * as d3 from 'd3';
 import {
   TrendingUp,
   TrendingDown,
-  Calendar,
-  DollarSign,
   BarChart3,
-  Activity,
-  Layers,
-  Sparkles,
-  RefreshCw,
   Award,
-  AlertTriangle,
 } from 'lucide-react';
 import { TradeRecord } from '../types/trading';
 
@@ -46,52 +39,8 @@ export const DailyCumulativePnLChart: React.FC<DailyCumulativePnLChartProps> = (
   const [viewMode, setViewMode] = useState<'combo' | 'cumulative' | 'daily'>('combo');
   const [hoveredPoint, setHoveredPoint] = useState<DailyAggregation | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
-  const [showSimulatedHistory, setShowSimulatedHistory] = useState(false);
 
-  // Generate synthetic sample history if the user has no closed trades yet or chooses demo audit
-  const sampleTrades = useMemo(() => {
-    const list: TradeRecord[] = [];
-    const now = Date.now();
-    const dayMs = 24 * 60 * 60 * 1000;
-    // Generate 18 days of sample quant algorithmic trades
-    let runningBalance = currentBalance - 850;
-    for (let i = 18; i >= 0; i--) {
-      const dayTime = now - i * dayMs;
-      const tradesToday = Math.floor(Math.random() * 5) + 2;
-      for (let j = 0; j < tradesToday; j++) {
-        const won = Math.random() > 0.38; // 62% win rate
-        const stake = Math.floor(Math.random() * 40) + 15;
-        const profit = won ? Number((stake * 0.95).toFixed(2)) : -stake;
-        runningBalance += profit;
-        list.push({
-          id: `sample_${i}_${j}`,
-          timestamp: new Date(dayTime + j * 3600000).toISOString(),
-          mode: 'SIMULATION',
-          symbol: 'R_25',
-          amount: stake,
-          decision: won ? 'BUY' : 'SELL',
-          result: won ? 'WIN' : 'LOSS',
-          profit,
-          confidence: Math.floor(Math.random() * 25) + 70,
-          agent: 'Hybrid Consensus',
-          regime: 'Mean Reverting',
-          duration: 60,
-          entryPrice: 1845.2,
-        });
-      }
-    }
-    return list;
-  }, [currentBalance]);
-
-  // Use either actual closed trades (if available) or sample trades if toggled/empty
-  const activeTrades = useMemo(() => {
-    if (closedTrades && closedTrades.length > 0 && !showSimulatedHistory) {
-      return closedTrades;
-    }
-    return sampleTrades;
-  }, [closedTrades, sampleTrades, showSimulatedHistory]);
-
-  const isUsingSimulated = closedTrades.length === 0 || showSimulatedHistory;
+  const activeTrades = closedTrades || [];
 
   // Aggregate trades by calendar date
   const dailyData: DailyAggregation[] = useMemo(() => {
@@ -170,7 +119,6 @@ export const DailyCumulativePnLChart: React.FC<DailyCumulativePnLChartProps> = (
     const totalCumulativePnL = dailyData[dailyData.length - 1]?.cumulativePnL || 0;
     const totalTrades = dailyData.reduce((acc, d) => acc + d.tradesCount, 0);
     const totalWins = dailyData.reduce((acc, d) => acc + d.wins, 0);
-    const totalLosses = dailyData.reduce((acc, d) => acc + d.losses, 0);
     const profitableDays = dailyData.filter((d) => d.dailyPnL > 0).length;
 
     let bestDay = { date: dailyData[0].dateStr, pnl: dailyData[0].dailyPnL };
@@ -489,33 +437,15 @@ export const DailyCumulativePnLChart: React.FC<DailyCumulativePnLChartProps> = (
               <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-cyan-950/80 text-cyan-300 border border-cyan-500/30">
                 D3.JS POWERED
               </span>
-              {isUsingSimulated && (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-950/80 text-purple-300 border border-purple-500/30 flex items-center gap-1">
-                  <Sparkles className="w-2.5 h-2.5" /> Sample Audit Ledger
-                </span>
-              )}
             </div>
             <p className="text-xs text-slate-400 font-mono">
-              Aggregate day-by-day trading ledger & cumulative trajectory from closed positions
+              Aggregate day-by-day trading ledger & cumulative trajectory from settled Deriv positions
             </p>
           </div>
         </div>
 
         {/* View Mode & Timeframe Filters */}
         <div className="flex items-center gap-2">
-          {/* Toggle sample/actual */}
-          {closedTrades.length > 0 && (
-            <button
-              onClick={() => setShowSimulatedHistory((prev) => !prev)}
-              className={`px-2.5 py-1 text-[11px] font-mono rounded-lg border transition-all ${
-                showSimulatedHistory
-                  ? 'bg-purple-900/40 text-purple-200 border-purple-700/60'
-                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
-              }`}
-            >
-              {showSimulatedHistory ? 'Viewing Sample Backtest' : 'View Real Ledger'}
-            </button>
-          )}
 
           {/* View Modes */}
           <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-mono">
@@ -639,7 +569,17 @@ export const DailyCumulativePnLChart: React.FC<DailyCumulativePnLChartProps> = (
 
       {/* D3 Canvas Container */}
       <div ref={containerRef} className="relative w-full bg-slate-950/60 rounded-xl border border-slate-800/80 p-2 overflow-hidden">
-        <svg ref={svgRef} className="w-full select-none" />
+        {dailyData.length === 0 ? (
+          <div className="h-[260px] flex flex-col items-center justify-center text-center px-4 gap-2 font-mono">
+            <BarChart3 className="w-8 h-8 text-slate-600" />
+            <p className="text-xs font-bold text-slate-300">No settled Deriv trades recorded for this timeframe.</p>
+            <p className="text-[11px] text-slate-500 max-w-md">
+              Execute and settle contracts on your Deriv Demo or Real account to populate your live daily cumulative P&amp;L curve.
+            </p>
+          </div>
+        ) : (
+          <svg ref={svgRef} className="w-full select-none" />
+        )}
 
         {/* Interactive Hover HUD Tooltip */}
         {hoveredPoint && hoverPos && (

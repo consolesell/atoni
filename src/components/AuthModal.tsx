@@ -17,7 +17,11 @@ import {
   ArrowRight,
   Sparkles,
 } from 'lucide-react';
-import { derivWS } from '../lib/derivWS';
+import {
+  derivWS,
+  DEFAULT_DERIV_APP_ID,
+  DEFAULT_DERIV_REDIRECT_URL,
+} from '../lib/derivWS';
 import { sound } from '../lib/soundEngine';
 import { DerivLinkedAccount } from '../types/trading';
 
@@ -49,7 +53,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
   // Deriv OAuth states
   const [isOAuthWaiting, setIsOAuthWaiting] = useState(false);
   const [appIdInput, setAppIdInput] = useState<string>(() => {
-    return localStorage.getItem('deriv_app_id') || '1089';
+    return localStorage.getItem('deriv_app_id') || DEFAULT_DERIV_APP_ID;
+  });
+  const [redirectUrlInput, setRedirectUrlInput] = useState<string>(() => {
+    return localStorage.getItem('deriv_redirect_url') || DEFAULT_DERIV_REDIRECT_URL;
   });
   const [showAdvancedAppId, setShowAdvancedAppId] = useState(false);
   const [manualCallbackInput, setManualCallbackInput] = useState('');
@@ -87,7 +94,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         const token = params.get('token1') || params.get('token') || (accounts[0]?.token);
         const acct = params.get('acct1') || params.get('acct') || (accounts[0]?.account || 'CR_USER');
         if (token) {
-          const cleanAppId = appIdInput.trim() || '1089';
+          const cleanAppId = appIdInput.trim() || '33zsnNh6YJ2HWm30oZZJR';
           localStorage.setItem('deriv_api_token', token);
           localStorage.setItem('deriv_active_loginid', acct);
           localStorage.setItem('deriv_app_id', cleanAppId);
@@ -117,6 +124,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
       if (
         origin &&
         !origin.endsWith('.run.app') &&
+        !origin.endsWith('.ai.studio') &&
+        !origin.includes('deriv-ai-trader-pro.ai.studio') &&
         !origin.includes('localhost') &&
         !origin.includes('127.0.0.1') &&
         !origin.includes('deriv.com')
@@ -126,12 +135,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
       }
 
       if (event.data?.type === 'DERIV_OAUTH_SUCCESS') {
-        const { accounts, primaryToken, primaryAccount, currency } = event.data;
+        const { accounts, token, primaryToken, account, primaryAccount } = event.data;
+        const resolvedToken = primaryToken || token || (accounts?.[0]?.token ?? '');
+        const resolvedAccount = primaryAccount || account || (accounts?.[0]?.account ?? 'CR_USER');
         setIsOAuthWaiting(false);
         setLoading(true);
 
         try {
-          const cleanAppId = appIdInput.trim() || '1089';
+          const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
+          const cleanRedirect = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
 
           // 1. Sync accounts to WebSocket engine and localStorage
           if (Array.isArray(accounts) && accounts.length > 0) {
@@ -142,21 +154,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
           }
 
           // 2. Authorize token in WebSocket and securely save to localStorage
-          if (primaryToken) {
+          if (resolvedToken) {
             try {
-              localStorage.setItem('deriv_api_token', primaryToken);
-              localStorage.setItem('deriv_active_loginid', primaryAccount || 'CR_USER');
+              localStorage.setItem('deriv_api_token', resolvedToken);
+              localStorage.setItem('deriv_active_loginid', resolvedAccount);
               localStorage.setItem('deriv_app_id', cleanAppId);
+              localStorage.setItem('deriv_redirect_url', cleanRedirect);
             } catch (e) {}
-            derivWS.setCredentials(primaryToken, cleanAppId);
-            derivWS.send({ authorize: primaryToken });
+            derivWS.setCredentials(resolvedToken, cleanAppId, cleanRedirect);
+            derivWS.send({ authorize: resolvedToken });
           }
 
           // 3. Save into AuthContext (application state & Firestore/local profile)
           await signInWithDerivOAuth(
             accounts || [],
-            primaryToken || '',
-            primaryAccount || 'CR_USER',
+            resolvedToken,
+            resolvedAccount,
             cleanAppId
           );
 
@@ -192,16 +205,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
   const handleLaunchDerivOAuth = async () => {
     setError(null);
     setSuccessMsg(null);
-    const cleanAppId = appIdInput.trim() || '1089';
+    const cleanAppId = appIdInput.trim() || '33zsnNh6YJ2HWm30oZZJR';
 
     try {
       setIsOAuthWaiting(true);
       sound.play('click');
 
       // 1. Attempt to fetch authorize URL from server API
+      const rawRedirect = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
+      derivWS.setRedirectUrl(rawRedirect);
       let oauthUrl = '';
       try {
-        const res = await fetch(`/api/auth/deriv/url?app_id=${encodeURIComponent(cleanAppId)}`);
+        const res = await fetch(
+          `/api/auth/deriv/url?app_id=${encodeURIComponent(cleanAppId)}&redirect_uri=${encodeURIComponent(rawRedirect)}`
+        );
         if (res.ok) {
           const data = await res.json();
           oauthUrl = data.url;
@@ -210,9 +227,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         console.warn('Fallback to direct client OAuth URL:', err);
       }
 
-      // If server route didn't return, build directly using current origin
+      // If server route didn't return, build directly using configured production redirect URL
       if (!oauthUrl) {
-        const redirectUri = `${window.location.origin}/auth/deriv/callback`;
+        const redirectUri = rawRedirect.includes('/auth/')
+          ? rawRedirect
+          : `${rawRedirect.replace(/\/$/, '')}/auth/deriv/callback`;
         const params = new URLSearchParams({
           app_id: cleanAppId,
           l: 'en',
@@ -290,7 +309,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         throw new Error('No valid token found in pasted string. Format: ?acct1=...&token1=...');
       }
 
-      const cleanAppId = appIdInput.trim() || '1089';
+      const cleanAppId = appIdInput.trim() || '33zsnNh6YJ2HWm30oZZJR';
       if (accounts.length > 0) {
         derivWS.setLinkedAccounts(accounts);
       }
@@ -614,22 +633,48 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                         setAppIdInput(val);
                         localStorage.setItem('deriv_app_id', val);
                       }}
-                      placeholder="1089"
+                      placeholder={DEFAULT_DERIV_APP_ID}
                       className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500"
                     />
                     <button
                       type="button"
                       onClick={() => {
-                        setAppIdInput('1089');
-                        localStorage.setItem('deriv_app_id', '1089');
+                        setAppIdInput(DEFAULT_DERIV_APP_ID);
+                        localStorage.setItem('deriv_app_id', DEFAULT_DERIV_APP_ID);
                       }}
                       className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px]"
                     >
                       Reset Default
                     </button>
                   </div>
+                  <label className="block text-[11px] font-semibold text-slate-400 pt-1">
+                    OAuth Redirect URL
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={redirectUrlInput}
+                      onChange={(e) => {
+                        const val = e.target.value.trim();
+                        setRedirectUrlInput(val);
+                        derivWS.setRedirectUrl(val);
+                      }}
+                      placeholder={DEFAULT_DERIV_REDIRECT_URL}
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRedirectUrlInput(DEFAULT_DERIV_REDIRECT_URL);
+                        derivWS.setRedirectUrl(DEFAULT_DERIV_REDIRECT_URL);
+                      }}
+                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-[11px]"
+                    >
+                      Reset
+                    </button>
+                  </div>
                   <p className="text-[10px] text-slate-500">
-                    Default 1089 is Deriv's official community testing app ID.
+                    Production defaults: App ID {DEFAULT_DERIV_APP_ID} • Redirect {DEFAULT_DERIV_REDIRECT_URL}
                   </p>
                 </div>
               )}

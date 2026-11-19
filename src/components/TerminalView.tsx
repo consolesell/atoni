@@ -88,7 +88,7 @@ export interface TerminalViewProps {
   onStopAutonomy: (source?: string) => void;
   onConfigureAutonomy: () => void;
   balance: number;
-  handleReplenishVirtualAnchor: () => void;
+  hasDerivToken?: boolean;
   setIsQuickSettingsOpen: (open: boolean) => void;
 }
 
@@ -145,24 +145,17 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onStopAutonomy,
   onConfigureAutonomy,
   balance,
-  handleReplenishVirtualAnchor,
+  hasDerivToken = false,
   setIsQuickSettingsOpen,
 }) => {
   return (
     <div className="flex flex-col gap-4 sm:gap-6 tab-crossfade-enter">
-      {/* Simulation Balance Recovery Banner */}
-      {!isLiveMode && balance < 2.0 && (
-        <div className="flex items-center justify-between p-3 bg-amber-950/40 border border-amber-500/40 rounded-xl text-xs font-mono">
-          <span className="text-amber-300">
-            Virtual balance low (${balance.toFixed(2)} USD). Replenish to continue paper testing.
+      {/* Deriv Account Connection Notice (Only when no Deriv token is set) */}
+      {!hasDerivToken && (
+        <div className="flex items-center justify-between p-3 bg-cyan-950/30 border border-cyan-500/30 rounded-xl text-xs font-mono">
+          <span className="text-cyan-200">
+            Connect your Deriv Demo (VRTC) or Real (CR) account to stream live balance and execute contracts.
           </span>
-          <button
-            type="button"
-            onClick={handleReplenishVirtualAnchor}
-            className="px-3 py-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/50 font-bold transition-all animate-pulse"
-          >
-            Replenish Anchor ($10.00)
-          </button>
         </div>
       )}
 
@@ -214,6 +207,7 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             onOpenCritiqueModal={onOpenCritiqueModal}
             decimals={decimals}
             currency={currency}
+            balance={balance}
           />
         </div>
 

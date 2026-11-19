@@ -170,7 +170,7 @@ export interface TrailingStopConfig {
 export interface TradeRecord {
   id: string;
   timestamp: string;
-  mode: 'SIMULATION' | 'LIVE';
+  mode: 'DEMO' | 'REAL' | 'LIVE' | 'SIMULATION';
   symbol: string;
   amount: number;
   decision: 'BUY' | 'SELL' | 'CALL' | 'PUT' | 'STRONG BUY' | 'STRONG SELL' | string;

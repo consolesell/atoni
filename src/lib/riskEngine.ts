@@ -289,7 +289,7 @@ export function calculateDynamicStake(params: {
 export function calculateCoreRiskMetrics(
   trades: TradeRecord[],
   currentBalance: number,
-  startingBalance: number = 10000
+  startingBalance?: number
 ): CoreRiskMetrics {
   const settledTrades = trades.filter((t) => t.result === 'WIN' || t.result === 'LOSS');
   const winningTrades = settledTrades.filter((t) => (t.profit || 0) > 0);
@@ -297,6 +297,11 @@ export function calculateCoreRiskMetrics(
 
   const grossProfits = winningTrades.reduce((acc, t) => acc + (t.profit || 0), 0);
   const grossLosses = losingTrades.reduce((acc, t) => acc + Math.abs(t.profit || 0), 0);
+  const netSettledPnl = settledTrades.reduce((acc, t) => acc + (t.profit || 0), 0);
+  const effectiveStartingBalance =
+    typeof startingBalance === 'number' && Number.isFinite(startingBalance) && startingBalance > 0
+      ? startingBalance
+      : Math.max(0.5, Math.round((currentBalance - netSettledPnl) * 100) / 100);
 
   // Profit Factor: Gross Profits / Gross Losses
   let profitFactor = 0;
@@ -325,7 +330,7 @@ export function calculateCoreRiskMetrics(
     averageLoss > 0 ? Math.round((averageWin / averageLoss) * 100) / 100 : averageWin > 0 ? 0.95 : 0.95;
 
   // Max Drawdown calculation from balance curve over trade history
-  let peakBalance = Math.max(startingBalance, currentBalance);
+  let peakBalance = Math.max(effectiveStartingBalance, currentBalance);
   let maxDrawdown = 0;
   let maxDrawdownPercent = 0;
 
@@ -334,8 +339,8 @@ export function calculateCoreRiskMetrics(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
 
-  let runningBalance = startingBalance;
-  let currentPeak = startingBalance;
+  let runningBalance = effectiveStartingBalance;
+  let currentPeak = effectiveStartingBalance;
 
   chronological.forEach((t) => {
     runningBalance += t.profit || 0;

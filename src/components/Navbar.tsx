@@ -271,12 +271,12 @@ export const Navbar: React.FC<NavbarProps> = ({
               <div className="text-right">
                 <div className="font-mono font-bold text-xs sm:text-sm text-slate-100">
                   $
-                  {balance
+                  {Number.isFinite(balance)
                     ? balance.toLocaleString('en-US', {
                         minimumFractionDigits: 2,
                         maximumFractionDigits: 2,
                       })
-                    : '10,000.00'}
+                    : '0.00'}
                 </div>
               </div>
               {onRefreshBalance && (
@@ -326,7 +326,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     sound.play('click');
                   }}
                   className="p-1 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors"
-                  title="Log Out / Disconnect Deriv Account (Return to Demo Sandbox)"
+                  title="Log Out / Disconnect Deriv Account"
                   aria-label="Disconnect Deriv Account"
                 >
                   <LogOut className="w-3.5 h-3.5 text-rose-400" />
@@ -374,7 +374,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                   sound.play('click');
                 }}
                 className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-mono font-bold transition-all border shadow-sm bg-gradient-to-r from-emerald-600/20 to-teal-600/20 hover:from-emerald-600/30 hover:to-teal-600/30 text-emerald-400 hover:text-emerald-200 border-emerald-500/40"
-                title="Connect Deriv Real or Virtual Account"
+                title="Connect Deriv Demo (VRTC) or Real (CR) Account"
               >
                 <div className="flex items-center gap-1">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -719,46 +719,71 @@ export const Navbar: React.FC<NavbarProps> = ({
                 aria-label="Quick Settings"
               >
                 <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-                <span className="text-[11px] sm:text-xs font-bold tracking-tight">SETTINGS</span>
+                <span className="hidden sm:inline text-[11px] sm:text-xs font-bold tracking-tight">QUICK</span>
               </button>
             )}
 
-            {/* Universal Settings Drawer Trigger */}
-            {onOpenSettings && !onOpenQuickSettings && (
+            {/* Full Slide-Out Settings Drawer Trigger */}
+            {onOpenSettings && (
               <button
                 onClick={() => {
                   onOpenSettings();
                   sound.play('click');
                 }}
-                className="p-2 sm:p-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-800 transition-colors shadow-sm"
-                title="Open Settings Drawer"
-                aria-label="Settings"
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-400 border border-slate-800 transition-colors shadow-sm"
+                title="Open Configuration Hub Drawer (AI Keys, Models, Risk, Connection)"
+                aria-label="Open Settings Drawer"
               >
                 <Settings className="w-4 h-4" />
               </button>
             )}
 
-            {/* User Auth Profile */}
-            {user ? (
-              <div className="hidden sm:flex items-center gap-1.5 bg-slate-900 border border-slate-800 rounded-xl px-2 py-1.5">
-                <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center text-[10px] font-bold">
-                  {user.displayName ? user.displayName[0].toUpperCase() : 'U'}
+            {/* Authenticated User Profile & Logout (Desktop + Mobile) */}
+            {user || userProfile || isAuthorized ? (
+              <div className="flex items-center gap-1.5 sm:gap-2 bg-slate-900 border border-slate-800 rounded-xl px-2 sm:px-3 py-1 sm:py-1.5 shadow-sm">
+                {(user?.photoURL || userProfile?.photoURL) ? (
+                  <img
+                    src={(user?.photoURL || userProfile?.photoURL)!}
+                    alt="Avatar"
+                    className="w-6 h-6 rounded-full object-cover border border-emerald-500/40 shrink-0"
+                  />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-gradient-to-br from-emerald-500/30 to-teal-500/30 text-emerald-300 border border-emerald-500/50 flex items-center justify-center text-xs font-bold font-mono shrink-0">
+                    {(user?.displayName || userProfile?.displayName || user?.email || loginid || 'U')[0].toUpperCase()}
+                  </div>
+                )}
+                <div className="flex flex-col text-left">
+                  <span className="text-[11px] sm:text-xs font-bold text-slate-200 truncate max-w-[76px] sm:max-w-[120px]">
+                    {user?.displayName || userProfile?.displayName || user?.email || loginid || 'Deriv Operator'}
+                  </span>
+                  <span className="text-[9px] sm:text-[10px] font-mono text-emerald-400 flex items-center gap-1">
+                    <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${isReal ? 'bg-rose-400' : 'bg-emerald-400'}`} />
+                    <span className="truncate max-w-[110px]">
+                      {loginid ? `${loginid} • ` : ''}
+                      {isReal ? 'REAL' : 'DEMO'} • ${balance.toFixed(2)}
+                    </span>
+                  </span>
                 </div>
                 <button
-                  onClick={logout}
-                  className="p-1 text-slate-400 hover:text-rose-400"
-                  title="Sign Out"
+                  onClick={() => {
+                    if (user || userProfile) logout();
+                    derivWS.logout();
+                    sound.play('click');
+                  }}
+                  className="p-1 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded-lg transition-colors ml-0.5"
+                  title="Sign Out / Logout"
+                  aria-label="Logout"
                 >
-                  <LogOut className="w-3.5 h-3.5" />
+                  <LogOut className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-rose-400" />
                 </button>
               </div>
             ) : (
               <button
                 onClick={onOpenAuthModal}
-                className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-sm"
+                className="flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-xl text-[11px] sm:text-xs font-semibold shadow-sm font-mono"
               >
                 <LogIn className="w-3.5 h-3.5" />
-                <span>Auth</span>
+                <span>SIGN IN</span>
               </button>
             )}
           </div>

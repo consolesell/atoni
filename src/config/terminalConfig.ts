@@ -97,14 +97,16 @@ export const TerminalConfigSchema = z.object({
 
   // Deriv WebSocket Connection & Watchdog
   connectivity: z.object({
-    appId: z.string().default('1089'),
+    appId: z.string().default('33zsnNh6YJ2HWm30oZZJR'),
+    redirectUrl: z.string().default('https://deriv-ai-trader-pro.ai.studio/'),
     wsEndpoint: z.string().default('wss://ws.derivws.com/websockets/v3'),
     heartbeatIntervalMs: z.number().default(20000),
     heartbeatTimeoutMs: z.number().default(12000),
     reconnectBaseDelayMs: z.number().default(1500),
     reconnectMaxDelayMs: z.number().default(12000),
   }).default({
-    appId: '1089',
+    appId: '33zsnNh6YJ2HWm30oZZJR',
+    redirectUrl: 'https://deriv-ai-trader-pro.ai.studio/',
     wsEndpoint: 'wss://ws.derivws.com/websockets/v3',
     heartbeatIntervalMs: 20000,
     heartbeatTimeoutMs: 12000,

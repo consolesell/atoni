@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { sound } from '../lib/soundEngine';
+import { getAIRequestHeaders } from '../lib/aiClientConfig';
 
 interface SubAgentEditorModalProps {
   isOpen: boolean;
@@ -96,7 +97,7 @@ export const SubAgentEditorModal: React.FC<SubAgentEditorModalProps> = ({
       sound.play('click');
       const res = await fetch('/api/workspace/inspect-file', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
         body: JSON.stringify({ filePath: targetPath }),
       });
       const data = await res.json();

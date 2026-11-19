@@ -35,6 +35,7 @@ export function saveAutonomyPreset(preset: AutonomyPreset): void {
 
 export interface PrerequisitesValidationParams {
   isDerivConnected: boolean;
+  isDerivAuthorized?: boolean;
   symbol: string;
   balance: number;
   preset: AutonomyPreset;
@@ -46,7 +47,11 @@ export function validateAutonomyPrerequisites(
   const blockers: string[] = [];
 
   if (!params.isDerivConnected) {
-    blockers.push('Deriv WebSocket stream not connected / authenticated.');
+    blockers.push('Deriv WebSocket stream not connected.');
+  }
+
+  if (params.isDerivAuthorized === false) {
+    blockers.push('Deriv account not authorized. Sign in with a Deriv Demo (VRTC) or Real account.');
   }
 
   if (!params.symbol || typeof params.symbol !== 'string' || params.symbol.trim() === '') {
@@ -54,7 +59,7 @@ export function validateAutonomyPrerequisites(
   }
 
   if (params.balance <= 0) {
-    blockers.push('Account balance must be greater than $0.00 (Anchor depleted).');
+    blockers.push('Account balance must be greater than $0.00 to run autonomous execution.');
   }
 
   if (params.preset.risk.maxStake < 0.5) {

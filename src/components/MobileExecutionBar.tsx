@@ -20,6 +20,7 @@ interface MobileExecutionBarProps {
   stake: number;
   onStakeChange: (s: number) => void;
   duration: number;
+  durationUnit?: 'ticks' | 'seconds' | 'minutes';
   onDurationChange: (d: number) => void;
   onExecute: (direction: 'CALL' | 'PUT') => void;
   isExecuting: boolean;
@@ -39,6 +40,7 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
   stake,
   onStakeChange,
   duration,
+  durationUnit = 'minutes',
   onDurationChange,
   onExecute,
   isExecuting,
@@ -146,7 +148,10 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
             title="Cycle Duration"
           >
             <Clock className="w-3 h-3 text-cyan-400" />
-            <span>{duration}m</span>
+            <span>
+              {duration}
+              {durationUnit === 'ticks' ? 't' : durationUnit === 'seconds' ? 's' : 'm'}
+            </span>
           </button>
         </div>
 

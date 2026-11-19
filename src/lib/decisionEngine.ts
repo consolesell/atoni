@@ -6,6 +6,7 @@ import {
   TechnicalIndicators,
   TradingAgent,
 } from '../types/trading';
+import { getAIRequestHeaders } from './aiClientConfig';
 
 export const DEFAULT_AGENTS: TradingAgent[] = [
   {
@@ -358,7 +359,7 @@ export async function fetchGeminiAIPrediction(
   try {
     const res = await fetch('/api/ai/predict', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
       body: JSON.stringify({
         symbol,
         currentPrice,

@@ -45,6 +45,8 @@ export interface AISettings {
   reasoningDeepeningOnLoss: boolean; // default: true
   maxMartingaleRecoverySteps: number; // default: 3
   martingaleMultiplier: number; // default: 1.85
+  geminiApiKeys: string[];
+  selectedModel: string;
 }
 
 export interface AudioSettings {
@@ -62,7 +64,8 @@ export interface AudioSettings {
 }
 
 export interface ConnectionSettings {
-  derivAppId: string; // default: '1089'
+  derivAppId: string; // default: '33zsnNh6YJ2HWm30oZZJR'
+  derivRedirectUrl: string; // default: 'https://deriv-ai-trader-pro.ai.studio/'
   keepAlivePingSeconds: number; // default: 20
   reconnectBackoffMs: number; // default: 4000
   latencyWarningThresholdMs: number; // default: 150
@@ -136,6 +139,8 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
     reasoningDeepeningOnLoss: true,
     maxMartingaleRecoverySteps: 3,
     martingaleMultiplier: 1.85,
+    geminiApiKeys: [],
+    selectedModel: 'auto',
   },
   audio: {
     soundEnabled: true,
@@ -151,11 +156,12 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
     useNeuralTTS: true,
   },
   connection: {
-    derivAppId: '1089',
+    derivAppId: '33zsnNh6YJ2HWm30oZZJR',
+    derivRedirectUrl: 'https://deriv-ai-trader-pro.ai.studio/',
     keepAlivePingSeconds: 20,
     reconnectBackoffMs: 4000,
     latencyWarningThresholdMs: 150,
-    fallbackSimulationAllowed: true,
+    fallbackSimulationAllowed: false,
   },
   interface: {
     compactMode: false,

@@ -14,133 +14,240 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: "5mb" }));
 
-// Lazy initializer for Gemini client to handle missing key gracefully
-let genAIClient: GoogleGenAI | null = null;
-
-function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return null;
-  }
-  if (!genAIClient) {
-    genAIClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
-  }
-  return genAIClient;
-}
-
-// Cache & Circuit Breaker for AI requests to prevent API overload and demand spikes
+// Cache & Smart Multi-Key / Model Pool for AI requests
 interface CacheEntry {
   data: any;
   timestamp: number;
 }
 const predictionCache = new Map<string, CacheEntry>();
-let lastDemandSpikeTime = 0;
-const DEMAND_SPIKE_COOLDOWN_MS = 25000; // 25s cooldown before retrying AI if 503 cluster is busy
 
-// Multi-model resilient caller with exponential backoff for 503 / 429 spikes
-const CANDIDATE_MODELS = [
+interface KeyHealth {
+  cooldownUntil: number;
+  authFailed: boolean;
+  successCount: number;
+  lastUsed: number;
+}
+const keyHealthMap = new Map<string, KeyHealth>();
+const DEMAND_SPIKE_COOLDOWN_MS = 25000;
+
+const DEFAULT_MODEL_PRIORITY = [
+  "gemini-4-hydrogen",
   "gemini-3.7-flash",
   "gemini-flash-latest",
   "gemini-3.1-flash-lite",
 ];
 
+const ALLOWED_MODELS = new Set([
+  "gemini-4-hydrogen",
+  "gemini-4-argon",
+  "gemini-4-carbon",
+  "gemini-3.7-flash",
+  "gemini-flash-latest",
+  "gemini-3.1-flash-lite",
+]);
+
+interface RequestAIConfig {
+  apiKeys: string[];
+  models: string[];
+}
+
+function createGeminiClientForKey(apiKey: string): GoogleGenAI {
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        "User-Agent": "aistudio-build",
+      },
+    },
+  });
+}
+
+function getKeyHealth(key: string): KeyHealth {
+  let state = keyHealthMap.get(key);
+  if (!state) {
+    state = { cooldownUntil: 0, authFailed: false, successCount: 0, lastUsed: 0 };
+    keyHealthMap.set(key, state);
+  }
+  return state;
+}
+
+function selectOrderedKeys(candidateKeys: string[]): string[] {
+  const now = Date.now();
+  const deduped = Array.from(new Set(candidateKeys.map((k) => k.trim()).filter(Boolean)));
+  const healthy = deduped.filter((k) => {
+    const h = getKeyHealth(k);
+    return !h.authFailed && h.cooldownUntil <= now;
+  });
+  // Sort healthy keys: highest successCount & least recently used first for even load-balancing
+  healthy.sort((a, b) => {
+    const ha = getKeyHealth(a);
+    const hb = getKeyHealth(b);
+    if (hb.successCount !== ha.successCount) return hb.successCount - ha.successCount;
+    return ha.lastUsed - hb.lastUsed;
+  });
+  return healthy;
+}
+
+function extractAIConfig(req?: express.Request): RequestAIConfig {
+  const keys: string[] = [];
+  const rawKeysHeader = req?.headers?.["x-gemini-api-keys"];
+  if (typeof rawKeysHeader === "string" && rawKeysHeader.trim()) {
+    try {
+      const parsed = JSON.parse(rawKeysHeader);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((k) => {
+          if (typeof k === "string" && k.trim()) keys.push(k.trim());
+        });
+      }
+    } catch {
+      rawKeysHeader.split(",").forEach((k) => {
+        if (k.trim()) keys.push(k.trim());
+      });
+    }
+  }
+  if (process.env.GEMINI_API_KEY) {
+    keys.push(process.env.GEMINI_API_KEY.trim());
+  }
+
+  const rawModelHeader = req?.headers?.["x-gemini-model"];
+  const requestedModel =
+    typeof rawModelHeader === "string" && rawModelHeader.trim()
+      ? rawModelHeader.trim()
+      : "auto";
+
+  let models: string[];
+  if (requestedModel !== "auto" && ALLOWED_MODELS.has(requestedModel)) {
+    models = [requestedModel, ...DEFAULT_MODEL_PRIORITY.filter((m) => m !== requestedModel)];
+  } else {
+    models = [...DEFAULT_MODEL_PRIORITY];
+  }
+
+  return {
+    apiKeys: Array.from(new Set(keys)),
+    models,
+  };
+}
+
+function isRetryableQuotaOrDemandError(err: any): boolean {
+  const msg = String(err?.message || "");
+  return (
+    err?.status === "UNAVAILABLE" ||
+    err?.code === 503 ||
+    err?.status === 503 ||
+    err?.code === 429 ||
+    err?.status === 429 ||
+    msg.includes("503") ||
+    msg.includes("429") ||
+    msg.includes("high demand") ||
+    msg.includes("RESOURCE_EXHAUSTED")
+  );
+}
+
+function isAuthError(err: any): boolean {
+  const msg = String(err?.message || "");
+  return (
+    err?.code === 400 ||
+    err?.status === 400 ||
+    err?.code === 401 ||
+    err?.status === 401 ||
+    err?.code === 403 ||
+    err?.status === 403 ||
+    msg.includes("API_KEY_INVALID") ||
+    msg.includes("PERMISSION_DENIED")
+  );
+}
+
 async function generateWithModelFallback(params: {
   contents: any;
   config?: any;
+  req?: express.Request;
 }): Promise<any> {
-  const now = Date.now();
-  // If recent demand spike occurred, skip straight to fallback to protect responsiveness
-  if (now - lastDemandSpikeTime < DEMAND_SPIKE_COOLDOWN_MS) {
-    throw new Error("Temporary model high demand cooldown active");
-  }
-
-  const ai = getGeminiClient();
-  if (!ai) {
-    throw new Error("GEMINI_API_KEY is not configured in server environment.");
+  const aiConfig = extractAIConfig(params.req);
+  const orderedKeys = selectOrderedKeys(aiConfig.apiKeys);
+  if (orderedKeys.length === 0) {
+    throw new Error("No healthy Gemini API key available.");
   }
 
   let lastError: any = null;
 
-  for (let i = 0; i < CANDIDATE_MODELS.length; i++) {
-    const model = CANDIDATE_MODELS[i];
-    try {
-      const response = await ai.models.generateContent({
-        model,
-        contents: params.contents,
-        config: params.config,
-      });
-      return response;
-    } catch (err: any) {
-      lastError = err;
-      const isTemporaryDemand =
-        err?.status === "UNAVAILABLE" ||
-        err?.code === 503 ||
-        err?.status === 503 ||
-        err?.message?.includes("503") ||
-        err?.message?.includes("high demand") ||
-        err?.message?.includes("RESOURCE_EXHAUSTED") ||
-        err?.status === 429;
+  for (const apiKey of orderedKeys) {
+    const ai = createGeminiClientForKey(apiKey);
+    const health = getKeyHealth(apiKey);
+    health.lastUsed = Date.now();
 
-      if (isTemporaryDemand) {
-        lastDemandSpikeTime = Date.now();
-        if (i < CANDIDATE_MODELS.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 200 * (i + 1)));
+    for (let i = 0; i < aiConfig.models.length; i++) {
+      const model = aiConfig.models[i];
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: params.contents,
+          config: params.config,
+        });
+        health.successCount += 1;
+        health.cooldownUntil = 0;
+        return response;
+      } catch (err: any) {
+        lastError = err;
+        if (isAuthError(err)) {
+          health.authFailed = true;
+          break; // Try next API key immediately
+        }
+        if (isRetryableQuotaOrDemandError(err)) {
+          if (i === aiConfig.models.length - 1) {
+            health.cooldownUntil = Date.now() + DEMAND_SPIKE_COOLDOWN_MS;
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 150 * (i + 1)));
+          }
           continue;
         }
       }
     }
   }
 
-  throw lastError || new Error("All Gemini model candidates temporarily busy.");
+  throw lastError || new Error("All Gemini keys/models temporarily busy.");
 }
 
 async function generateStreamWithModelFallback(params: {
   contents: any;
   config?: any;
+  req?: express.Request;
 }): Promise<any> {
-  const now = Date.now();
-  if (now - lastDemandSpikeTime < DEMAND_SPIKE_COOLDOWN_MS) {
-    throw new Error("Temporary model high demand cooldown active");
-  }
-
-  const ai = getGeminiClient();
-  if (!ai) {
-    throw new Error("GEMINI_API_KEY is not configured in server environment.");
+  const aiConfig = extractAIConfig(params.req);
+  const orderedKeys = selectOrderedKeys(aiConfig.apiKeys);
+  if (orderedKeys.length === 0) {
+    throw new Error("No healthy Gemini API key available.");
   }
 
   let lastError: any = null;
 
-  for (let i = 0; i < CANDIDATE_MODELS.length; i++) {
-    const model = CANDIDATE_MODELS[i];
-    try {
-      const responseStream = await ai.models.generateContentStream({
-        model,
-        contents: params.contents,
-        config: params.config,
-      });
-      return responseStream;
-    } catch (err: any) {
-      lastError = err;
-      const isTemporaryDemand =
-        err?.status === "UNAVAILABLE" ||
-        err?.code === 503 ||
-        err?.status === 503 ||
-        err?.message?.includes("503") ||
-        err?.message?.includes("high demand") ||
-        err?.message?.includes("RESOURCE_EXHAUSTED") ||
-        err?.status === 429;
+  for (const apiKey of orderedKeys) {
+    const ai = createGeminiClientForKey(apiKey);
+    const health = getKeyHealth(apiKey);
+    health.lastUsed = Date.now();
 
-      if (isTemporaryDemand) {
-        lastDemandSpikeTime = Date.now();
-        if (i < CANDIDATE_MODELS.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 200 * (i + 1)));
+    for (let i = 0; i < aiConfig.models.length; i++) {
+      const model = aiConfig.models[i];
+      try {
+        const responseStream = await ai.models.generateContentStream({
+          model,
+          contents: params.contents,
+          config: params.config,
+        });
+        health.successCount += 1;
+        health.cooldownUntil = 0;
+        return responseStream;
+      } catch (err: any) {
+        lastError = err;
+        if (isAuthError(err)) {
+          health.authFailed = true;
+          break;
+        }
+        if (isRetryableQuotaOrDemandError(err)) {
+          if (i === aiConfig.models.length - 1) {
+            health.cooldownUntil = Date.now() + DEMAND_SPIKE_COOLDOWN_MS;
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 150 * (i + 1)));
+          }
           continue;
         }
       }
@@ -165,6 +272,7 @@ function buildMarkdownFallbackResponse(body: any): string {
   const pattern = body?.context?.pattern || body?.context?.signals?.pattern || "Neutral Range Consolidation";
 
   if (lastUserMessage.includes("stress test") || lastUserMessage.includes("simulate")) {
+    const fallbackBal = Number(body?.context?.balance ?? 10);
     return `### 💥 Portfolio Stress Test Simulation (${symbol})
 
 **Quantitative Simulation Parameters:**
@@ -172,7 +280,7 @@ Simulating a 3-trade consecutive drawdown sequence under high-volatility regime 
 
 | Metric | Pre-Stress Baseline | Stress Test Worst-Case | Defensive Status |
 | :--- | :--- | :--- | :--- |
-| **Account Equity** | $${body?.context?.balance || 10000} | $${((body?.context?.balance || 10000) - Number(kellyStake) * 3).toFixed(2)} | **Absorbed** |
+| **Account Equity** | $${fallbackBal.toFixed(2)} | $${(fallbackBal - Number(kellyStake) * 3).toFixed(2)} | **Absorbed** |
 | **Current Stake** | $${kellyStake} | $${(Number(kellyStake) * 0.5).toFixed(2)} (Quarter-Kelly) | **Dynamic Throttle** |
 | **Max Drawdown** | ${maxDrawdown}% | ${(Number(maxDrawdown) + 1.5).toFixed(1)}% | **Within 5% Shield** |
 | **Profit Factor** | ${profitFactor} | 1.42 | **Safe Threshold** |
@@ -191,10 +299,11 @@ recommended_action: MAINTAIN_HALF_KELLY
   }
 
   if (lastUserMessage.includes("risk") || lastUserMessage.includes("loss") || lastUserMessage.includes("kelly") || lastUserMessage.includes("audit")) {
+    const fallbackBal = Number(body?.context?.balance ?? 10);
     return `### ⚠️ Real-Time Risk Audit & Capital Shield (${symbol})
 
 **Quantitative Risk Telemetry:**
-- **Account Equity**: $${body?.context?.balance || 10000} | **Realized P&L**: **$${pnl}**
+- **Account Equity**: $${fallbackBal.toFixed(2)} | **Realized P&L**: **$${pnl}**
 - **Win Rate**: **${winRate}%** | **Profit Factor**: **${profitFactor}**
 - **Max Session Drawdown**: **${maxDrawdown}%**
 
@@ -394,108 +503,17 @@ app.get("/api/tts/voices", async (_req, res) => {
 
 // Deriv OAuth Authorization URL provider
 app.get("/api/deriv/oauth-url", (req, res) => {
-  const appId = (req.query.app_id as string) || "1089";
-  const authUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${encodeURIComponent(appId)}&l=en&brand=deriv`;
-  res.json({ url: authUrl });
+  const appId = String(req.query.app_id || process.env.DERIV_APP_ID || "33zsnNh6YJ2HWm30oZZJR").trim();
+  const rawBaseUrl = String(
+    req.query.redirect_uri || process.env.APP_URL || "https://deriv-ai-trader-pro.ai.studio/"
+  ).trim();
+  const redirectUri = rawBaseUrl.includes("/auth/")
+    ? rawBaseUrl
+    : `${rawBaseUrl.replace(/\/$/, "")}/auth/deriv/callback`;
+  const authUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${encodeURIComponent(appId)}&l=en&brand=deriv&redirect_uri=${encodeURIComponent(redirectUri)}`;
+  res.json({ url: authUrl, appId, redirectUri });
 });
 
-// Deriv OAuth Callback handler with seamless postMessage to opener
-app.get("/auth/deriv/callback", (_req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Deriv Authentication Handshake</title>
-  <style>
-    body {
-      background: #020617;
-      color: #f8fafc;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      margin: 0;
-      text-align: center;
-      padding: 20px;
-    }
-    .card {
-      background: #0f172a;
-      border: 1px solid #1e293b;
-      padding: 30px;
-      border-radius: 16px;
-      max-width: 420px;
-      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
-    }
-    .spinner {
-      border: 3px solid #334155;
-      border-top: 3px solid #06b6d4;
-      border-radius: 50%;
-      width: 36px;
-      height: 36px;
-      animation: spin 0.8s linear infinite;
-      margin: 0 auto 16px;
-    }
-    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-    h2 { font-size: 18px; margin: 0 0 8px; color: #38bdf8; }
-    p { font-size: 13px; color: #94a3b8; margin: 0 0 16px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="spinner"></div>
-    <h2>Connecting Deriv Account...</h2>
-    <p>Authenticating your session with SBAgent. This window will close automatically.</p>
-  </div>
-  <script>
-    (function() {
-      try {
-        var query = window.location.search ? window.location.search.substring(1) : '';
-        var hash = window.location.hash ? window.location.hash.substring(1) : '';
-        var searchParams = new URLSearchParams(query || hash);
-
-        var accounts = [];
-        var i = 1;
-        while (searchParams.has('acct' + i) && searchParams.has('token' + i)) {
-          accounts.push({
-            account: searchParams.get('acct' + i),
-            token: searchParams.get('token' + i),
-            currency: searchParams.get('cur' + i) || 'USD'
-          });
-          i++;
-        }
-
-        var token1 = searchParams.get('token1') || searchParams.get('token') || (accounts[0] ? accounts[0].token : null);
-        var acct1 = searchParams.get('acct1') || searchParams.get('acct') || (accounts[0] ? accounts[0].account : null);
-
-        var payload = {
-          type: 'DERIV_OAUTH_SUCCESS',
-          accounts: accounts,
-          token: token1,
-          account: acct1
-        };
-
-        if (window.opener) {
-          window.opener.postMessage(payload, '*');
-          setTimeout(function() { window.close(); }, 600);
-        } else {
-          // If loaded directly, save to localStorage and return to main app
-          if (token1) {
-            localStorage.setItem('deriv_api_token', token1);
-            if (acct1) localStorage.setItem('deriv_active_loginid', acct1);
-            if (accounts.length > 0) localStorage.setItem('deriv_linked_accounts', JSON.stringify(accounts));
-          }
-          window.location.href = '/';
-        }
-      } catch (e) {
-        console.error('Error handling Deriv callback:', e);
-      }
-    })();
-  </script>
-</body>
-</html>`);
-});
 
 // Helper for deterministic algorithmic prediction when AI is temporarily unavailable
 function calculateAlgorithmicFallbackPrediction(body: any) {
@@ -604,6 +622,7 @@ Market State:
 Provide your response strictly complying with the specified JSON schema. Determine if this setup justifies an active Rise (BUY) or Fall (SELL) contract or if market noise dictates HOLD.`;
 
     const response = await generateWithModelFallback({
+      req,
       contents: prompt,
       config: {
         systemInstruction: "You are an elite quantitative trading AI specializing in high-frequency synthetic index analysis, candlestick geometry, momentum divergence, and volatility regimes. Always produce rigorous, risk-adjusted analysis.",
@@ -697,6 +716,7 @@ Data context:
 Provide a comprehensive trading strategy breakdown in JSON format.`;
 
     const response = await generateWithModelFallback({
+      req,
       contents: prompt,
       config: {
         systemInstruction: "You are a professional CMT (Chartered Market Technician) and Deriv algorithms architect. Deliver structured, actionable insights with clear entry criteria.",
@@ -897,7 +917,7 @@ app.post("/api/ai/chat", async (req, res) => {
 - Current Spot Price: ${context?.price ?? context?.currentPrice ?? "N/A"}
 - Active Timeframe: ${context?.timeframe || "1m"}
 - Account Mode: ${context?.executionMode || context?.mode || "DEMO"}
-- Account Balance: $${context?.balance ?? "10000"}
+- Account Balance: $${context?.balance ?? "10.00"}
 - Current Stake: $${context?.currentStake ?? context?.stake ?? "5.00"}
 - Position Sizing Mode: ${context?.sizingMode || "KELLY_HALF (Dynamic Half-Kelly)"}
 - Total Realized P&L: ${context?.pnl ? `$${context.pnl}` : "$0.00"}
@@ -935,6 +955,7 @@ You encapsulate the Blackbox trading architecture (High-Speed Data Streams, Stra
 4. Structure your response using rich, native Markdown with bolding, tables, bullet points, and code blocks where helpful.`;
 
     const response = await generateWithModelFallback({
+      req,
       contents: prompt,
       config: {
         systemInstruction: "You are SBAgent, an elite autonomous intelligence created and engineered by Givan (Kingvan). Deliver natural dialogue for everyday conversations with warmth and wit, while simultaneously delivering crisp, real-time trading updates, Blackbox status checks, and executing user tool requests when appropriate. Use structured Markdown.",
@@ -1029,7 +1050,7 @@ app.post("/api/ai/chat-stream", async (req, res) => {
 - Current Spot Price: ${price}
 - Active Timeframe: ${context?.timeframe || "1m"}
 - Account Mode: ${context?.executionMode || "DEMO"}
-- Account Balance: $${context?.balance ?? "10000"}
+- Account Balance: $${context?.balance ?? "10.00"}
 - Current Stake: $${kellyStake}
 - Position Sizing Mode: ${context?.sizingMode || "KELLY_HALF (Dynamic Half-Kelly)"}
 - Total Realized P&L: $${pnl}
@@ -1057,6 +1078,7 @@ You encapsulate the Blackbox trading architecture (High-Speed Data Streams, Stra
 3. Structure your response using rich, native Markdown with bolding, tables, bullet points, and code blocks where helpful.`;
 
     const stream = await generateStreamWithModelFallback({
+      req,
       contents: prompt,
       config: {
         systemInstruction: "You are SBAgent, an elite autonomous intelligence created and engineered by Givan (Kingvan). Deliver natural dialogue for everyday conversations with warmth and wit, while simultaneously delivering crisp, real-time trading updates, Blackbox status checks, and executing user tool requests when appropriate. Use structured Markdown.",
@@ -1110,6 +1132,7 @@ app.post("/api/ai/trade-critique", async (req, res) => {
 Provide a post-trade debrief in JSON format including key lessons, execution quality rating (1-10), and suggestions for subsequent trades.`;
 
     const response = await generateWithModelFallback({
+      req,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -1240,6 +1263,7 @@ Provide a professional, rigorous code critique for Creator Givan:
 Format your response in structured Markdown.`;
 
     const response = await generateWithModelFallback({
+      req,
       contents: prompt,
       config: {
         systemInstruction: "You are SBAgent, an elite autonomous quantitative trading intelligence created by Givan (Kingvan). Deliver rigorous, constructive, code-level critiques with deep respect for Givan.",
@@ -1293,6 +1317,7 @@ Evaluate:
 3. Compute spatial processing metrics (phase-space dynamic state, spatial entropy, and multi-agent dispersion). Output structured JSON.`;
 
     const response = await generateWithModelFallback({
+      req,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -1457,6 +1482,7 @@ Regime: ${JSON.stringify(regimeHistory || {})}
 Calculate weight adjustments (each agent's weights: ma, momentum, rsi, bb, normalized to sum to 1.0) so the committee learns from recent wins and losses, penalizing indicators that led to false signals and rewarding indicators that yielded wins.`;
 
     const response = await generateWithModelFallback({
+      req,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -1527,9 +1553,13 @@ Calculate weight adjustments (each agent's weights: ma, momentum, rsi, bb, norma
 // -------------------------------------------------------------
 
 app.get("/api/auth/deriv/url", (req, res) => {
-  const cleanAppId = String(req.query.app_id || process.env.DERIV_APP_ID || "1089").trim();
-  const appUrl = process.env.APP_URL || `${req.protocol}://${req.get("host")}`;
-  const redirectUri = `${appUrl}/auth/deriv/callback`;
+  const cleanAppId = String(req.query.app_id || process.env.DERIV_APP_ID || "33zsnNh6YJ2HWm30oZZJR").trim();
+  const appUrl = String(
+    req.query.redirect_uri || process.env.APP_URL || "https://deriv-ai-trader-pro.ai.studio/"
+  ).trim();
+  const redirectUri = appUrl.includes("/auth/")
+    ? appUrl
+    : `${appUrl.replace(/\/$/, "")}/auth/deriv/callback`;
 
   const params = new URLSearchParams({
     app_id: cleanAppId,
@@ -1710,8 +1740,17 @@ app.get(
             timestamp: Date.now()
           };
 
-          // Store in localStorage as backup
+          // Persist direct session keys + pending OAuth payload in localStorage
           try {
+            if (primaryToken) {
+              localStorage.setItem('deriv_api_token', primaryToken);
+            }
+            if (primaryAccount) {
+              localStorage.setItem('deriv_active_loginid', primaryAccount);
+            }
+            if (accounts.length > 0) {
+              localStorage.setItem('deriv_linked_accounts', JSON.stringify(accounts));
+            }
             localStorage.setItem('deriv_oauth_pending_success', JSON.stringify(payload));
           } catch(e) {}
 
@@ -1724,7 +1763,7 @@ app.get(
             // If opened directly without opener, redirect back to root after short pause
             setTimeout(function() {
               window.location.href = '/';
-            }, 1000);
+            }, 600);
           }
         } else {
           document.getElementById('spinner').style.display = 'none';

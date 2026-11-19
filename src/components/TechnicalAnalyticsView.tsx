@@ -17,6 +17,7 @@ import {
   Zap,
   FileText,
 } from 'lucide-react';
+import { getAIRequestHeaders } from '../lib/aiClientConfig';
 
 interface TechnicalAnalyticsViewProps {
   indicators: TechnicalIndicators | null;
@@ -42,7 +43,7 @@ export const TechnicalAnalyticsView: React.FC<TechnicalAnalyticsViewProps> = ({
     try {
       const res = await fetch('/api/ai/analyze-chart', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
         body: JSON.stringify({
           symbol,
           indicators,

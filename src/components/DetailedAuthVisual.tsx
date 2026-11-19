@@ -21,6 +21,7 @@ import { sound } from '../lib/soundEngine';
 
 interface DetailedAuthVisualProps {
   isLiveMode: boolean;
+  isAuthorized?: boolean;
   onToggleLiveMode: (isReal: boolean) => void;
   balance: number;
   currency: string;
@@ -33,6 +34,7 @@ interface DetailedAuthVisualProps {
 
 export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
   isLiveMode,
+  isAuthorized = false,
   onToggleLiveMode,
   balance,
   currency,
@@ -47,7 +49,7 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
   const [copiedAppId, setCopiedAppId] = useState(false);
   const [copiedToken, setCopiedToken] = useState(false);
 
-  const activeAppId = credentials.appId || '1089';
+  const activeAppId = credentials.appId || '33zsnNh6YJ2HWm30oZZJR';
   const activeToken = credentials.token || '';
 
   const handleCopyAppId = () => {
@@ -86,17 +88,37 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
               <span className="text-xs font-bold text-slate-100 font-sans tracking-wide">
                 DERIV WEBSOCKET V3
               </span>
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                ONLINE • {latencyMs}ms
+              <span
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                  isAuthorized
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full animate-pulse ${
+                    isAuthorized ? 'bg-emerald-400' : 'bg-amber-400'
+                  }`}
+                />
+                {isAuthorized ? 'AUTHORIZED' : 'AUTH REQUIRED'} • {latencyMs}ms
               </span>
             </div>
             <div className="text-[11px] text-slate-400 font-mono flex items-center gap-1.5">
               <span>Account:</span>
-              <strong className="text-slate-200">{loginid || (isLiveMode ? 'CR_LIVE' : 'VRTC_DEMO')}</strong>
+              <strong className="text-slate-200">
+                {loginid || (isAuthorized ? (isLiveMode ? 'CR_LIVE' : 'VRTC_DEMO') : 'Not Connected')}
+              </strong>
               <span>•</span>
-              <span className={isLiveMode ? 'text-rose-400 font-bold' : 'text-amber-400 font-bold'}>
-                {isLiveMode ? 'REAL MONEY' : 'SIMULATION'}
+              <span
+                className={
+                  !isAuthorized
+                    ? 'text-slate-400 font-bold'
+                    : isLiveMode
+                    ? 'text-rose-400 font-bold'
+                    : 'text-amber-400 font-bold'
+                }
+              >
+                {!isAuthorized ? 'DISCONNECTED' : isLiveMode ? 'REAL MONEY' : 'DEMO ACCOUNT'}
               </span>
             </div>
           </div>
@@ -113,7 +135,7 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
             }`}
           >
             <span className="w-2 h-2 rounded-full bg-amber-400" />
-            <span>DEMO VIRTUAL</span>
+            <span>DERIV DEMO</span>
           </button>
 
           <button
@@ -210,7 +232,7 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
                 ? showFullToken
                   ? activeToken
                   : `${activeToken.slice(0, 8)}••••••••${activeToken.slice(-6)}`
-                : 'None (Simulation Mode)'}
+                : 'None (Connect Deriv Account)'}
             </span>
           </div>
           <div className="flex items-center gap-1">
