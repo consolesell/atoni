@@ -344,10 +344,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                         <button
                           key={acc.account}
                           onClick={() => {
-                            if (acc.token) {
-                              derivWS.setCredentials(acc.token);
-                              localStorage.setItem('deriv_active_loginid', acc.account);
-                            }
+                            void derivWS.switchAccount(acc);
                             setIsAccountsDropdownOpen(false);
                             sound.play('trade');
                           }}

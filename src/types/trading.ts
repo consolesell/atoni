@@ -271,19 +271,102 @@ export interface DerivSymbol {
   defaultBasePrice?: number;
 }
 
+export type ConnectionState =
+  | 'OFFLINE'
+  | 'CONNECTING'
+  | 'ONLINE'
+  | 'RECONNECTING'
+  | 'AUTH_REQUIRED';
+
+export type BalanceFreshness =
+  | 'SYNCING'
+  | 'LIVE'
+  | 'STALE'
+  | 'UNAVAILABLE'
+  | 'RECONCILIATION_PENDING';
+
+export type BalanceSource =
+  | 'DISCOVERY'
+  | 'SUBSCRIPTION'
+  | 'AUTHORIZE'
+  | 'SETTLEMENT'
+  | 'NONE';
+
+export type DerivAuthMethod = 'oauth2_pkce' | 'pat' | 'legacy_token';
+
+export interface BalanceSnapshot {
+  account_id: string | null;
+  login_id: string | null;
+  account_type: 'demo' | 'real' | null;
+  currency: string;
+  amount: number;
+  last_updated: number;
+  source: BalanceSource;
+  connection_state: ConnectionState;
+  freshness: BalanceFreshness;
+}
+
+export type TradeReadinessFlag =
+  | 'VALID_AUTHENTICATION'
+  | 'VALID_SELECTED_ACCOUNT'
+  | 'ACCOUNT_IDENTITY_CONFIRMED'
+  | 'AUTHENTICATED_SESSION'
+  | 'FRESH_BALANCE'
+  | 'REQUIRED_SUBSCRIPTIONS_ACTIVE'
+  | 'NO_UNRESOLVED_PURCHASE_TIMEOUT'
+  | 'NO_PENDING_RECONCILIATION'
+  | 'RISK_ENGINE_APPROVAL'
+  | 'EMERGENCY_STOP_INACTIVE';
+
+export interface TradeReadinessResult {
+  ready: boolean;
+  flags: Record<TradeReadinessFlag, boolean>;
+  blockers: string[];
+  snapshotTimestamp: number;
+}
+
+export interface PortfolioPnLSummary {
+  realizedPnL: number;
+  liveDerivPnL: number;
+  estimatedPnL: number;
+  openContractsCount: number;
+  pendingReconciliationCount: number;
+}
+
+export interface PendingPurchaseIntent {
+  intentId: string;
+  clientOrderKey: string;
+  symbol: string;
+  contractType: 'CALL' | 'PUT';
+  amount: number;
+  duration: number;
+  durationUnit: 'ticks' | 'seconds' | 'minutes';
+  accountId: string;
+  status: 'SUBMITTED' | 'CONFIRMED' | 'RECONCILIATION_PENDING' | 'FAILED';
+  createdAt: number;
+  contractId?: string | number;
+  proposalId?: string;
+}
+
 export interface DerivLinkedAccount {
-  account: string; // e.g. CR123456 or VRTC987654
-  token: string;
+  account: string; // e.g. CR123456 or VRTC987654 or account_id
+  account_id?: string;
+  token?: string; // Never persisted to Firestore or localStorage for OAuth sessions
   currency: string;
   isVirtual?: boolean;
+  account_type?: 'demo' | 'real';
   balance?: number;
+  isProvisionalBalance?: boolean;
 }
 
 export interface DerivAuthSession {
   isAuthorized: boolean;
-  token?: string;
+  authMethod?: DerivAuthMethod;
+  expiresAt?: number;
   appId?: string;
   loginid?: string;
+  accountId?: string;
+  accountType?: 'demo' | 'real';
   currency?: string;
   balance?: number;
   email?: string;

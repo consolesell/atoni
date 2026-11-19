@@ -1,23 +1,16 @@
 import React, { useState } from 'react';
 import {
-  ShieldCheck,
-  ShieldAlert,
   Key,
   RefreshCw,
   Copy,
   Check,
-  Zap,
-  Globe,
   Lock,
-  Eye,
-  EyeOff,
-  Sparkles,
   Server,
-  Activity,
-  ArrowRightLeft,
+  ShieldCheck,
 } from 'lucide-react';
 import { derivWS } from '../lib/derivWS';
 import { sound } from '../lib/soundEngine';
+import { BalanceFreshness, ConnectionState, DerivAuthMethod } from '../types/trading';
 
 interface DetailedAuthVisualProps {
   isLiveMode: boolean;
@@ -30,6 +23,9 @@ interface DetailedAuthVisualProps {
   isRefreshingBalance?: boolean;
   onOpenTokenModal: () => void;
   latencyMs?: number;
+  connectionState?: ConnectionState;
+  balanceFreshness?: BalanceFreshness;
+  authMethod?: DerivAuthMethod | null;
 }
 
 export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
@@ -43,14 +39,14 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
   isRefreshingBalance = false,
   onOpenTokenModal,
   latencyMs = 38,
+  connectionState = 'OFFLINE',
+  balanceFreshness = 'UNAVAILABLE',
+  authMethod = null,
 }) => {
   const credentials = derivWS.getCredentials();
-  const [showFullToken, setShowFullToken] = useState(false);
   const [copiedAppId, setCopiedAppId] = useState(false);
-  const [copiedToken, setCopiedToken] = useState(false);
 
   const activeAppId = credentials.appId || '33zsnNh6YJ2HWm30oZZJR';
-  const activeToken = credentials.token || '';
 
   const handleCopyAppId = () => {
     navigator.clipboard.writeText(String(activeAppId));
@@ -59,18 +55,19 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
     setTimeout(() => setCopiedAppId(false), 2000);
   };
 
-  const handleCopyToken = () => {
-    if (!activeToken) return;
-    navigator.clipboard.writeText(activeToken);
-    setCopiedToken(true);
-    sound.play('click');
-    setTimeout(() => setCopiedToken(false), 2000);
-  };
-
   const handleToggle = (targetReal: boolean) => {
     onToggleLiveMode(targetReal);
     sound.play('toggle');
   };
+
+  const authLabel =
+    authMethod === 'oauth2_pkce'
+      ? 'OAuth 2.0 PKCE (Server Vault)'
+      : authMethod === 'pat'
+      ? 'PAT Bearer (Server Vault)'
+      : authMethod === 'legacy_token'
+      ? 'WS v3 Volatile Session'
+      : 'Not Connected';
 
   return (
     <div
@@ -84,29 +81,35 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
             <Server className="w-4 h-4" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-bold text-slate-100 font-sans tracking-wide">
-                DERIV WEBSOCKET V3
+                DERIV OPTIONS GATEWAY
               </span>
               <span
                 className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold border ${
-                  isAuthorized
+                  connectionState === 'ONLINE' && isAuthorized
                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : connectionState === 'RECONNECTING' || connectionState === 'CONNECTING'
+                    ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
                     : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
                 }`}
               >
                 <span
                   className={`w-1.5 h-1.5 rounded-full animate-pulse ${
-                    isAuthorized ? 'bg-emerald-400' : 'bg-amber-400'
+                    connectionState === 'ONLINE' && isAuthorized
+                      ? 'bg-emerald-400'
+                      : connectionState === 'RECONNECTING' || connectionState === 'CONNECTING'
+                      ? 'bg-cyan-400'
+                      : 'bg-amber-400'
                   }`}
                 />
-                {isAuthorized ? 'AUTHORIZED' : 'AUTH REQUIRED'} • {latencyMs}ms
+                {connectionState} • {latencyMs}ms
               </span>
             </div>
             <div className="text-[11px] text-slate-400 font-mono flex items-center gap-1.5">
               <span>Account:</span>
               <strong className="text-slate-200">
-                {loginid || (isAuthorized ? (isLiveMode ? 'CR_LIVE' : 'VRTC_DEMO') : 'Not Connected')}
+                {loginid || (isAuthorized ? (isLiveMode ? 'REAL_ACCOUNT' : 'DEMO_ACCOUNT') : 'Not Connected')}
               </strong>
               <span>•</span>
               <span
@@ -156,10 +159,21 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 py-3 items-center">
         {/* Balance Display */}
         <div className="sm:col-span-6 flex flex-col gap-0.5 font-mono">
-          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1">
+          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
             <span>Live Account Balance</span>
             <span className="px-1.5 py-0.2 rounded text-[9px] bg-slate-800 text-slate-300">
               {currency}
+            </span>
+            <span
+              className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
+                balanceFreshness === 'LIVE'
+                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                  : balanceFreshness === 'SYNCING'
+                  ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+                  : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+              }`}
+            >
+              {balanceFreshness}
             </span>
           </span>
           <div className="flex items-baseline gap-2">
@@ -193,7 +207,7 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
           <button
             onClick={onOpenTokenModal}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-rose-600/20 to-red-600/20 hover:from-rose-600/30 hover:to-red-600/30 text-rose-300 border border-rose-500/40 rounded-xl font-mono text-xs font-bold transition-all shadow-sm"
-            title="Log in to Deriv without leaving the app"
+            title="Connect Deriv account securely"
           >
             <Key className="w-3.5 h-3.5 text-rose-400" />
             <span>DERIV LOG IN</span>
@@ -201,9 +215,8 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
         </div>
       </div>
 
-      {/* Authentication & Security Credentials Matrix */}
+      {/* Non-Secret Authentication & Session Metadata */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-slate-800/80 font-mono text-xs">
-        {/* Deriv App ID Display */}
         <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center justify-between">
           <div className="flex flex-col gap-0.5">
             <span className="text-[10px] text-slate-400 uppercase font-bold">Deriv App ID</span>
@@ -220,41 +233,17 @@ export const DetailedAuthVisual: React.FC<DetailedAuthVisualProps> = ({
           </button>
         </div>
 
-        {/* Deriv Token Display */}
         <div className="p-2.5 bg-slate-950/80 border border-slate-800 rounded-xl flex items-center justify-between">
           <div className="flex flex-col gap-0.5">
             <span className="text-[10px] text-slate-400 uppercase font-bold flex items-center gap-1">
               <Lock className="w-2.5 h-2.5 text-emerald-400" />
-              <span>Deriv API Token</span>
+              <span>Session Protection</span>
             </span>
-            <span className="text-xs text-slate-200 font-bold truncate max-w-[180px]">
-              {activeToken
-                ? showFullToken
-                  ? activeToken
-                  : `${activeToken.slice(0, 8)}••••••••${activeToken.slice(-6)}`
-                : 'None (Connect Deriv Account)'}
+            <span className="text-xs text-slate-200 font-bold truncate max-w-[220px]">
+              {authLabel}
             </span>
           </div>
-          <div className="flex items-center gap-1">
-            {activeToken && (
-              <button
-                onClick={() => setShowFullToken((prev) => !prev)}
-                className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-900 transition-colors"
-                title={showFullToken ? 'Hide token' : 'Reveal token'}
-              >
-                {showFullToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              </button>
-            )}
-            {activeToken && (
-              <button
-                onClick={handleCopyToken}
-                className="p-1.5 text-slate-400 hover:text-cyan-300 rounded-lg hover:bg-slate-900 transition-colors"
-                title="Copy token"
-              >
-                {copiedToken ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              </button>
-            )}
-          </div>
+          <ShieldCheck className={`w-4 h-4 ${isAuthorized ? 'text-emerald-400' : 'text-slate-600'}`} />
         </div>
       </div>
     </div>

@@ -149,23 +149,26 @@ class SBAgentAutonomyController {
     const legalDuration = durationBound.duration;
     const legalUnit = durationBound.unit;
 
-    // 3. Mathematical Half-Kelly stake calibration
+    // 3. Mathematical Half-Kelly stake calibration (respects balance <= 0, negative Kelly, and equity ceiling)
+    if (!Number.isFinite(ctx.balance) || ctx.balance <= 0) {
+      blockers.push('Account balance must be greater than $0.00.');
+    }
     const winProbEstimate = 0.65;
     const payoutFactor = 0.95;
     const q = 1 - winProbEstimate;
     const b = payoutFactor;
-    const rawKelly = Math.max(0, (b * winProbEstimate - q) / b);
-    const halfKellyPercent = rawKelly * 0.5; // Half-Kelly conservatism
-    let calibratedStake = Number((ctx.balance * halfKellyPercent).toFixed(2));
-
-    // Clamp between $1.00 minimum and preset max stake ceiling
-    calibratedStake = Math.max(1.0, Math.min(ctx.risk.maxStake, calibratedStake));
-    if (calibratedStake > ctx.balance) {
-      calibratedStake = Number(ctx.balance.toFixed(2));
-    }
-
-    if (calibratedStake <= 0) {
-      blockers.push('Calculated stake is $0.00. Check account equity balance.');
+    const rawKelly = (b * winProbEstimate - q) / b;
+    let calibratedStake = 0;
+    if (rawKelly <= 0) {
+      blockers.push('Negative Kelly expectancy — autonomous sizing blocked.');
+    } else {
+      const halfKellyPercent = Math.min(rawKelly * 0.5, 0.05); // Cap at 5% equity
+      const equityCeiling = Math.min(ctx.risk.maxStake, Number((ctx.balance * 0.05).toFixed(2)));
+      calibratedStake = Number(Math.min(equityCeiling, ctx.balance * halfKellyPercent).toFixed(2));
+      if (calibratedStake < 0.35) {
+        blockers.push(`Equity-capped stake ($${calibratedStake.toFixed(2)}) is below Deriv $0.35 minimum contract size.`);
+        calibratedStake = 0;
+      }
     }
 
     // 4. Regime-aware agent weights

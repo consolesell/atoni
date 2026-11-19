@@ -12,6 +12,348 @@ export interface KellyStakeResult {
   rationale: string;
   expectedValue: number;
   isCalibrated?: boolean;
+  blocked: boolean;
+  blockReason?: string;
+}
+
+export interface TradeProposalQuote {
+  proposalId: string;
+  askPrice: number;
+  payout?: number;
+  symbol?: string;
+  currency?: string;
+  accountId?: string;
+  fetchedAt: number;
+  expiresAt?: number;
+}
+
+export interface TradeRiskValidationParams {
+  balance: number;
+  balanceFreshness?: 'SYNCING' | 'LIVE' | 'STALE' | 'UNAVAILABLE' | 'RECONCILIATION_PENDING';
+  stake: number;
+  symbol: string;
+  winRate?: number;
+  confidence?: number;
+  mode?: PositionSizingMode;
+  maxStakePercent?: number;
+  minStake?: number;
+  payoutRate?: number;
+  openExposure: number;
+  maxOpenExposure: number;
+  openContractsCount: number;
+  maxConcurrentContracts: number;
+  dailyLoss: number;
+  maxDailyLoss: number;
+  drawdownPercent: number;
+  maxDrawdownPercent: number;
+  consecutiveLosses: number;
+  maxConsecutiveLosses: number;
+  emergencyStopActive?: boolean;
+  duplicateIntentActive?: boolean;
+  proposal?: TradeProposalQuote;
+  expectedAccountId?: string;
+  expectedCurrency?: string;
+  now?: number;
+}
+
+export interface TradeRiskValidationResult {
+  approved: boolean;
+  blockers: string[];
+  recommendedStake: number;
+}
+
+/**
+ * Calculates dynamic position size using the Kelly Criterion or Fixed % of Account Equity.
+ * Hard safety invariants:
+ * 1. balance <= 0 ALWAYS returns 0 and blocks trade.
+ * 2. minStake NEVER overrides maxStakePercent (if equityBoundMax < equityBoundMin, trade is blocked with 0).
+ * 3. Negative Kelly edge (rawKellyFraction <= 0) ALWAYS returns 0 and blocks trade.
+ */
+export function calculateDynamicStake(params: {
+  balance: number;
+  winRate: number; // 0 to 1 (e.g. 0.62)
+  confidence?: number; // 0 to 1
+  symbol?: string;
+  regime?: MarketRegime;
+  closedTrades?: TradeRecord[];
+  mode?: PositionSizingMode;
+  fixedStake?: number;
+  maxStakePercent?: number; // default 3.0% of balance
+  minStake?: number; // default $1.00
+  payoutRate?: number; // default 0.95 (95% net payout)
+}): KellyStakeResult {
+  const {
+    balance,
+    winRate,
+    confidence = 0.6,
+    symbol = '',
+    regime,
+    closedTrades,
+    mode = 'KELLY_HALF',
+    fixedStake = 5.0,
+    maxStakePercent = 0.03,
+    minStake = 1.0,
+    payoutRate = 0.95,
+  } = params;
+
+  if (!Number.isFinite(balance) || balance <= 0) {
+    return {
+      recommendedStake: 0,
+      kellyFraction: 0,
+      rawKellyFraction: 0,
+      winProbability: winRate,
+      netOdds: payoutRate,
+      mode,
+      equityBoundMin: 0,
+      equityBoundMax: 0,
+      rationale: 'Zero or negative balance blocks all trades.',
+      expectedValue: 0,
+      blocked: true,
+      blockReason: 'Account balance is zero or unavailable.',
+    };
+  }
+
+  // 1. Calibrate empirical win probability by symbol and regime bucket
+  let calibratedWinProb = winRate;
+  let isCalibrated = false;
+
+  if (closedTrades && closedTrades.length > 0) {
+    const calibration = getCalibratedWinProbability({
+      symbol,
+      regime,
+      confidence,
+      closedTrades,
+    });
+    calibratedWinProb = calibration.calibratedP;
+    isCalibrated = true;
+  } else {
+    const baseProb = winRate > 0 ? winRate * 0.6 + confidence * 0.4 : confidence;
+    calibratedWinProb = Math.min(0.85, Math.max(0.05, baseProb));
+  }
+
+  const b = payoutRate > 0 ? payoutRate : 0.95;
+  const p = calibratedWinProb;
+  const q = 1 - p;
+
+  // Raw Kelly Formula: f* = (p * b - q) / b
+  const rawKellyFraction = (p * b - q) / b;
+
+  // Fractional Kelly scaling multiplier
+  let fractionMultiplier = 0.5; // Half-Kelly default
+  if (mode === 'KELLY_QUARTER') {
+    fractionMultiplier = 0.25;
+  } else if (mode === 'EQUITY_PERCENT') {
+    fractionMultiplier = 0.02; // Fixed 2%
+  }
+
+  const effectiveMinStake = Math.max(0.35, minStake);
+  // CRITICAL: minStake must NEVER override maxStakePercent
+  const equityBoundMax = Math.max(0, Math.round(balance * maxStakePercent * 100) / 100);
+  const equityBoundMin = Math.min(effectiveMinStake, equityBoundMax);
+
+  if (equityBoundMax < effectiveMinStake) {
+    return {
+      recommendedStake: 0,
+      kellyFraction: 0,
+      rawKellyFraction,
+      winProbability: p,
+      netOdds: b,
+      mode,
+      equityBoundMin: effectiveMinStake,
+      equityBoundMax,
+      rationale: `Max stake cap ($${equityBoundMax.toFixed(2)}, ${(maxStakePercent * 100).toFixed(1)}% of $${balance.toFixed(2)}) is below minimum stake ($${effectiveMinStake.toFixed(2)}). Trade blocked.`,
+      expectedValue: 0,
+      isCalibrated,
+      blocked: true,
+      blockReason: 'Max stake percentage ceiling is below minimum legal stake.',
+    };
+  }
+
+  let calculatedStake = 0;
+  let effectiveFraction = 0;
+  let rationale = '';
+  let blocked = false;
+  let blockReason: string | undefined;
+
+  if (mode === 'FIXED') {
+    if (fixedStake < effectiveMinStake) {
+      blocked = true;
+      blockReason = `Fixed stake ($${fixedStake.toFixed(2)}) is below minimum stake ($${effectiveMinStake.toFixed(2)}).`;
+      rationale = blockReason;
+    } else {
+      calculatedStake = Math.min(fixedStake, equityBoundMax);
+      calculatedStake = Math.round(calculatedStake * 100) / 100;
+      effectiveFraction = calculatedStake / balance;
+      rationale = `Fixed stake of $${calculatedStake.toFixed(2)} (${(effectiveFraction * 100).toFixed(1)}% of balance, capped at $${equityBoundMax.toFixed(2)}).`;
+    }
+  } else if (mode === 'EQUITY_PERCENT') {
+    const pct = Math.min(maxStakePercent, 0.02);
+    const rawPctStake = Math.round(balance * pct * 100) / 100;
+    if (rawPctStake < effectiveMinStake) {
+      blocked = true;
+      blockReason = `Equity-percent stake ($${rawPctStake.toFixed(2)}) is below minimum stake ($${effectiveMinStake.toFixed(2)}).`;
+      rationale = blockReason;
+    } else {
+      calculatedStake = Math.min(rawPctStake, equityBoundMax);
+      effectiveFraction = calculatedStake / balance;
+      rationale = `Fixed Equity Sizing: ${(pct * 100).toFixed(1)}% of $${balance.toFixed(2)} = $${calculatedStake.toFixed(2)}.`;
+    }
+  } else {
+    // Kelly Criterion
+    if (rawKellyFraction <= 0) {
+      // Negative expectancy MUST block trade — never fall back to minStake
+      calculatedStake = 0;
+      effectiveFraction = 0;
+      blocked = true;
+      blockReason = `Negative Kelly edge (${(rawKellyFraction * 100).toFixed(1)}%) — trade blocked.`;
+      rationale = blockReason;
+    } else {
+      const fractionalFraction = rawKellyFraction * fractionMultiplier;
+      effectiveFraction = Math.min(fractionalFraction, maxStakePercent);
+      const rawStake = Math.round(balance * effectiveFraction * 100) / 100;
+
+      if (rawStake < effectiveMinStake) {
+        calculatedStake = 0;
+        effectiveFraction = 0;
+        blocked = true;
+        blockReason = `Kelly stake ($${rawStake.toFixed(2)}) is below minimum stake ($${effectiveMinStake.toFixed(2)}).`;
+        rationale = blockReason;
+      } else {
+        calculatedStake = Math.min(rawStake, equityBoundMax);
+        calculatedStake = Math.round(calculatedStake * 100) / 100;
+        effectiveFraction = calculatedStake / balance;
+        rationale = `${mode === 'KELLY_QUARTER' ? 'Quarter' : 'Half'}-Kelly Sizing: Calibrated Win Prob ${(p * 100).toFixed(1)}%, Raw f* ${(rawKellyFraction * 100).toFixed(1)}% → Scaled ${(effectiveFraction * 100).toFixed(2)}% of equity ($${calculatedStake.toFixed(2)}).`;
+      }
+    }
+  }
+
+  const expectedValue = blocked ? 0 : (p * b - q) * calculatedStake;
+
+  return {
+    recommendedStake: blocked ? 0 : calculatedStake,
+    kellyFraction: effectiveFraction,
+    rawKellyFraction,
+    winProbability: p,
+    netOdds: b,
+    mode,
+    equityBoundMin,
+    equityBoundMax,
+    rationale,
+    expectedValue,
+    isCalibrated,
+    blocked,
+    blockReason,
+  };
+}
+
+/**
+ * Hard pre-execution risk & proposal validator enforced at the single central execution boundary.
+ */
+export function validateTradeRiskGate(params: TradeRiskValidationParams): TradeRiskValidationResult {
+  const blockers: string[] = [];
+  const now = params.now ?? Date.now();
+
+  if (params.emergencyStopActive) {
+    blockers.push('Emergency stop is active.');
+  }
+
+  if (params.balanceFreshness && params.balanceFreshness !== 'LIVE') {
+    blockers.push(`Balance freshness is ${params.balanceFreshness}; live confirmed balance is required.`);
+  }
+
+  if (!Number.isFinite(params.balance) || params.balance <= 0) {
+    blockers.push('Account balance must be greater than $0.00.');
+  }
+
+  if (!Number.isFinite(params.stake) || params.stake <= 0) {
+    blockers.push('Trade stake must be greater than $0.00.');
+  } else if (params.stake > params.balance) {
+    blockers.push(`Insufficient balance ($${params.balance.toFixed(2)}) for stake $${params.stake.toFixed(2)}.`);
+  }
+
+  const maxStakePercent = params.maxStakePercent ?? 0.05;
+  const maxAllowedStake = Math.max(0, params.balance * maxStakePercent);
+  if (params.mode !== 'FIXED' && params.stake > maxAllowedStake + 0.001 && params.balance > 0) {
+    blockers.push(
+      `Stake $${params.stake.toFixed(2)} exceeds ${(maxStakePercent * 100).toFixed(1)}% equity ceiling ($${maxAllowedStake.toFixed(2)}).`
+    );
+  }
+
+  const sizingCheck = calculateDynamicStake({
+    balance: params.balance,
+    winRate: params.winRate ?? 0.62,
+    confidence: params.confidence ?? 0.62,
+    symbol: params.symbol,
+    mode: params.mode ?? 'KELLY_HALF',
+    fixedStake: params.stake,
+    maxStakePercent: params.maxStakePercent ?? 0.05,
+    minStake: params.minStake ?? 0.35,
+    payoutRate: params.payoutRate ?? 0.95,
+  });
+
+  if (sizingCheck.blocked && params.mode !== 'FIXED') {
+    blockers.push(sizingCheck.blockReason || sizingCheck.rationale);
+  }
+
+  if (params.duplicateIntentActive) {
+    blockers.push('Duplicate order intent detected while prior purchase is still in flight or pending reconciliation.');
+  }
+
+  if (params.openContractsCount >= params.maxConcurrentContracts) {
+    blockers.push(`Max concurrent contracts limit (${params.maxConcurrentContracts}) reached.`);
+  }
+
+  if (params.openExposure + params.stake > params.maxOpenExposure + 0.001) {
+    blockers.push(
+      `Total open exposure ($${(params.openExposure + params.stake).toFixed(2)}) exceeds cap ($${params.maxOpenExposure.toFixed(2)}).`
+    );
+  }
+
+  if (params.dailyLoss >= params.maxDailyLoss) {
+    blockers.push(`Daily loss limit reached ($${params.dailyLoss.toFixed(2)} / $${params.maxDailyLoss.toFixed(2)}).`);
+  }
+
+  if (params.drawdownPercent >= params.maxDrawdownPercent) {
+    blockers.push(
+      `Session drawdown circuit breaker reached (${params.drawdownPercent.toFixed(1)}% >= ${params.maxDrawdownPercent.toFixed(1)}%).`
+    );
+  }
+
+  if (params.consecutiveLosses >= params.maxConsecutiveLosses) {
+    blockers.push(`Consecutive loss limit reached (${params.consecutiveLosses}/${params.maxConsecutiveLosses}).`);
+  }
+
+  if (params.proposal) {
+    const p = params.proposal;
+    if (!p.proposalId) {
+      blockers.push('Missing proposal ID.');
+    }
+    const maxAgeMs = 15_000;
+    if ((p.expiresAt && now > p.expiresAt) || now - p.fetchedAt > maxAgeMs) {
+      blockers.push('Proposal quote is stale or expired; fetch a fresh proposal.');
+    }
+    if (p.askPrice > params.stake * 1.05 + 0.01) {
+      blockers.push(`Proposal ask price ($${p.askPrice.toFixed(2)}) exceeds authorized stake ($${params.stake.toFixed(2)}).`);
+    }
+    if (p.askPrice > params.balance) {
+      blockers.push(`Proposal ask price ($${p.askPrice.toFixed(2)}) exceeds live balance ($${params.balance.toFixed(2)}).`);
+    }
+    if (p.symbol && p.symbol !== params.symbol) {
+      blockers.push(`Proposal symbol mismatch (${p.symbol} != ${params.symbol}).`);
+    }
+    if (params.expectedCurrency && p.currency && p.currency !== params.expectedCurrency) {
+      blockers.push(`Proposal currency mismatch (${p.currency} != ${params.expectedCurrency}).`);
+    }
+    if (params.expectedAccountId && p.accountId && p.accountId !== params.expectedAccountId) {
+      blockers.push('Proposal belongs to a different Deriv account.');
+    }
+  }
+
+  return {
+    approved: blockers.length === 0,
+    blockers,
+    recommendedStake: sizingCheck.recommendedStake,
+  };
 }
 
 export interface CalibratedProbabilityParams {
@@ -141,147 +483,7 @@ export function validateDerivDuration(
   };
 }
 
-/**
- * Calculates dynamic position size using the Kelly Criterion or Fixed % of Account Equity
- * to eliminate asymmetric risk and prevent single large losses from erasing streaks of wins.
- *
- * Kelly formula for binary contracts:
- * f* = (p * (b + 1) - 1) / b
- * where:
- *   p = calibrated empirical win probability
- *   b = net payout ratio (0.95 for Deriv Rise/Fall contracts)
- *
- * We apply Fractional Kelly (Quarter or Half) with strict min/max equity bounds.
- */
-export function calculateDynamicStake(params: {
-  balance: number;
-  winRate: number; // 0 to 1 (e.g. 0.62)
-  confidence?: number; // 0 to 1
-  symbol?: string;
-  regime?: MarketRegime;
-  closedTrades?: TradeRecord[];
-  mode?: PositionSizingMode;
-  fixedStake?: number;
-  maxStakePercent?: number; // default 2.5% - 3.0% of balance
-  minStake?: number; // default $1.00
-  payoutRate?: number; // default 0.95 (95% net payout)
-}): KellyStakeResult {
-  const {
-    balance,
-    winRate,
-    confidence = 0.6,
-    symbol = '',
-    regime,
-    closedTrades,
-    mode = 'KELLY_HALF',
-    fixedStake = 5.0,
-    maxStakePercent = 0.03, // 3% max equity per trade
-    minStake = 1.0,
-    payoutRate = 0.95,
-  } = params;
-
-  if (balance <= 0) {
-    return {
-      recommendedStake: minStake,
-      kellyFraction: 0,
-      rawKellyFraction: 0,
-      winProbability: winRate,
-      netOdds: payoutRate,
-      mode,
-      equityBoundMin: minStake,
-      equityBoundMax: minStake,
-      rationale: 'Zero or negative balance fallback to minimum bound.',
-      expectedValue: 0,
-    };
-  }
-
-  // 1. Calibrate empirical win probability by symbol and regime bucket
-  let calibratedWinProb = winRate;
-  let isCalibrated = false;
-
-  if (closedTrades && closedTrades.length > 0) {
-    const calibration = getCalibratedWinProbability({
-      symbol,
-      regime,
-      confidence,
-      closedTrades,
-    });
-    calibratedWinProb = calibration.calibratedP;
-    isCalibrated = true;
-  } else {
-    calibratedWinProb = Math.min(
-      0.85,
-      Math.max(0.45, winRate > 0 ? winRate * 0.6 + confidence * 0.4 : confidence)
-    );
-  }
-
-  const b = payoutRate; // 0.95
-  const p = calibratedWinProb;
-  const q = 1 - p;
-
-  // Raw Kelly Formula: f* = (p * b - q) / b
-  const rawKellyFraction = (p * b - q) / b;
-
-  // Fractional Kelly scaling multiplier
-  let fractionMultiplier = 0.5; // Half-Kelly default
-  if (mode === 'KELLY_QUARTER') {
-    fractionMultiplier = 0.25;
-  } else if (mode === 'EQUITY_PERCENT') {
-    fractionMultiplier = 0.02; // Fixed 2%
-  }
-
-  const equityBoundMin = Math.max(0.5, minStake);
-  const equityBoundMax = Math.max(equityBoundMin, balance * maxStakePercent);
-
-  let calculatedStake = fixedStake;
-  let effectiveFraction = 0;
-  let rationale = '';
-
-  if (mode === 'FIXED') {
-    calculatedStake = Math.max(equityBoundMin, Math.min(fixedStake, equityBoundMax));
-    effectiveFraction = calculatedStake / balance;
-    rationale = `Fixed stake of $${calculatedStake.toFixed(2)} (${(effectiveFraction * 100).toFixed(1)}% of balance).`;
-  } else if (mode === 'EQUITY_PERCENT') {
-    const pct = Math.min(maxStakePercent, 0.02); // 2%
-    calculatedStake = Math.max(equityBoundMin, Math.min(balance * pct, equityBoundMax));
-    effectiveFraction = calculatedStake / balance;
-    rationale = `Fixed Equity Sizing: ${(pct * 100).toFixed(1)}% of $${balance.toFixed(2)} = $${calculatedStake.toFixed(2)}.`;
-  } else {
-    // Kelly Criterion
-    if (rawKellyFraction <= 0) {
-      // Negative expectancy under current win probability
-      calculatedStake = equityBoundMin;
-      effectiveFraction = calculatedStake / balance;
-      rationale = `Unfavorable Kelly edge (${(rawKellyFraction * 100).toFixed(1)}%). Pruned stake to minimum safe bound ($${equityBoundMin.toFixed(2)}).`;
-    } else {
-      const fractionalFraction = rawKellyFraction * fractionMultiplier;
-      // Cap by maxStakePercent (e.g. 3%) to prevent over-betting on high perceived win probability
-      effectiveFraction = Math.min(fractionalFraction, maxStakePercent);
-      const rawStake = balance * effectiveFraction;
-
-      calculatedStake = Math.max(equityBoundMin, Math.min(rawStake, equityBoundMax));
-      // Round to 2 decimal places
-      calculatedStake = Math.round(calculatedStake * 100) / 100;
-
-      rationale = `${mode === 'KELLY_QUARTER' ? 'Quarter' : 'Half'}-Kelly Sizing: Calibrated Win Prob ${(p * 100).toFixed(1)}%, Raw f* ${(rawKellyFraction * 100).toFixed(1)}% → Scaled ${(effectiveFraction * 100).toFixed(2)}% of equity ($${calculatedStake.toFixed(2)}).`;
-    }
-  }
-
-  const expectedValue = (p * b - q) * calculatedStake;
-
-  return {
-    recommendedStake: Math.max(equityBoundMin, calculatedStake),
-    kellyFraction: effectiveFraction,
-    rawKellyFraction,
-    winProbability: p,
-    netOdds: b,
-    mode,
-    equityBoundMin,
-    equityBoundMax,
-    rationale,
-    expectedValue,
-  };
-}
+// Core metrics calculation follows below
 
 /**
  * Calculates core risk and performance metrics from closed trade records.

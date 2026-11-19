@@ -99,7 +99,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
           const savedLocalProfile = localStorage.getItem('deriv_local_profile');
           if (savedLocalProfile) {
-            setUserProfile(JSON.parse(savedLocalProfile));
+            const parsed = JSON.parse(savedLocalProfile);
+            if (parsed && typeof parsed === 'object') {
+              delete parsed.derivApiToken;
+              if (Array.isArray(parsed.derivAccounts)) {
+                parsed.derivAccounts = parsed.derivAccounts.map(({ token: _omit, ...rest }: any) => rest);
+              }
+              setUserProfile(parsed);
+            }
           } else {
             setUserProfile(null);
           }
@@ -176,15 +183,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithDerivOAuth = async (
     accounts: any[],
-    primaryToken: string,
+    _primaryToken: string,
     primaryAccount: string,
     appId: string = '33zsnNh6YJ2HWm30oZZJR'
   ) => {
-    const isVirtual = primaryAccount.startsWith('VRTC') || primaryAccount.includes('VR');
+    const sanitizedAccounts = Array.isArray(accounts)
+      ? accounts.map(({ token: _omit, ...rest }: any) => rest)
+      : [];
+    const activeAcctObj = sanitizedAccounts.find(
+      (a: any) => a?.account === primaryAccount || a?.account_id === primaryAccount
+    ) || sanitizedAccounts[0] || null;
+    const isVirtual = Boolean(
+      activeAcctObj?.isVirtual ??
+      (activeAcctObj?.account_type === 'demo') ??
+      (primaryAccount.startsWith('VRTC') || primaryAccount.includes('VR'))
+    );
     const mode: 'DEMO' | 'REAL' = isVirtual ? 'DEMO' : 'REAL';
-    const activeAcctObj = Array.isArray(accounts)
-      ? accounts.find((a: any) => a?.account === primaryAccount) || accounts[0]
-      : null;
     const liveBalanceFromAcct =
       typeof activeAcctObj?.balance === 'number' && Number.isFinite(activeAcctObj.balance)
         ? activeAcctObj.balance
@@ -194,9 +208,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const path = `users/${user.uid}`;
       const updates: any = {
         uid: user.uid,
-        derivApiToken: primaryToken,
         derivAppId: appId,
-        derivAccounts: accounts,
+        derivAccounts: sanitizedAccounts,
         derivActiveAccount: primaryAccount,
         accountMode: mode,
         updatedAt: new Date().toISOString(),
@@ -223,9 +236,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         accountMode: mode,
         demoBalance: isVirtual ? (liveBalanceFromAcct ?? 0) : 0,
         realBalance: !isVirtual ? (liveBalanceFromAcct ?? 0) : 0,
-        derivApiToken: primaryToken,
         derivAppId: appId,
-        derivAccounts: accounts,
+        derivAccounts: sanitizedAccounts,
         derivActiveAccount: primaryAccount,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -290,8 +302,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const updateDerivCredentials = async (token: string, appId?: string) => {
-    const updates: any = { derivApiToken: token, updatedAt: new Date().toISOString() };
+  const updateDerivCredentials = async (_token: string, appId?: string) => {
+    const updates: any = { updatedAt: new Date().toISOString() };
     if (appId) updates.derivAppId = appId;
 
     setUserProfile((prev) => {

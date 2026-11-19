@@ -12,8 +12,13 @@ import {
   AgentEvolutionLog,
   PositionSizingMode,
   TrailingStopConfig,
+  BalanceSnapshot,
 } from './types/trading';
 import { derivWS, DEFAULT_DERIV_APP_ID } from './lib/derivWS';
+import { balanceManager } from './lib/balanceManager';
+import { portfolioReconciler } from './lib/portfolioReconciler';
+import { tradeReadinessGuard } from './lib/readinessGuard';
+import { isDemoAccount } from './lib/derivAccounts';
 import { DERIV_SYMBOLS, getSymbolDetails } from './lib/derivSymbols';
 import {
   analyzeAllIndicators,
@@ -149,13 +154,15 @@ export default function App() {
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [isSniperTriggerArmed, setIsSniperTriggerArmed] = useState<boolean>(false);
 
-  // Positions & Balance (Driven strictly by live Deriv authorize & balance stream)
+  // Positions & Balance (Driven strictly by live Deriv authorize & BalanceManager stream)
   const [openTrades, setOpenTrades] = useState<TradeRecord[]>([]);
   const [closedTrades, setClosedTrades] = useState<TradeRecord[]>([]);
-  const [balance, setBalance] = useState<number>(0);
-  const [currency, setCurrency] = useState<string>('USD');
+  const [balanceSnapshot, setBalanceSnapshot] = useState<BalanceSnapshot>(() => balanceManager.getSnapshot());
+  const [balance, setBalance] = useState<number>(() => balanceManager.getSnapshot().amount);
+  const [currency, setCurrency] = useState<string>(() => balanceManager.getSnapshot().currency || 'USD');
   const [isAuthorized, setIsAuthorized] = useState<boolean>(false);
   const [loginid, setLoginid] = useState<string | null>(null);
+  const [emergencyStopActive, setEmergencyStopActive] = useState<boolean>(false);
 
   // Advanced Agentic Martingale Reasoning State ($1.00 Base Anchor)
   const [martingaleState, setMartingaleState] = useState<AgenticMartingaleState>(INITIAL_AGENTIC_MARTINGALE_STATE);
@@ -201,12 +208,19 @@ export default function App() {
   const [localLiveMode, setLocalLiveMode] = useState<boolean>(false);
   const isLiveMode = userProfile ? userProfile.accountMode === 'REAL' : localLiveMode;
 
-  // Reset displayed balance to 0 when no Deriv token is active
+  // Subscribe to centralized BalanceManager snapshots
   useEffect(() => {
-    if (!derivWS.hasRealToken() && !isAuthorized) {
-      setBalance(0);
-    }
-  }, [isAuthorized]);
+    const unsub = balanceManager.subscribe((snap) => {
+      setBalanceSnapshot(snap);
+      if (snap.connection_state === 'ONLINE' || snap.freshness === 'LIVE' || snap.freshness === 'SYNCING') {
+        setBalance(snap.amount);
+        if (snap.currency) setCurrency(snap.currency);
+      } else if (snap.connection_state === 'OFFLINE' || snap.freshness === 'UNAVAILABLE') {
+        setBalance(0);
+      }
+    });
+    return () => unsub();
+  }, []);
 
   // Load persistent trade history & evolution from Firestore on user login
   useEffect(() => {
@@ -499,25 +513,43 @@ export default function App() {
     };
   }, [autonomyMode, botState.enabled, isAutonomousRunning]);
 
-  // Check for Deriv OAuth tokens from popup or redirect
+  // Handle OAuth 2.0 PKCE ?code=...&state=... redirect directly to root URL
   useEffect(() => {
-    try {
-      const pendingRaw = localStorage.getItem('deriv_oauth_pending_success');
-      if (pendingRaw) {
-        localStorage.removeItem('deriv_oauth_pending_success');
-        const data = JSON.parse(pendingRaw);
-        if (data.primaryToken) {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const state = params.get('state');
+    if (!code || !state) return;
+
+    window.history.replaceState({}, document.title, window.location.pathname);
+
+    (async () => {
+      try {
+        const savedAccountId = localStorage.getItem('deriv_active_loginid');
+        const res = await fetch('/api/auth/deriv/exchange', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code, state, savedAccountId }),
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
           const appId = localStorage.getItem('deriv_app_id') || DEFAULT_DERIV_APP_ID;
-          const redirectUrl = localStorage.getItem('deriv_redirect_url') || undefined;
-          if (data.accounts) derivWS.setLinkedAccounts(data.accounts);
-          derivWS.setCredentials(data.primaryToken, appId, redirectUrl);
-          signInWithDerivOAuth(data.accounts || [], data.primaryToken, data.primaryAccount || '', appId);
-          addLog(`Connected via Deriv OAuth: ${data.primaryAccount || 'Deriv Account'}`, 'success');
+          await derivWS.completeServerSession(data);
+          await signInWithDerivOAuth(
+            data.accounts || [],
+            '',
+            data.selectedAccountId || data.accounts?.[0]?.account || '',
+            appId
+          );
+          addLog(`Connected via Deriv OAuth 2.0 PKCE: ${data.selectedAccountId || 'Deriv Account'}`, 'success');
+        } else {
+          addLog(`Deriv OAuth PKCE exchange failed: ${data.error || 'Unknown error'}`, 'error');
         }
+      } catch (e: any) {
+        addLog(`Deriv OAuth callback error: ${e?.message || 'Unknown error'}`, 'error');
       }
-    } catch (e) {
-      console.warn('OAuth pending check error:', e);
-    }
+    })();
   }, [addLog, signInWithDerivOAuth]);
 
   // Deriv contract live settlement handler for proposal_open_contract / sell events
@@ -776,13 +808,15 @@ export default function App() {
           setPrevPrice(lastClose);
         }
       } else if (data.msg_type === 'authorize' && data.authorize) {
-        const activeId = data.authorize.loginid || null;
+        const activeId = data.authorize.loginid || data.authorize.account_id || null;
         const hasRealTok = derivWS.hasRealToken() && Boolean(activeId);
         setIsAuthorized(hasRealTok);
         setLoginid(activeId);
         loginidRef.current = activeId;
 
-        const isVirtual = Boolean(data.authorize.is_virtual || activeId?.startsWith('VRTC'));
+        const isVirtual = Boolean(
+          data.authorize.is_virtual || isDemoAccount({ account: activeId || '' })
+        );
         setLocalLiveMode(!isVirtual);
         isLiveModeRef.current = !isVirtual;
 
@@ -799,17 +833,45 @@ export default function App() {
         if (data.authorize.currency) {
           setCurrency(data.authorize.currency);
         }
+      } else if (data.msg_type === 'connection_state') {
+        if (data.state === 'ONLINE' && portfolioReconciler.hasPendingReconciliation()) {
+          derivWS.requestReconciliationSnapshot().then(({ openContracts, settledTransactions }) => {
+            const rec = portfolioReconciler.reconcile({
+              openTrades: openTradesRef.current,
+              broker: { openPortfolioContracts: openContracts, settledTransactions },
+            });
+            openTradesRef.current = rec.updatedOpenTrades;
+            setOpenTrades(rec.updatedOpenTrades);
+            if (!rec.stillPendingReconciliation) {
+              balanceManager.clearReconciliationPending();
+              addLogRef.current?.('Portfolio reconciliation complete against Deriv broker snapshot.', 'info');
+            }
+          }).catch(() => {});
+        }
+      } else if (data.msg_type === 'portfolio' && data.portfolio) {
+        if (portfolioReconciler.hasPendingReconciliation() && Array.isArray(data.portfolio.contracts)) {
+          const rec = portfolioReconciler.reconcile({
+            openTrades: openTradesRef.current,
+            broker: { openPortfolioContracts: data.portfolio.contracts },
+          });
+          openTradesRef.current = rec.updatedOpenTrades;
+          setOpenTrades(rec.updatedOpenTrades);
+          if (!rec.stillPendingReconciliation) {
+            balanceManager.clearReconciliationPending();
+          }
+        }
       } else if (data.msg_type === 'balance' && data.balance) {
         const bal = data.balance;
         const activeLoginId = loginidRef.current;
-        const isPrimaryMatch = !bal.loginid || !activeLoginId || bal.loginid === activeLoginId;
+        const incomingId = bal.loginid || bal.account_id || null;
+        const isPrimaryMatch = !incomingId || !activeLoginId || incomingId === activeLoginId;
 
         if (isPrimaryMatch && typeof bal.balance === 'number') {
           const liveBal = Number(bal.balance);
           setBalance(liveBal);
           if (derivWS.hasRealToken()) {
-            const targetLoginId = bal.loginid || activeLoginId;
-            const isVirtualAcct = targetLoginId ? targetLoginId.startsWith('VRTC') : !isLiveModeRef.current;
+            const targetLoginId = incomingId || activeLoginId;
+            const isVirtualAcct = targetLoginId ? isDemoAccount({ account: targetLoginId }) : !isLiveModeRef.current;
             updateBalancesRef.current?.(isVirtualAcct ? liveBal : undefined, !isVirtualAcct ? liveBal : undefined);
           }
         }
@@ -908,6 +970,7 @@ export default function App() {
                 clearTimeout(pendingTimer);
                 tradeTimeoutsRef.current.delete(t.id);
               }
+              portfolioReconciler.markIntentConfirmed(t.id, contractId);
               return {
                 ...t,
                 contract_id: contractId,
@@ -983,6 +1046,7 @@ export default function App() {
             clearTimeout(timer);
             tradeTimeoutsRef.current.delete(failedPending.id);
           }
+          portfolioReconciler.markIntentFailed(failedPending.id);
           openTradesRef.current = openTradesRef.current.filter((t) => t.id !== failedPending.id);
           setOpenTrades((prev) => prev.filter((t) => t.id !== failedPending.id));
         }
@@ -1402,7 +1466,7 @@ export default function App() {
     }
   }, [agents, closedTrades, regime, addLog, user]);
 
-  // 4. Trade Execution Method (Manual, Auto-Bot, Subagent, or Sniper Engine)
+  // 4. Single Central Trade Execution Pipeline (Manual, Auto-Bot, Subagent, or Sniper Engine)
   const executeTrade = useCallback(
     async (
       tradeDirection: 'CALL' | 'PUT',
@@ -1421,83 +1485,11 @@ export default function App() {
     ) => {
       if (isExecuting) return;
 
-      // Strictly require an active authenticated Deriv Demo (VRTC) or Real account
-      if (!derivWS.hasRealToken() || !isAuthorized) {
-        hostHaptic('error');
-        hostToast('Connect Deriv Demo or Real account to trade');
-        addLog('Execution blocked: Authorize a real Deriv Demo (VRTC) or Real account before placing contracts.', 'warn');
-        sound.play('alert');
-        setIsTokenModalOpen(true);
-        return;
-      }
-
-      if (!derivWS.isConnected()) {
-        hostHaptic('error');
-        hostToast('Deriv WebSocket reconnecting...');
-        addLog('Execution blocked: Deriv WebSocket is currently reconnecting.', 'warn');
-        sound.play('alert');
-        return;
-      }
-
       const entrySpot = currentPriceRef.current;
       if (!entrySpot || entrySpot <= 0) {
         hostHaptic('error');
         hostToast('Awaiting live market quote...');
         addLog('Execution blocked: Live Deriv market quote not yet received.', 'warn');
-        return;
-      }
-
-      if (balance < tradeStake) {
-        hostHaptic('error');
-        hostToast(`Insufficient funds ($${balance.toFixed(2)}) for stake $${tradeStake}`);
-        addLog(`Insufficient funds ($${balance.toFixed(2)}) for trade stake $${tradeStake}`, 'error');
-        return;
-      }
-
-      // Portfolio Exposure Limits Enforcement (Configurable via Zod centralized schema)
-      const config = useConfigStore.getState().config;
-      const currentOpenExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
-      const maxTotalOpenExposure = Math.max(
-        config.risk.minPortfolioExposureFloorUSD,
-        balance * config.risk.maxPortfolioExposurePercent * 5
-      );
-      if (currentOpenExposure + tradeStake > maxTotalOpenExposure) {
-        hostHaptic('light');
-        hostToast('Portfolio exposure cap reached');
-        addLog(
-          `🛑 [PORTFOLIO EXPOSURE LIMIT] Max total exposure cap reached: ($${currentOpenExposure.toFixed(2)} active + $${tradeStake.toFixed(2)} > $${maxTotalOpenExposure.toFixed(2)} limit). Trade blocked to protect margin.`,
-          'warn'
-        );
-        sound.play('toggle');
-        return;
-      }
-
-      const maxConcurrent = config.risk.maxConcurrentPositions;
-      if (openTrades.length >= maxConcurrent) {
-        hostHaptic('light');
-        hostToast(`Max concurrent contracts reached (${maxConcurrent})`);
-        addLog(
-          `🛑 [PORTFOLIO EXPOSURE LIMIT] Max concurrent contracts limit reached (${maxConcurrent} active positions). Trade blocked.`,
-          'warn'
-        );
-        return;
-      }
-
-      // Hard Session Drawdown Circuit Breaker Enforcement
-      const maxAllowedDrawdown = botState.maxSessionDrawdownPercent || config.risk.maxSessionDrawdownPercent;
-      if (
-        source !== 'MANUAL' &&
-        coreRiskMetrics.maxDrawdownPercent >= maxAllowedDrawdown
-      ) {
-        hostHaptic('error');
-        hostToast(`Circuit breaker: ${maxAllowedDrawdown}% session drawdown hit`);
-        addLog(
-          `🛑 [CIRCUIT BREAKER] ${maxAllowedDrawdown}% Session Drawdown limit hit (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%). Auto-fire halted to protect equity.`,
-          'error'
-        );
-        setBotState((b) => ({ ...b, enabled: false }));
-        speakWithHostFallback('Session drawdown limit reached. Auto trading suspended for capital protection.', 'urgent');
-        sound.play('loss');
         return;
       }
 
@@ -1508,12 +1500,100 @@ export default function App() {
         addLog(`⏱️ Duration calibrated to legal Deriv bound: ${tradeDuration} → ${validated.exactLegalString}`, 'info');
       }
 
-      setIsExecuting(true);
-      hostHaptic('medium');
+      const config = useConfigStore.getState().config;
+      const liveBalanceSnap = derivWS.getBalanceSnapshot();
+      const currentOpenExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
+      const maxTotalOpenExposure = Math.max(
+        config.risk.minPortfolioExposureFloorUSD,
+        liveBalanceSnap.amount * config.risk.maxPortfolioExposurePercent * 5
+      );
+      const maxConcurrent = config.risk.maxConcurrentPositions;
+      const maxAllowedDrawdown = botState.maxSessionDrawdownPercent || config.risk.maxSessionDrawdownPercent;
+      const subStatus = derivWS.getSubscriptionStatus();
+      const selectedAcctId = derivWS.getSelectedAccount()?.account || loginid;
+      const confirmedAcctId = derivWS.getConfirmedAccountId() || loginid;
+
+      const clientOrderKey = portfolioReconciler.buildClientOrderKey({
+        accountId: selectedAcctId || 'UNSELECTED',
+        symbol: selectedSymbol,
+        contractType: tradeDirection,
+        amount: tradeStake,
+        duration: validDuration,
+        durationUnit: tradeDurationUnit,
+      });
+
+      // Single centralized TradeReadinessGuard gate across ALL 10 flags + risk bounds
+      const readiness = tradeReadinessGuard.evaluate({
+        hasValidAuth: derivWS.hasRealToken() && !derivWS.isTokenExpired(),
+        tokenExpired: derivWS.isTokenExpired(),
+        selectedAccountId: selectedAcctId || null,
+        confirmedAccountId: confirmedAcctId || null,
+        connectionState: derivWS.getConnectionState(),
+        isSessionAuthenticated: derivWS.isAuthorized(),
+        balanceSnapshot: liveBalanceSnap,
+        requiredSubscriptionsActive: subStatus.requiredSubscriptionsActive,
+        hasUnresolvedPurchaseTimeout: portfolioReconciler.hasUnresolvedTimeout(),
+        hasPendingReconciliation: portfolioReconciler.hasPendingReconciliation(),
+        emergencyStopActive,
+        symbol: selectedSymbol,
+        stake: tradeStake,
+        winRate: aiPrediction?.ai_predicted_win_probability ?? algorithmicDecision?.confidence ?? 0.62,
+        confidence: algorithmicDecision?.confidence ?? 0.62,
+        sizingMode,
+        maxStakePercent: config.risk.maxPortfolioExposurePercent || 0.05,
+        minStake: 0.35,
+        openExposure: currentOpenExposure,
+        maxOpenExposure: maxTotalOpenExposure,
+        openContractsCount: openTrades.length,
+        maxConcurrentContracts: maxConcurrent,
+        dailyLoss: botState.currentDailyLoss ?? 0,
+        maxDailyLoss: botState.maxDailyLoss,
+        drawdownPercent: coreRiskMetrics.maxDrawdownPercent,
+        maxDrawdownPercent: maxAllowedDrawdown,
+        consecutiveLosses: botState.consecutiveLosses,
+        maxConsecutiveLosses: botState.maxConsecutiveLosses,
+        duplicateIntentActive: portfolioReconciler.hasInFlightOrPendingIntent(clientOrderKey),
+      });
+
+      if (!readiness.ready) {
+        hostHaptic('error');
+        const primaryBlocker = readiness.blockers[0] || 'Trade execution blocked by readiness guard.';
+        hostToast(primaryBlocker);
+        addLog(`🛑 [READINESS GUARD] ${readiness.blockers.join(' | ')}`, 'warn');
+        sound.play('alert');
+        if (!readiness.flags.VALID_AUTHENTICATION) {
+          setIsTokenModalOpen(true);
+        }
+        if (source !== 'MANUAL' && !readiness.flags.RISK_ENGINE_APPROVAL && coreRiskMetrics.maxDrawdownPercent >= maxAllowedDrawdown) {
+          setBotState((b) => ({ ...b, enabled: false }));
+        }
+        return;
+      }
+
       const uniqueSuffix = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 7).toUpperCase();
       const tradeId = `TRD-${uniqueSuffix}`;
 
-      // Initialize Trailing Stop-Loss monitoring parameters if requested
+      const intentReg = portfolioReconciler.registerIntent({
+        intentId: tradeId,
+        accountId: selectedAcctId || 'UNKNOWN',
+        symbol: selectedSymbol,
+        contractType: tradeDirection,
+        amount: tradeStake,
+        duration: validDuration,
+        durationUnit: tradeDurationUnit,
+      });
+
+      if (!intentReg.ok) {
+        hostHaptic('error');
+        hostToast('Duplicate or pending order intent blocked');
+        addLog(`🛑 [INTENT LOCK] ${intentReg.reason}`, 'warn');
+        sound.play('alert');
+        return;
+      }
+
+      setIsExecuting(true);
+      hostHaptic('medium');
+
       let tslProps: Partial<TradeRecord> = {};
       if (trailingStopOptions?.enabled) {
         const trailingDist = calculateTrailingDistance(
@@ -1581,15 +1661,32 @@ export default function App() {
         ? ` [TSL Stop: ${tslProps.currentTrailingStopPrice?.toFixed(decimals)}]`
         : '';
 
-      // Watchdog if Deriv WS buy acknowledgment never arrives within 15s
+      // Timeout transitions into RECONCILIATION_PENDING — never permits blind immediate retry
       const buyTimeoutId = setTimeout(() => {
         tradeTimeoutsRef.current.delete(tradeId);
         const stillUnconfirmed = openTradesRef.current.find((t) => t.id === tradeId && !t.contract_id);
         if (stillUnconfirmed) {
-          openTradesRef.current = openTradesRef.current.filter((t) => t.id !== tradeId);
-          setOpenTrades((prev) => prev.filter((t) => t.id !== tradeId));
+          portfolioReconciler.markIntentTimedOut(tradeId);
+          balanceManager.markReconciliationPending();
           setIsExecuting(false);
-          addLogRef.current?.(`Deriv order ${tradeId} timed out awaiting broker confirmation.`, 'warn');
+          addLogRef.current?.(
+            `⏳ Order ${tradeId} timed out awaiting broker confirmation — entered RECONCILIATION_PENDING lock. Querying broker portfolio...`,
+            'warn'
+          );
+          derivWS.requestReconciliationSnapshot().then(({ openContracts, settledTransactions }) => {
+            const rec = portfolioReconciler.reconcile({
+              openTrades: openTradesRef.current,
+              broker: { openPortfolioContracts: openContracts, settledTransactions },
+            });
+            openTradesRef.current = rec.updatedOpenTrades.filter(
+              (t) => t.id !== tradeId || Boolean(t.contract_id)
+            );
+            setOpenTrades(openTradesRef.current);
+            if (!rec.stillPendingReconciliation) {
+              balanceManager.clearReconciliationPending();
+              addLogRef.current?.(`✅ Order ${tradeId} reconciled against Deriv portfolio.`, 'info');
+            }
+          }).catch(() => {});
         }
       }, 15000);
       tradeTimeoutsRef.current.set(tradeId, buyTimeoutId);
@@ -1612,6 +1709,7 @@ export default function App() {
       } catch (err: any) {
         clearTimeout(buyTimeoutId);
         tradeTimeoutsRef.current.delete(tradeId);
+        portfolioReconciler.markIntentFailed(tradeId);
         openTradesRef.current = openTradesRef.current.filter((t) => t.id !== tradeId);
         setOpenTrades((prev) => prev.filter((t) => t.id !== tradeId));
         setIsExecuting(false);
@@ -1620,13 +1718,19 @@ export default function App() {
     },
     [
       isExecuting,
-      isAuthorized,
+      loginid,
       currency,
-      balance,
       isLiveMode,
       selectedSymbol,
       openTrades,
+      emergencyStopActive,
+      sizingMode,
+      aiPrediction?.ai_predicted_win_probability,
       botState.maxSessionDrawdownPercent,
+      botState.currentDailyLoss,
+      botState.maxDailyLoss,
+      botState.consecutiveLosses,
+      botState.maxConsecutiveLosses,
       coreRiskMetrics.maxDrawdownPercent,
       algorithmicDecision,
       regime,
@@ -1634,7 +1738,6 @@ export default function App() {
       candles,
       indicators,
       decimals,
-      speakWithHostFallback,
     ]
   );
 
@@ -2072,27 +2175,31 @@ export default function App() {
     }, 1000);
   }, []);
 
-  // Switch strictly between linked Deriv Demo (VRTC) and Real (CR) accounts
+  // Switch strictly between linked Deriv Demo and Real accounts (token-free OTP / volatile switch)
   const handleToggleLiveMode = useCallback(
     async (targetReal: boolean) => {
       const linked = derivWS.getLinkedAccounts();
       const matchingAccount = linked.find(
-        (acc) => acc.isVirtual === !targetReal && Boolean(acc.token)
+        (acc) => isDemoAccount(acc) === !targetReal
       );
 
       if (matchingAccount) {
-        derivWS.switchAccount(matchingAccount);
         addLog(
           `Switching Deriv account to ${matchingAccount.account} (${targetReal ? 'REAL' : 'DEMO'})...`,
           'info'
         );
         sound.play('toggle');
+        const res = await derivWS.switchAccount(matchingAccount);
+        if (!res.ok && res.error) {
+          addLog(`Account switch failed: ${res.error}`, 'error');
+          hostToast(res.error);
+        }
         return;
       }
 
       const modeLabel = targetReal ? 'REAL' : 'DEMO (VRTC)';
       addLog(
-        `No linked ${modeLabel} Deriv account with an active token. Authorize via Deriv OAuth or enter a token for ${modeLabel}.`,
+        `No linked ${modeLabel} Deriv account found. Authorize via Deriv OAuth PKCE or paste a PAT for ${modeLabel}.`,
         'warn'
       );
       hostToast(`Connect a Deriv ${modeLabel} account to switch`);
@@ -2226,6 +2333,9 @@ export default function App() {
           isRefreshingBalance={isRefreshingBalance}
           onOpenTokenModal={() => setIsTokenModalOpen(true)}
           latencyMs={derivWS.getLastLatency()}
+          connectionState={balanceSnapshot.connection_state}
+          balanceFreshness={balanceSnapshot.freshness}
+          authMethod={derivWS.getAuthMethod()}
         />
 
         {/* View 1: Main Trading Terminal (Persistently mounted to prevent chart canvas remount flash) */}

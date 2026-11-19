@@ -72,33 +72,41 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
     }
   }, [isOpen]);
 
-  // Listen for OAuth postMessage callback from popup
+  // Listen for strict same-origin OAuth postMessage callback from popup
   useEffect(() => {
-    const handleAuthMessage = (event: MessageEvent) => {
+    const handleAuthMessage = async (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'DERIV_OAUTH_SUCCESS') {
-        const { accounts, token, primaryToken, account, primaryAccount } = event.data;
+        const { accounts, selectedAccountId, selectedAccount, authMethod } = event.data;
         setIsOAuthWaiting(false);
         sound.play('win');
 
-        if (Array.isArray(accounts) && accounts.length > 0) {
-          derivWS.setLinkedAccounts(accounts);
-          setLinkedAccounts(accounts);
-        }
-
-        const effectiveToken = primaryToken || token || (accounts && accounts[0] ? accounts[0].token : '');
-        const effectiveAccount = primaryAccount || account || (accounts && accounts[0] ? accounts[0].account : '');
+        const effectiveAccount =
+          selectedAccountId || selectedAccount?.account || (accounts && accounts[0] ? accounts[0].account : '');
         const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
         const cleanRedirectUrl = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
+        derivWS.setAppAndRedirect(cleanAppId, cleanRedirectUrl);
 
-        if (effectiveToken) {
-          derivWS.setCredentials(effectiveToken, cleanAppId, cleanRedirectUrl);
-          setTokenInput(effectiveToken);
-          setSaveMessage(`Successfully connected Deriv account ${effectiveAccount || ''}!`);
-          setTimeout(() => {
-            setSaveMessage(null);
-            onClose();
-          }, 1500);
-        }
+        await derivWS.completeServerSession({
+          authMethod,
+          appId: cleanAppId,
+          accounts: accounts || [],
+          selectedAccountId: effectiveAccount,
+          selectedAccount,
+        });
+
+        setLinkedAccounts(derivWS.getLinkedAccounts());
+        setSaveMessage(`Successfully connected Deriv account ${effectiveAccount || ''}!`);
+        setTimeout(() => {
+          setSaveMessage(null);
+          onClose();
+        }, 1500);
+      } else if (event.data?.type === 'DERIV_OAUTH_ERROR') {
+        setIsOAuthWaiting(false);
+        setTestResult({
+          success: false,
+          message: event.data.error || 'Deriv OAuth authorization failed.',
+        });
       }
     };
 
@@ -112,114 +120,121 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
   const authorizedInfo = currentDiagnostics.authDetails;
   const isCurrentlyAuthorized = currentDiagnostics.hasToken && currentDiagnostics.authorized;
 
-  // Launch Deriv OAuth popup without leaving app
-  const handleLaunchDerivOAuth = () => {
+  // Launch Deriv OAuth 2.0 PKCE popup
+  const handleLaunchDerivOAuth = async () => {
     const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
     const rawRedirect = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
-    derivWS.setRedirectUrl(rawRedirect);
-    const redirectUri = rawRedirect.includes('/auth/')
-      ? rawRedirect
-      : `${rawRedirect.replace(/\/$/, '')}/auth/deriv/callback`;
-    const oauthUrl = `https://oauth.deriv.com/oauth2/authorize?app_id=${encodeURIComponent(cleanAppId)}&l=en&brand=deriv&redirect_uri=${encodeURIComponent(redirectUri)}`;
-
+    derivWS.setAppAndRedirect(cleanAppId, rawRedirect);
+    setTestResult(null);
     setIsOAuthWaiting(true);
     sound.play('click');
 
-    const popupWidth = 480;
-    const popupHeight = 680;
-    const left = window.screenX + (window.outerWidth - popupWidth) / 2;
-    const top = window.screenY + (window.outerHeight - popupHeight) / 2;
+    try {
+      const res = await fetch(
+        `/api/auth/deriv/url?app_id=${encodeURIComponent(cleanAppId)}&redirect_uri=${encodeURIComponent(rawRedirect)}`,
+        { credentials: 'include' }
+      );
+      if (!res.ok) {
+        throw new Error('Failed generating PKCE authorization URL.');
+      }
+      const data = await res.json();
+      const oauthUrl = data.url;
 
-    const popup = window.open(
-      oauthUrl,
-      'deriv_oauth_popup',
-      `width=${popupWidth},height=${popupHeight},left=${left},top=${top},status=no,toolbar=no,menubar=no`
-    );
+      const popupWidth = 480;
+      const popupHeight = 680;
+      const left = window.screenX + (window.outerWidth - popupWidth) / 2;
+      const top = window.screenY + (window.outerHeight - popupHeight) / 2;
 
-    if (!popup) {
+      const popup = window.open(
+        oauthUrl,
+        'deriv_oauth_popup',
+        `width=${popupWidth},height=${popupHeight},left=${left},top=${top},status=no,toolbar=no,menubar=no`
+      );
+
+      if (!popup) {
+        setIsOAuthWaiting(false);
+        setTestResult({
+          success: false,
+          message: 'Browser blocked popup window. Allow popups or use Direct API Token tab below.',
+        });
+        return;
+      }
+
+      const timer = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(timer);
+          setIsOAuthWaiting(false);
+        }
+      }, 1000);
+    } catch (err: any) {
       setIsOAuthWaiting(false);
       setTestResult({
         success: false,
-        message: 'Browser blocked popup window. Please allow popups or use Direct Token Login tab below.',
+        message: err?.message || 'Could not start Deriv OAuth PKCE flow.',
       });
-      return;
     }
-
-    // Monitor popup closure if user closes it manually
-    const timer = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(timer);
-        setIsOAuthWaiting(false);
-      }
-    }, 1000);
   };
 
-  // Extract from pasted URL or callback string
-  const handleParseCallbackUrl = () => {
-    if (!pastedUrlInput.trim()) return;
+  // Handle pasted PKCE callback URL (?code=...&state=...) or direct PAT token
+  const handleParseCallbackUrl = async () => {
+    const raw = pastedUrlInput.trim();
+    if (!raw) return;
+    setIsTesting(true);
+    setTestResult(null);
+
     try {
-      let raw = pastedUrlInput.trim();
-      if (raw.includes('#')) raw = raw.split('#')[1];
-      else if (raw.includes('?')) raw = raw.split('?')[1];
+      const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
+      const savedAccountId = localStorage.getItem('deriv_active_loginid');
 
-      const searchParams = new URLSearchParams(raw);
-      const accounts: DerivLinkedAccount[] = [];
-      let i = 1;
-      while (searchParams.has('acct' + i) && searchParams.has('token' + i)) {
-        accounts.push({
-          account: searchParams.get('acct' + i)!,
-          token: searchParams.get('token' + i)!,
-          currency: searchParams.get('cur' + i) || 'USD',
-          isVirtual: searchParams.get('acct' + i)!.startsWith('VRTC'),
+      if (raw.includes('code=') && raw.includes('state=')) {
+        const queryPart = raw.includes('?') ? raw.split('?')[1] : raw;
+        const params = new URLSearchParams(queryPart);
+        const res = await fetch('/api/auth/deriv/exchange', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: params.get('code') || '',
+            state: params.get('state') || '',
+            savedAccountId,
+          }),
         });
-        i++;
-      }
-
-      const singleToken =
-        searchParams.get('token1') ||
-        searchParams.get('token') ||
-        (accounts[0] ? accounts[0].token : raw);
-      const singleAcct =
-        searchParams.get('acct1') ||
-        searchParams.get('acct') ||
-        (accounts[0] ? accounts[0].account : 'CR_ACCOUNT');
-
-      if (accounts.length > 0) {
-        derivWS.setLinkedAccounts(accounts);
-        setLinkedAccounts(accounts);
-      }
-
-      if (singleToken) {
-        setTokenInput(singleToken);
-        derivWS.setCredentials(
-          singleToken,
-          appIdInput.trim() || DEFAULT_DERIV_APP_ID,
-          redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL
-        );
-        setSaveMessage(`Imported ${accounts.length > 0 ? accounts.length : 1} account(s)! Connected as ${singleAcct}.`);
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          setTestResult({ success: false, message: data.error || 'OAuth code exchange failed.' });
+          return;
+        }
+        await derivWS.completeServerSession(data);
+        setLinkedAccounts(derivWS.getLinkedAccounts());
+        setSaveMessage(`Connected Deriv account ${data.selectedAccountId || ''}!`);
         sound.play('win');
         setTimeout(() => {
           setSaveMessage(null);
           onClose();
         }, 1500);
       } else {
+        setTokenInput(raw);
+        setActiveTab('token');
         setTestResult({
-          success: false,
-          message: 'Could not find token in pasted text. Expected format: ?acct1=...&token1=...',
+          success: true,
+          message: 'Token loaded into Direct API Token tab. Click Test & Connect to authenticate.',
         });
       }
     } catch (e: any) {
       setTestResult({
         success: false,
-        message: `Failed to parse URL: ${e?.message || 'Invalid format'}`,
+        message: e?.message || 'Failed processing callback parameters.',
       });
+    } finally {
+      setIsTesting(false);
     }
   };
 
-  // Test token live via WebSocket without leaving app
+  // Authenticate PAT via server vault or verify legacy WS v3 token in volatile memory
   const handleTestAndConnectToken = async () => {
-    if (!tokenInput.trim()) {
-      setTestResult({ success: false, message: 'Please enter a valid Deriv API token.' });
+    const cleanToken = tokenInput.trim();
+    if (!cleanToken) {
+      setTestResult({ success: false, message: 'Please enter a valid Deriv API token or PAT.' });
       return;
     }
 
@@ -229,66 +244,128 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
 
     const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
     const cleanRedirectUrl = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
-    const res = await derivWS.testToken(tokenInput.trim(), cleanAppId);
+    derivWS.setAppAndRedirect(cleanAppId, cleanRedirectUrl);
 
-    setIsTesting(false);
-    if (res.success && res.authorize) {
-      sound.play('win');
-      derivWS.setCredentials(tokenInput.trim(), cleanAppId, cleanRedirectUrl);
-      const isVirtual = Boolean(res.authorize.is_virtual);
-      onToggleLiveMode(!isVirtual);
+    try {
+      const savedAccountId = localStorage.getItem('deriv_active_loginid');
+      const patRes = await fetch('/api/auth/deriv/pat', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: cleanToken, appId: cleanAppId, savedAccountId }),
+      });
+      const patData = await patRes.json();
 
-      if (res.authorize.loginid) {
-        const existingLinked = derivWS.getLinkedAccounts();
-        const existingIdx = existingLinked.findIndex((a) => a.account === res.authorize.loginid);
-        const updatedAcc: DerivLinkedAccount = {
-          account: res.authorize.loginid,
-          token: tokenInput.trim(),
-          currency: res.authorize.currency || 'USD',
-          isVirtual,
-          balance: Number(res.authorize.balance ?? 0),
-        };
-        const mergedLinked =
-          existingIdx >= 0
-            ? existingLinked.map((a, idx) => (idx === existingIdx ? { ...a, ...updatedAcc } : a))
-            : [updatedAcc, ...existingLinked];
-        derivWS.setLinkedAccounts(mergedLinked);
-        setLinkedAccounts(mergedLinked);
+      if (patRes.ok && patData.success) {
+        await derivWS.completeServerSession(patData);
+        const sel = patData.selectedAccount;
+        const isVirtual = Boolean(sel?.isVirtual ?? sel?.account_type === 'demo');
+        onToggleLiveMode(!isVirtual);
+        setLinkedAccounts(derivWS.getLinkedAccounts());
+        setTokenInput('');
+
+        setTestResult({
+          success: true,
+          message: `Authenticated ${sel?.account || 'Deriv Account'} (${isVirtual ? 'DEMO' : 'REAL'}) via secure server vault.`,
+        });
+        setSaveMessage('Credentials verified via Deriv Options PAT vault!');
+        sound.play('win');
+        setTimeout(() => {
+          setSaveMessage(null);
+          onClose();
+        }, 1500);
+        return;
       }
 
-      setTestResult({
-        success: true,
-        message: `Connected as ${res.authorize.fullname || res.authorize.email} (${res.authorize.loginid}) • Balance: $${Number(
-          res.authorize.balance
-        ).toFixed(2)} ${res.authorize.currency}`,
-        details: res.authorize,
-      });
+      if (patData.legacyCandidate) {
+        const res = await derivWS.testToken(cleanToken, cleanAppId);
+        if (res.success && res.authorize) {
+          derivWS.connectWithLegacyToken(cleanToken, cleanAppId);
+          const isVirtual = Boolean(res.authorize.is_virtual);
+          onToggleLiveMode(!isVirtual);
+          setLinkedAccounts(derivWS.getLinkedAccounts());
+          setTokenInput('');
+          sound.play('win');
+          setTestResult({
+            success: true,
+            message: `Connected legacy session ${res.authorize.loginid} • Balance: $${Number(res.authorize.balance).toFixed(2)} ${res.authorize.currency}`,
+            details: res.authorize,
+          });
+          setSaveMessage('Credentials verified in volatile session memory!');
+          setTimeout(() => {
+            setSaveMessage(null);
+            onClose();
+          }, 1500);
+          return;
+        }
+      }
 
-      setSaveMessage('Credentials verified & activated on live Deriv WebSocket!');
-      setTimeout(() => {
-        setSaveMessage(null);
-        onClose();
-      }, 1600);
-    } else {
       sound.play('alert');
       setTestResult({
         success: false,
-        message: res.error || 'Failed to authenticate token with Deriv WebSocket server.',
+        message: patData.error || 'Failed to authenticate token with Deriv.',
       });
+    } catch (err: any) {
+      sound.play('alert');
+      setTestResult({
+        success: false,
+        message: err?.message || 'Error verifying token.',
+      });
+    } finally {
+      setIsTesting(false);
     }
   };
 
-  // Quick switch between linked accounts
-  const handleSwitchLinkedAccount = (acc: DerivLinkedAccount) => {
+  // Quick switch between linked accounts via OTP server selection
+  const handleSwitchLinkedAccount = async (acc: DerivLinkedAccount) => {
     sound.play('click');
-    derivWS.switchAccount(acc);
-    setTokenInput(acc.token);
-    onToggleLiveMode(!acc.isVirtual);
-    setSaveMessage(`Switched active Deriv account to ${acc.account} (${acc.currency})`);
-    setTimeout(() => {
-      setSaveMessage(null);
-      onClose();
-    }, 1200);
+    const res = await derivWS.switchAccount(acc);
+    if (res.ok) {
+      onToggleLiveMode(!acc.isVirtual);
+      setSaveMessage(`Switched active Deriv account to ${acc.account} (${acc.currency})`);
+      setTimeout(() => {
+        setSaveMessage(null);
+        onClose();
+      }, 1200);
+    } else {
+      setTestResult({ success: false, message: res.error || 'Failed switching account.' });
+    }
+  };
+
+  const handleResetDemoBalance = async (acc: DerivLinkedAccount) => {
+    sound.play('click');
+    const res = await derivWS.resetDemoBalance(acc.account_id || acc.account);
+    if (res.ok) {
+      sound.play('win');
+      setSaveMessage(`Reset demo balance for ${acc.account}!`);
+      setTimeout(() => setSaveMessage(null), 2000);
+    } else {
+      setTestResult({ success: false, message: res.error || 'Could not reset demo balance.' });
+    }
+  };
+
+  const handleCreateDemoAccount = async () => {
+    sound.play('click');
+    setIsTesting(true);
+    try {
+      const res = await fetch('/api/deriv/accounts/demo', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setTestResult({ success: false, message: data.error || 'Failed creating demo account.' });
+        return;
+      }
+      await derivWS.completeServerSession(data);
+      setLinkedAccounts(derivWS.getLinkedAccounts());
+      setSaveMessage('Created new Deriv USD Demo account!');
+      sound.play('win');
+    } catch (err: any) {
+      setTestResult({ success: false, message: err?.message || 'Failed creating demo account.' });
+    } finally {
+      setIsTesting(false);
+    }
   };
 
   // Pre-fill production gateway defaults so user only pastes their API token
@@ -522,14 +599,14 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
                   <span>Manual Callback / Redirect URL Import (Fallback)</span>
                 </span>
                 <p className="text-[10px] text-slate-400 font-mono">
-                  If you were redirected or have a Deriv OAuth callback URL (containing acct1=...&token1=...), paste it here to import instantly:
+                  If redirected manually, paste the callback URL containing ?code=...&amp;state=... to finish PKCE login:
                 </p>
                 <div className="flex gap-2">
                   <input
                     type="text"
                     value={pastedUrlInput}
                     onChange={(e) => setPastedUrlInput(e.target.value)}
-                    placeholder="https://.../?acct1=CR123&token1=... or ?token1=..."
+                    placeholder="https://.../auth/deriv/callback?code=...&state=..."
                     className="flex-1 bg-slate-950 border border-slate-700 text-slate-100 rounded-lg px-3 py-1.5 text-xs font-mono outline-none"
                   />
                   <button
@@ -550,7 +627,7 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-slate-300 font-medium text-xs">
-                    Deriv API Token
+                    Deriv API Token / PAT
                   </label>
                   <button
                     type="button"
@@ -565,11 +642,11 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
                   type="password"
                   value={tokenInput}
                   onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="Paste your Deriv API token (starts with pat_ or similar)..."
+                  placeholder="Paste your Deriv PAT or API token..."
                   className="bg-slate-950 border border-slate-700 hover:border-cyan-500/50 focus:border-cyan-500 text-slate-100 rounded-xl px-4 py-2.5 text-xs outline-none"
                 />
                 <span className="text-[10px] text-slate-500 flex items-center justify-between">
-                  <span>Tokens are stored strictly in client memory/localStorage.</span>
+                  <span>Tokens are vaulted server-side (or volatile memory only) — never written to localStorage.</span>
                   <a
                     href="https://app.deriv.com/account/api-token"
                     target="_blank"
@@ -619,14 +696,24 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
           {/* TAB 4: LINKED ACCOUNTS LIST */}
           {activeTab === 'accounts' && linkedAccounts.length > 0 && (
             <div className="flex flex-col gap-2.5 font-mono">
-              <span className="text-slate-400 text-xs font-bold">
-                Available Accounts on This Token:
-              </span>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-400 text-xs font-bold">
+                  Available Accounts ({linkedAccounts.length}):
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCreateDemoAccount}
+                  disabled={isTesting}
+                  className="px-2.5 py-1 bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 rounded-lg text-[10px] font-bold"
+                >
+                  + Create Demo Account
+                </button>
+              </div>
               <div className="flex flex-col gap-2">
                 {linkedAccounts.map((acc) => {
                   const isCurrent =
-                    authorizedInfo?.loginid === acc.account ||
-                    (tokenInput && acc.token === tokenInput);
+                    derivWS.getSelectedAccount()?.account === acc.account ||
+                    authorizedInfo?.loginid === acc.account;
                   return (
                     <div
                       key={acc.account}
@@ -662,19 +749,31 @@ export const AccountTokenModal: React.FC<AccountTokenModalProps> = ({
                         </div>
                       </div>
 
-                      {isCurrent ? (
-                        <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[11px] font-bold">
-                          ACTIVE
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleSwitchLinkedAccount(acc)}
-                          className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-[11px] font-bold transition-all"
-                        >
-                          Switch
-                        </button>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {acc.isVirtual && (
+                          <button
+                            type="button"
+                            onClick={() => handleResetDemoBalance(acc)}
+                            className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 rounded-lg text-[10px] font-bold"
+                            title="Reset Demo Balance"
+                          >
+                            Reset
+                          </button>
+                        )}
+                        {isCurrent ? (
+                          <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-[11px] font-bold">
+                            ACTIVE
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchLinkedAccount(acc)}
+                            className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-[11px] font-bold transition-all"
+                          >
+                            Switch
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}

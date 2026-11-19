@@ -2,9 +2,13 @@ import express from "express";
 import http from "http";
 import path from "path";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import {
+  DerivServerAuthVault,
+  parseCookieHeader,
+  redactSecrets,
+} from "./serverDerivOAuth.ts";
 
 dotenv.config();
 
@@ -1549,8 +1553,49 @@ Calculate weight adjustments (each agent's weights: ma, momentum, rsi, bb, norma
 });
 
 // -------------------------------------------------------------
-// Deriv OAuth 2.0 Flow Endpoints (Popup & Callback)
+// Deriv OAuth 2.0 PKCE + Secure Server Session & REST Proxy
 // -------------------------------------------------------------
+
+const derivAuthVault = new DerivServerAuthVault();
+const DERIV_SESSION_COOKIE = "deriv_sid";
+
+function getRequestDerivSid(req: express.Request): string | null {
+  const cookies = parseCookieHeader(req.headers.cookie);
+  return derivAuthVault.verifySignedSessionId(cookies[DERIV_SESSION_COOKIE]);
+}
+
+function setDerivSessionCookie(req: express.Request, res: express.Response, sid: string): void {
+  const signed = derivAuthVault.signSessionId(sid);
+  const isHttps =
+    req.secure ||
+    req.headers["x-forwarded-proto"] === "https" ||
+    Boolean(process.env.K_SERVICE);
+  const parts = [
+    `${DERIV_SESSION_COOKIE}=${encodeURIComponent(signed)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=86400",
+  ];
+  if (isHttps) parts.push("Secure");
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function clearDerivSessionCookie(req: express.Request, res: express.Response): void {
+  const isHttps =
+    req.secure ||
+    req.headers["x-forwarded-proto"] === "https" ||
+    Boolean(process.env.K_SERVICE);
+  const parts = [
+    `${DERIV_SESSION_COOKIE}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=0",
+  ];
+  if (isHttps) parts.push("Secure");
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
 
 app.get("/api/auth/deriv/url", (req, res) => {
   const cleanAppId = String(req.query.app_id || process.env.DERIV_APP_ID || "33zsnNh6YJ2HWm30oZZJR").trim();
@@ -1560,20 +1605,270 @@ app.get("/api/auth/deriv/url", (req, res) => {
   const redirectUri = appUrl.includes("/auth/")
     ? appUrl
     : `${appUrl.replace(/\/$/, "")}/auth/deriv/callback`;
+  const scope = String(req.query.scope || "read trade").trim();
 
-  const params = new URLSearchParams({
-    app_id: cleanAppId,
-    l: "en",
-    brand: "deriv",
-    redirect_uri: redirectUri,
-  });
-
-  const authUrl = `https://oauth.deriv.com/oauth2/authorize?${params.toString()}`;
-  res.json({
-    url: authUrl,
-    appId: cleanAppId,
+  const authRequest = derivAuthVault.createPkceAuthRequest({
+    clientId: cleanAppId,
     redirectUri,
+    scope,
   });
+
+  res.json({
+    url: authRequest.url,
+    state: authRequest.state,
+    appId: authRequest.clientId,
+    redirectUri: authRequest.redirectUri,
+    flow: "oauth2_pkce",
+  });
+});
+
+app.post("/api/auth/deriv/exchange", async (req, res) => {
+  try {
+    const code = typeof req.body?.code === "string" ? req.body.code.trim() : "";
+    const state = typeof req.body?.state === "string" ? req.body.state.trim() : "";
+    const savedAccountId =
+      typeof req.body?.savedAccountId === "string" ? req.body.savedAccountId.trim() : null;
+
+    const result = await derivAuthVault.exchangeAuthorizationCode({
+      code,
+      state,
+      savedAccountId,
+    });
+
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
+        success: false,
+        code: result.code,
+        error: result.error,
+      });
+    }
+
+    setDerivSessionCookie(req, res, result.session!.sid);
+    return res.json({
+      success: true,
+      ...result.view,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: redactSecrets(err?.message || "Failed exchanging Deriv authorization code."),
+    });
+  }
+});
+
+app.post("/api/auth/deriv/pat", async (req, res) => {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token.trim() : "";
+    const appId = String(req.body?.appId || process.env.DERIV_APP_ID || "33zsnNh6YJ2HWm30oZZJR").trim();
+    const savedAccountId =
+      typeof req.body?.savedAccountId === "string" ? req.body.savedAccountId.trim() : null;
+
+    const result = await derivAuthVault.createPatSession({
+      token,
+      appId,
+      savedAccountId,
+    });
+
+    if (!result.ok) {
+      return res.status(result.status || 401).json({
+        success: false,
+        legacyCandidate: result.legacyCandidate,
+        error: result.error,
+      });
+    }
+
+    setDerivSessionCookie(req, res, result.session!.sid);
+    return res.json({
+      success: true,
+      ...result.view,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: redactSecrets(err?.message || "Failed validating Deriv PAT."),
+    });
+  }
+});
+
+app.post("/api/auth/deriv/logout", (req, res) => {
+  const sid = getRequestDerivSid(req);
+  derivAuthVault.deleteSession(sid);
+  clearDerivSessionCookie(req, res);
+  res.json({ success: true, authenticated: false });
+});
+
+app.get("/api/deriv/session", (req, res) => {
+  const sid = getRequestDerivSid(req);
+  const { session, expired } = derivAuthVault.getSession(sid);
+  if (expired) {
+    clearDerivSessionCookie(req, res);
+  }
+  res.json({
+    success: true,
+    ...derivAuthVault.toPublicView(session, expired),
+  });
+});
+
+app.get("/api/deriv/accounts", async (req, res) => {
+  try {
+    const sid = getRequestDerivSid(req);
+    const { session, expired } = derivAuthVault.getSession(sid);
+    if (!session) {
+      if (expired) clearDerivSessionCookie(req, res);
+      return res.status(401).json({
+        success: false,
+        authRequired: true,
+        expired,
+        error: expired ? "Deriv token expired. Please re-authenticate." : "Authentication required.",
+      });
+    }
+
+    const savedAccountId =
+      typeof req.query.saved_account_id === "string" ? req.query.saved_account_id.trim() : null;
+    const disc = await derivAuthVault.discoverAccountsForSession(session, savedAccountId);
+    if (!disc.ok) {
+      if (disc.authRequired) clearDerivSessionCookie(req, res);
+      return res.status(disc.status || 400).json({
+        success: false,
+        authRequired: disc.authRequired,
+        error: disc.error,
+      });
+    }
+
+    return res.json({
+      success: true,
+      ...derivAuthVault.toPublicView(session, false),
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: redactSecrets(err?.message || "Failed discovering Deriv accounts."),
+    });
+  }
+});
+
+app.post("/api/deriv/accounts/demo", async (req, res) => {
+  try {
+    const sid = getRequestDerivSid(req);
+    const { session, expired } = derivAuthVault.getSession(sid);
+    if (!session) {
+      if (expired) clearDerivSessionCookie(req, res);
+      return res.status(401).json({ success: false, authRequired: true, error: "Authentication required." });
+    }
+
+    const created = await derivAuthVault.createDemoAccount(session);
+    if (!created.ok) {
+      if (created.authRequired) clearDerivSessionCookie(req, res);
+      return res.status(created.status || 400).json({
+        success: false,
+        authRequired: created.authRequired,
+        error: created.error,
+      });
+    }
+
+    return res.json({
+      success: true,
+      ...derivAuthVault.toPublicView(session, false),
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: redactSecrets(err?.message || "Failed creating demo account."),
+    });
+  }
+});
+
+app.post("/api/deriv/accounts/select", (req, res) => {
+  const sid = getRequestDerivSid(req);
+  const { session, expired } = derivAuthVault.getSession(sid);
+  if (!session) {
+    if (expired) clearDerivSessionCookie(req, res);
+    return res.status(401).json({ success: false, authRequired: true, error: "Authentication required." });
+  }
+
+  const accountId = typeof req.body?.accountId === "string" ? req.body.accountId.trim() : "";
+  if (!accountId) {
+    return res.status(400).json({ success: false, error: "accountId is required." });
+  }
+
+  const sel = derivAuthVault.selectAccount(session, accountId);
+  if (!sel.ok) {
+    return res.status(sel.status || 404).json({ success: false, error: sel.error });
+  }
+
+  return res.json({
+    success: true,
+    ...derivAuthVault.toPublicView(session, false),
+  });
+});
+
+app.post("/api/deriv/accounts/:accountId/reset-demo-balance", async (req, res) => {
+  try {
+    const sid = getRequestDerivSid(req);
+    const { session, expired } = derivAuthVault.getSession(sid);
+    if (!session) {
+      if (expired) clearDerivSessionCookie(req, res);
+      return res.status(401).json({ success: false, authRequired: true, error: "Authentication required." });
+    }
+
+    const result = await derivAuthVault.resetDemoBalance(session, req.params.accountId);
+    if (!result.ok) {
+      if (result.authRequired) clearDerivSessionCookie(req, res);
+      return res.status(result.status || 400).json({
+        success: false,
+        authRequired: result.authRequired,
+        error: result.error,
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: result.data,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: redactSecrets(err?.message || "Failed resetting demo balance."),
+    });
+  }
+});
+
+app.post("/api/deriv/accounts/:accountId/otp", async (req, res) => {
+  try {
+    const sid = getRequestDerivSid(req);
+    const { session, expired } = derivAuthVault.getSession(sid);
+    if (!session) {
+      if (expired) clearDerivSessionCookie(req, res);
+      return res.status(401).json({
+        success: false,
+        authRequired: true,
+        expired,
+        error: "Authentication required.",
+      });
+    }
+
+    const otpRes = await derivAuthVault.requestAccountOtpWsUrl(session, req.params.accountId);
+    if (!otpRes.ok) {
+      if (otpRes.authRequired) clearDerivSessionCookie(req, res);
+      return res.status(otpRes.status || 502).json({
+        success: false,
+        authRequired: otpRes.authRequired,
+        error: otpRes.error,
+      });
+    }
+
+    return res.json({
+      success: true,
+      wsUrl: otpRes.wsUrl,
+      accountId: otpRes.accountId,
+      expiresInSeconds: 120,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: redactSecrets(err?.message || "Failed requesting OTP WebSocket URL."),
+    });
+  }
 });
 
 app.get(
@@ -1670,111 +1965,103 @@ app.get(
 </head>
 <body>
   <div class="card">
-    <div class="badge">Deriv OAuth 2.0</div>
+    <div class="badge">Deriv OAuth 2.0 PKCE</div>
     <div id="spinner" class="spinner"></div>
     <div id="success-icon" class="success-icon">✓</div>
-    <h2 id="title">Authenticating Accounts...</h2>
-    <p id="desc">Securely transferring authorized trading tokens to Deriv AI Terminal.</p>
+    <h2 id="title">Completing OAuth 2.0 Handshake...</h2>
+    <p id="desc">Verifying authorization code &amp; establishing secure server session.</p>
     <div id="subtext" class="subtext">This window will close automatically.</div>
   </div>
 
   <script>
     (function() {
-      try {
-        var searchParams = new URLSearchParams(window.location.search);
-        var rawHash = window.location.hash.startsWith('#') ? window.location.hash.substring(1) : window.location.hash;
-        var hashParams = new URLSearchParams(rawHash);
-
-        var params = new URLSearchParams();
-        searchParams.forEach(function(v, k) { params.set(k, v); });
-        hashParams.forEach(function(v, k) { params.set(k, v); });
-
-        var accounts = [];
-        var i = 1;
-        while (params.has('acct' + i) || params.has('token' + i)) {
-          var acct = params.get('acct' + i);
-          var token = params.get('token' + i);
-          var cur = params.get('cur' + i) || 'USD';
-          if (acct && token) {
-            accounts.push({
-              account: acct,
-              token: token,
-              currency: cur,
-              isVirtual: acct.startsWith('VRTC') || acct.indexOf('VR') !== -1
-            });
-          }
-          i++;
+      var targetOrigin = window.location.origin;
+      function notifyOpener(message) {
+        if (window.opener && typeof window.opener.postMessage === 'function') {
+          window.opener.postMessage(message, targetOrigin);
         }
+      }
 
-        var primaryToken = params.get('token1') || params.get('token') || (accounts.length > 0 ? accounts[0].token : null);
-        var primaryAccount = params.get('acct1') || params.get('acct') || (accounts.length > 0 ? accounts[0].account : null);
-        var primaryCurrency = params.get('cur1') || (accounts.length > 0 ? accounts[0].currency : 'USD');
-        var error = params.get('error') || params.get('error_message') || params.get('error_code');
+      try {
+        var params = new URLSearchParams(window.location.search);
+        var code = params.get('code');
+        var state = params.get('state');
+        var error = params.get('error') || params.get('error_description') || params.get('error_message');
+
+        // Scrub sensitive query parameters from address bar immediately
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
 
         if (error) {
           document.getElementById('spinner').style.display = 'none';
           document.getElementById('title').textContent = 'Authentication Failed';
-          document.getElementById('desc').textContent = 'Deriv returned: ' + error;
-          if (window.opener) {
-            window.opener.postMessage({
-              type: 'DERIV_OAUTH_ERROR',
-              error: error
-            }, '*');
-          }
+          document.getElementById('desc').textContent = 'Deriv returned an error during authorization.';
+          notifyOpener({ type: 'DERIV_OAUTH_ERROR', error: String(error) });
           return;
         }
 
-        if (accounts.length > 0 || primaryToken) {
+        if (!code || !state) {
           document.getElementById('spinner').style.display = 'none';
-          var sIcon = document.getElementById('success-icon');
-          if (sIcon) { sIcon.style.display = 'flex'; }
-          document.getElementById('title').textContent = 'Connected Successfully!';
-          document.getElementById('desc').textContent = 'Linked ' + (accounts.length || 1) + ' Deriv account(s) • ' + (primaryAccount || 'CR_USER');
-
-          var payload = {
-            type: 'DERIV_OAUTH_SUCCESS',
-            accounts: accounts,
-            primaryToken: primaryToken,
-            primaryAccount: primaryAccount,
-            currency: primaryCurrency,
-            timestamp: Date.now()
-          };
-
-          // Persist direct session keys + pending OAuth payload in localStorage
-          try {
-            if (primaryToken) {
-              localStorage.setItem('deriv_api_token', primaryToken);
-            }
-            if (primaryAccount) {
-              localStorage.setItem('deriv_active_loginid', primaryAccount);
-            }
-            if (accounts.length > 0) {
-              localStorage.setItem('deriv_linked_accounts', JSON.stringify(accounts));
-            }
-            localStorage.setItem('deriv_oauth_pending_success', JSON.stringify(payload));
-          } catch(e) {}
-
-          if (window.opener) {
-            window.opener.postMessage(payload, '*');
-            setTimeout(function() {
-              window.close();
-            }, 600);
-          } else {
-            // If opened directly without opener, redirect back to root after short pause
-            setTimeout(function() {
-              window.location.href = '/';
-            }, 600);
-          }
-        } else {
-          document.getElementById('spinner').style.display = 'none';
-          document.getElementById('title').textContent = 'Awaiting Authorization';
-          document.getElementById('desc').textContent = 'No account tokens found in response callback URL.';
+          document.getElementById('title').textContent = 'Invalid OAuth Callback';
+          document.getElementById('desc').textContent = 'Missing PKCE authorization code or cryptographic state.';
+          notifyOpener({ type: 'DERIV_OAUTH_ERROR', error: 'Missing PKCE code or state.' });
+          return;
         }
+
+        var savedAccountId = null;
+        try {
+          savedAccountId = localStorage.getItem('deriv_active_loginid');
+        } catch (e) {}
+
+        fetch('/api/auth/deriv/exchange', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: code, state: state, savedAccountId: savedAccountId })
+        })
+          .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+          .then(function(res) {
+            if (!res.ok || !res.data || !res.data.success) {
+              throw new Error((res.data && res.data.error) || 'OAuth code exchange failed.');
+            }
+            document.getElementById('spinner').style.display = 'none';
+            var sIcon = document.getElementById('success-icon');
+            if (sIcon) { sIcon.style.display = 'flex'; }
+            var selectedId = res.data.selectedAccountId || '';
+            var count = Array.isArray(res.data.accounts) ? res.data.accounts.length : 0;
+            document.getElementById('title').textContent = 'Connected Successfully!';
+            document.getElementById('desc').textContent = 'Linked ' + count + ' Deriv account(s)' + (selectedId ? ' • ' + selectedId : '');
+
+            notifyOpener({
+              type: 'DERIV_OAUTH_SUCCESS',
+              authenticated: true,
+              authMethod: res.data.authMethod,
+              selectedAccountId: res.data.selectedAccountId,
+              selectedAccount: res.data.selectedAccount,
+              accounts: res.data.accounts,
+              timestamp: Date.now()
+            });
+
+            if (window.opener) {
+              setTimeout(function() { window.close(); }, 500);
+            } else {
+              setTimeout(function() { window.location.href = '/'; }, 500);
+            }
+          })
+          .catch(function(err) {
+            document.getElementById('spinner').style.display = 'none';
+            document.getElementById('title').textContent = 'Exchange Failed';
+            document.getElementById('desc').textContent = err && err.message ? err.message : 'Unable to complete OAuth PKCE login.';
+            notifyOpener({
+              type: 'DERIV_OAUTH_ERROR',
+              error: err && err.message ? err.message : 'OAuth exchange failed.'
+            });
+          });
       } catch (err) {
-        console.error('Deriv callback error:', err);
         document.getElementById('spinner').style.display = 'none';
         document.getElementById('title').textContent = 'Callback Error';
-        document.getElementById('desc').textContent = err.message || 'Failed to process authorization tokens.';
+        document.getElementById('desc').textContent = err && err.message ? err.message : 'Failed to process authorization callback.';
       }
     })();
   </script>
@@ -1823,6 +2110,7 @@ async function startServer() {
           clientPort: isCloudEnv || isHttps ? 443 : PORT,
         };
 
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -1855,6 +2143,7 @@ async function startServer() {
       });
     } else {
       console.warn("⚠️ Production mode active but dist/index.html not found. Serving via Vite middlewares fallback.");
+      const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa",

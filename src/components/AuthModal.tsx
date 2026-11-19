@@ -67,115 +67,89 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
   const linkedAccounts = derivWS.getLinkedAccounts();
   const isCurrentlyAuthorized = currentDiagnostics.hasToken && currentDiagnostics.authorized;
 
-  // Check for direct redirect callback parameters in current URL
+  // Handle OAuth 2.0 PKCE code/state callback parameters if redirected directly to root URL
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    try {
-      const urlParams = new URLSearchParams(window.location.search);
-      const hashParams = new URLSearchParams(
-        window.location.hash.startsWith('#') ? window.location.hash.substring(1) : window.location.hash
-      );
-      const params = new URLSearchParams();
-      urlParams.forEach((v, k) => params.set(k, v));
-      hashParams.forEach((v, k) => params.set(k, v));
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    const state = urlParams.get('state');
+    if (!code || !state) return;
 
-      if (params.has('token1') || params.has('acct1') || params.has('token')) {
-        const accounts: DerivLinkedAccount[] = [];
-        let i = 1;
-        while (params.has('acct' + i) && params.has('token' + i)) {
-          accounts.push({
-            account: params.get('acct' + i)!,
-            token: params.get('token' + i)!,
-            currency: params.get('cur' + i) || 'USD',
-            isVirtual: params.get('acct' + i)!.startsWith('VRTC'),
-          });
-          i++;
+    // Strip code & state from URL immediately
+    window.history.replaceState({}, document.title, window.location.pathname);
+
+    (async () => {
+      try {
+        setLoading(true);
+        const savedAccountId = localStorage.getItem('deriv_active_loginid');
+        const res = await fetch('/api/auth/deriv/exchange', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code, state, savedAccountId }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          setError(data.error || 'OAuth PKCE token exchange failed.');
+          sound.play('alert');
+          return;
         }
-        const token = params.get('token1') || params.get('token') || (accounts[0]?.token);
-        const acct = params.get('acct1') || params.get('acct') || (accounts[0]?.account || 'CR_USER');
-        if (token) {
-          const cleanAppId = appIdInput.trim() || '33zsnNh6YJ2HWm30oZZJR';
-          localStorage.setItem('deriv_api_token', token);
-          localStorage.setItem('deriv_active_loginid', acct);
-          localStorage.setItem('deriv_app_id', cleanAppId);
-          if (accounts.length > 0) {
-            localStorage.setItem('deriv_linked_accounts', JSON.stringify(accounts));
-            derivWS.setLinkedAccounts(accounts);
-          }
-          derivWS.setCredentials(token, cleanAppId);
-          derivWS.send({ authorize: token });
-          signInWithDerivOAuth(accounts, token, acct, cleanAppId);
-          sound.play('win');
-          window.history.replaceState({}, document.title, window.location.pathname);
-        }
+
+        const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
+        derivWS.setAppAndRedirect(cleanAppId, redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL);
+        await derivWS.completeServerSession(data);
+        await signInWithDerivOAuth(
+          data.accounts || [],
+          '',
+          data.selectedAccountId || data.accounts?.[0]?.account || '',
+          cleanAppId
+        );
+        sound.play('win');
+        setSuccessMsg(
+          `Connected ${data.selectedAccountId || 'Deriv Account'} (${data.accounts?.length || 1} account(s) linked)`
+        );
+      } catch (e: any) {
+        setError(e?.message || 'OAuth exchange error.');
+      } finally {
+        setLoading(false);
       }
-    } catch (e) {
-      console.warn('URL OAuth check notice:', e);
-    }
-  }, [appIdInput, signInWithDerivOAuth]);
+    })();
+  }, [appIdInput, redirectUrlInput, signInWithDerivOAuth]);
 
-  // Listen for Deriv OAuth postMessage callbacks from popup
+  // Listen strictly for same-origin Deriv OAuth postMessage callbacks from popup
   useEffect(() => {
     if (!isOpen) return;
 
     const handleOAuthMessage = async (event: MessageEvent) => {
-      // Validate origin if available
-      const origin = event.origin;
-      if (
-        origin &&
-        !origin.endsWith('.run.app') &&
-        !origin.endsWith('.ai.studio') &&
-        !origin.includes('deriv-ai-trader-pro.ai.studio') &&
-        !origin.includes('localhost') &&
-        !origin.includes('127.0.0.1') &&
-        !origin.includes('deriv.com')
-      ) {
-        // Skip unknown origins
+      if (event.origin !== window.location.origin) {
         return;
       }
 
       if (event.data?.type === 'DERIV_OAUTH_SUCCESS') {
-        const { accounts, token, primaryToken, account, primaryAccount } = event.data;
-        const resolvedToken = primaryToken || token || (accounts?.[0]?.token ?? '');
-        const resolvedAccount = primaryAccount || account || (accounts?.[0]?.account ?? 'CR_USER');
+        const { accounts, selectedAccountId, selectedAccount, authMethod, expiresAt } = event.data;
+        const resolvedAccount =
+          selectedAccountId || selectedAccount?.account || accounts?.[0]?.account || '';
         setIsOAuthWaiting(false);
         setLoading(true);
 
         try {
           const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
           const cleanRedirect = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
+          derivWS.setAppAndRedirect(cleanAppId, cleanRedirect);
 
-          // 1. Sync accounts to WebSocket engine and localStorage
-          if (Array.isArray(accounts) && accounts.length > 0) {
-            derivWS.setLinkedAccounts(accounts);
-            try {
-              localStorage.setItem('deriv_linked_accounts', JSON.stringify(accounts));
-            } catch (e) {}
-          }
+          await derivWS.completeServerSession({
+            authMethod,
+            appId: cleanAppId,
+            accounts: accounts || [],
+            selectedAccountId: resolvedAccount,
+            selectedAccount,
+          });
 
-          // 2. Authorize token in WebSocket and securely save to localStorage
-          if (resolvedToken) {
-            try {
-              localStorage.setItem('deriv_api_token', resolvedToken);
-              localStorage.setItem('deriv_active_loginid', resolvedAccount);
-              localStorage.setItem('deriv_app_id', cleanAppId);
-              localStorage.setItem('deriv_redirect_url', cleanRedirect);
-            } catch (e) {}
-            derivWS.setCredentials(resolvedToken, cleanAppId, cleanRedirect);
-            derivWS.send({ authorize: resolvedToken });
-          }
-
-          // 3. Save into AuthContext (application state & Firestore/local profile)
-          await signInWithDerivOAuth(
-            accounts || [],
-            resolvedToken,
-            resolvedAccount,
-            cleanAppId
-          );
+          await signInWithDerivOAuth(accounts || [], '', resolvedAccount, cleanAppId);
 
           sound.play('win');
           setSuccessMsg(
-            `Successfully connected ${primaryAccount || 'Deriv Account'}! (${accounts?.length || 1} account(s) linked)`
+            `Successfully connected ${resolvedAccount || 'Deriv Account'}! (${accounts?.length || 1} account(s) linked)`
           );
 
           setTimeout(() => {
@@ -197,51 +171,36 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
     window.addEventListener('message', handleOAuthMessage);
     return () => window.removeEventListener('message', handleOAuthMessage);
-  }, [isOpen, appIdInput, signInWithDerivOAuth, onClose]);
+  }, [isOpen, appIdInput, redirectUrlInput, signInWithDerivOAuth, onClose]);
 
   if (!isOpen) return null;
 
-  // Launch Deriv OAuth Popup
+  // Launch Deriv OAuth 2.0 PKCE Popup
   const handleLaunchDerivOAuth = async () => {
     setError(null);
     setSuccessMsg(null);
-    const cleanAppId = appIdInput.trim() || '33zsnNh6YJ2HWm30oZZJR';
+    const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
 
     try {
       setIsOAuthWaiting(true);
       sound.play('click');
 
-      // 1. Attempt to fetch authorize URL from server API
       const rawRedirect = redirectUrlInput.trim() || DEFAULT_DERIV_REDIRECT_URL;
-      derivWS.setRedirectUrl(rawRedirect);
-      let oauthUrl = '';
-      try {
-        const res = await fetch(
-          `/api/auth/deriv/url?app_id=${encodeURIComponent(cleanAppId)}&redirect_uri=${encodeURIComponent(rawRedirect)}`
-        );
-        if (res.ok) {
-          const data = await res.json();
-          oauthUrl = data.url;
-        }
-      } catch (err) {
-        console.warn('Fallback to direct client OAuth URL:', err);
-      }
+      derivWS.setAppAndRedirect(cleanAppId, rawRedirect);
 
-      // If server route didn't return, build directly using configured production redirect URL
+      const res = await fetch(
+        `/api/auth/deriv/url?app_id=${encodeURIComponent(cleanAppId)}&redirect_uri=${encodeURIComponent(rawRedirect)}`,
+        { credentials: 'include' }
+      );
+      if (!res.ok) {
+        throw new Error('Failed generating server PKCE authorization URL.');
+      }
+      const data = await res.json();
+      const oauthUrl = data.url;
       if (!oauthUrl) {
-        const redirectUri = rawRedirect.includes('/auth/')
-          ? rawRedirect
-          : `${rawRedirect.replace(/\/$/, '')}/auth/deriv/callback`;
-        const params = new URLSearchParams({
-          app_id: cleanAppId,
-          l: 'en',
-          brand: 'deriv',
-          redirect_uri: redirectUri,
-        });
-        oauthUrl = `https://oauth.deriv.com/oauth2/authorize?${params.toString()}`;
+        throw new Error('Missing OAuth PKCE authorization URL from server.');
       }
 
-      // 2. Open provider's authorize URL directly in popup
       const popupWidth = 520;
       const popupHeight = 720;
       const left = window.screenX + (window.outerWidth - popupWidth) / 2;
@@ -255,12 +214,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
       if (!popup) {
         setIsOAuthWaiting(false);
-        setError('Popup was blocked by your browser. Please allow popups or use manual token paste below.');
+        setError('Popup was blocked by your browser. Please allow popups or use PAT / API token import below.');
         setShowManualPaste(true);
         return;
       }
 
-      // Monitor popup closure in case user closes it before authenticating
       const timer = setInterval(() => {
         if (popup.closed) {
           clearInterval(timer);
@@ -274,57 +232,95 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  // Parse manual callback URL or pasted token in case popup was blocked
+  // Manual PAT or OAuth code callback fallback (no raw token storage in localStorage)
   const handleParseManualCallback = async () => {
-    if (!manualCallbackInput.trim()) return;
+    const rawInput = manualCallbackInput.trim();
+    if (!rawInput) return;
     setError(null);
+    setLoading(true);
     try {
-      let raw = manualCallbackInput.trim();
-      if (raw.includes('#')) raw = raw.split('#')[1];
-      else if (raw.includes('?')) raw = raw.split('?')[1];
+      const cleanAppId = appIdInput.trim() || DEFAULT_DERIV_APP_ID;
+      const savedAccountId = localStorage.getItem('deriv_active_loginid');
 
-      const searchParams = new URLSearchParams(raw);
-      const accounts: DerivLinkedAccount[] = [];
-      let i = 1;
-      while (searchParams.has('acct' + i) && searchParams.has('token' + i)) {
-        accounts.push({
-          account: searchParams.get('acct' + i)!,
-          token: searchParams.get('token' + i)!,
-          currency: searchParams.get('cur' + i) || 'USD',
-          isVirtual: searchParams.get('acct' + i)!.startsWith('VRTC'),
+      if (rawInput.includes('code=') && rawInput.includes('state=')) {
+        const queryPart = rawInput.includes('?') ? rawInput.split('?')[1] : rawInput;
+        const params = new URLSearchParams(queryPart);
+        const code = params.get('code') || '';
+        const state = params.get('state') || '';
+        const exRes = await fetch('/api/auth/deriv/exchange', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code, state, savedAccountId }),
         });
-        i++;
+        const exData = await exRes.json();
+        if (!exRes.ok || !exData.success) {
+          throw new Error(exData.error || 'OAuth code exchange failed.');
+        }
+        await derivWS.completeServerSession(exData);
+        await signInWithDerivOAuth(exData.accounts || [], '', exData.selectedAccountId || '', cleanAppId);
+        sound.play('win');
+        setSuccessMsg(`Imported ${exData.selectedAccountId || 'Deriv account'} securely!`);
+        setTimeout(() => {
+          setSuccessMsg(null);
+          onClose();
+        }, 1200);
+        return;
       }
 
-      const singleToken =
-        searchParams.get('token1') ||
-        searchParams.get('token') ||
-        (accounts[0] ? accounts[0].token : raw);
-      const singleAcct =
-        searchParams.get('acct1') ||
-        searchParams.get('acct') ||
-        (accounts[0] ? accounts[0].account : 'CR_ACCOUNT');
+      // Treat as PAT or WS v3 API Token via server vault first
+      const patRes = await fetch('/api/auth/deriv/pat', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: rawInput, appId: cleanAppId, savedAccountId }),
+      });
+      const patData = await patRes.json();
 
-      if (!singleToken) {
-        throw new Error('No valid token found in pasted string. Format: ?acct1=...&token1=...');
+      if (patRes.ok && patData.success) {
+        await derivWS.completeServerSession(patData);
+        await signInWithDerivOAuth(patData.accounts || [], '', patData.selectedAccountId || '', cleanAppId);
+        sound.play('win');
+        setSuccessMsg(`Authenticated ${patData.selectedAccountId || 'Deriv account'} via server vault!`);
+        setTimeout(() => {
+          setSuccessMsg(null);
+          onClose();
+        }, 1200);
+        return;
       }
 
-      const cleanAppId = appIdInput.trim() || '33zsnNh6YJ2HWm30oZZJR';
-      if (accounts.length > 0) {
-        derivWS.setLinkedAccounts(accounts);
+      if (patData.legacyCandidate) {
+        const testRes = await derivWS.testToken(rawInput, cleanAppId);
+        if (testRes.success && testRes.authorize) {
+          derivWS.connectWithLegacyToken(rawInput, cleanAppId);
+          await signInWithDerivOAuth(
+            [
+              {
+                account: testRes.authorize.loginid,
+                currency: testRes.authorize.currency || 'USD',
+                isVirtual: Boolean(testRes.authorize.is_virtual),
+                balance: Number(testRes.authorize.balance ?? 0),
+              },
+            ],
+            '',
+            testRes.authorize.loginid,
+            cleanAppId
+          );
+          sound.play('win');
+          setSuccessMsg(`Connected legacy session for ${testRes.authorize.loginid} (memory-only)!`);
+          setTimeout(() => {
+            setSuccessMsg(null);
+            onClose();
+          }, 1200);
+          return;
+        }
       }
-      derivWS.setCredentials(singleToken, cleanAppId);
-      derivWS.send({ authorize: singleToken });
 
-      await signInWithDerivOAuth(accounts, singleToken, singleAcct, cleanAppId);
-      sound.play('win');
-      setSuccessMsg(`Imported ${singleAcct} successfully!`);
-      setTimeout(() => {
-        setSuccessMsg(null);
-        onClose();
-      }, 1200);
+      throw new Error(patData.error || 'Token authentication failed.');
     } catch (err: any) {
-      setError(err?.message || 'Failed to parse manual callback');
+      setError(err?.message || 'Failed to authenticate provided credentials.');
+    } finally {
+      setLoading(false);
     }
   };
 
