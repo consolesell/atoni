@@ -6,6 +6,9 @@ import {
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS, AgentVoicePersonaId } from '../lib/voiceEngine';
 import { derivWS } from '../lib/derivWS';
+import { configurationManager, DEFAULT_EARLY_EXIT_POLICY } from '../lib/configurationManager';
+import { firebaseSyncManager } from '../lib/firebaseSyncManager';
+import { auth } from '../lib/firebase';
 
 const STORAGE_KEY = 'terminal_settings_v4';
 
@@ -45,6 +48,7 @@ function loadStoredSettings(): TerminalSettings {
         audio: { ...DEFAULT_TERMINAL_SETTINGS.audio, ...(parsed.audio || {}) },
         connection: { ...DEFAULT_TERMINAL_SETTINGS.connection, ...(parsed.connection || {}) },
         interface: { ...DEFAULT_TERMINAL_SETTINGS.interface, ...(parsed.interface || {}) },
+        earlyExit: { ...DEFAULT_EARLY_EXIT_POLICY, ...(parsed.earlyExit || {}) },
       };
     }
   } catch (e) {
@@ -85,6 +89,26 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
         settings.connection.derivAppId || currentCreds.appId,
         settings.connection.derivRedirectUrl || currentCreds.redirectUrl
       );
+    }
+
+    // 3. Synchronize Unified ConfigurationManager & Firebase Settings
+    const unified = configurationManager.syncFromTerminalSettings(settings);
+    const currentUid = auth.currentUser?.uid;
+    if (currentUid) {
+      void firebaseSyncManager.enqueueSync({
+        uid: currentUid,
+        collectionName: 'settings',
+        docId: 'terminal_settings',
+        data: {
+          executionMode: unified.executionMode,
+          activeStrategyVersion: unified.activeStrategyVersion,
+          risk: unified.risk,
+          earlyExit: unified.earlyExit,
+          trailingStop: unified.trailingStop,
+        },
+        version: unified.revision,
+        updatedAt: unified.updatedAt,
+      }).catch(() => {});
     }
   }, [settings]);
 

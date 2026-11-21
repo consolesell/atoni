@@ -12,20 +12,28 @@ interface AgentEvolutionModalProps {
   isEvolving: boolean;
 }
 
-// Generate realistic session equity points for an agent
+// Compute deterministic session equity trajectory from verified agent wins/trades
 function getAgentEquityPoints(agent: TradingAgent) {
   const points = [0];
-  const wins = agent.wins || 4;
-  const losses = Math.max(0, (agent.trades || 6) - wins);
-  const total = Math.max(5, wins + losses);
+  const trades = Math.max(1, agent.trades || 0);
+  const wins = Math.min(trades, Math.max(0, agent.wins || 0));
+  const losses = Math.max(0, trades - wins);
+  if (agent.trades === 0) {
+    return [0, 0];
+  }
   let currentPnL = 0;
-
-  for (let i = 1; i <= total; i++) {
-    // Determine step outcome proportionally to win rate
-    const isWin = Math.random() < (agent.winRate || 0.65);
-    const delta = isWin ? 3.5 + Math.random() * 2 : -(2.5 + Math.random() * 1.5);
-    currentPnL = Math.round((currentPnL + delta) * 10) / 10;
-    points.push(currentPnL);
+  let wRem = wins;
+  let lRem = losses;
+  for (let i = 1; i <= trades; i++) {
+    const pickWin = wRem > 0 && (lRem === 0 || (i * wins) % trades < wins);
+    if (pickWin) {
+      wRem -= 1;
+      currentPnL += 0.95;
+    } else {
+      lRem -= 1;
+      currentPnL -= 1.0;
+    }
+    points.push(Number(currentPnL.toFixed(2)));
   }
   return points;
 }

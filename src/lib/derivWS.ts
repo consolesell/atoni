@@ -5,7 +5,7 @@ import {
   DerivLinkedAccount,
 } from '../types/trading';
 import { balanceManager as globalBalanceManager, BalanceManager } from './balanceManager';
-import { selectDerivAccount } from './derivAccounts';
+import { isDemoAccount, selectDerivAccount } from './derivAccounts';
 import { portfolioReconciler as globalReconciler, PortfolioReconciler } from './portfolioReconciler';
 import { TradeProposalQuote } from './riskEngine';
 
@@ -170,6 +170,10 @@ export class DerivWebSocketClient {
     return this.selectedAccount;
   }
 
+  public getSelectedAccountId(): string | null {
+    return this.selectedAccount?.account || this.selectedAccount?.account_id || null;
+  }
+
   public getConfirmedAccountId(): string | null {
     return this.confirmedAccountId;
   }
@@ -180,6 +184,39 @@ export class DerivWebSocketClient {
 
   public isTokenExpired(): boolean {
     return this.sessionExpired;
+  }
+
+  public areRequiredSubscriptionsActive(): boolean {
+    return this.getSubscriptionStatus().requiredSubscriptionsActive;
+  }
+
+  public getAuthSession(): {
+    isAuthorized: boolean;
+    loginid?: string;
+    accountId?: string;
+    currency?: string;
+    expiresAt?: number;
+    accountType?: 'demo' | 'real';
+  } {
+    const loginid = this.confirmedAccountId || this.lastAuthorizeResponse?.loginid || undefined;
+    const accountId =
+      this.selectedAccount?.account_id || this.selectedAccount?.account || loginid || undefined;
+    const isVirt =
+      this.selectedAccount?.isVirtual ??
+      (this.lastAuthorizeResponse?.is_virtual !== undefined
+        ? Boolean(this.lastAuthorizeResponse.is_virtual)
+        : loginid
+        ? isDemoAccount({ account: loginid })
+        : true);
+
+    return {
+      isAuthorized: this.isAuthorized(),
+      loginid,
+      accountId,
+      currency: this.selectedAccount?.currency || this.lastAuthorizeResponse?.currency || 'USD',
+      expiresAt: undefined,
+      accountType: isVirt ? 'demo' : 'real',
+    };
   }
 
   private setConnectionState(next: ConnectionState, sessionGeneration?: number): void {
@@ -2001,6 +2038,47 @@ export class DerivWebSocketClient {
       sell: Number(contractId),
       price,
     });
+  }
+
+  public async sellContractAsync(
+    contractId: number | string,
+    price: number = 0
+  ): Promise<{ sold_for: number; transaction_id?: number | string; balance_after?: number }> {
+    const normalizedId =
+      typeof contractId === 'number'
+        ? contractId
+        : /^\d+$/.test(String(contractId).trim())
+        ? Number(contractId)
+        : contractId;
+
+    const res = await this.request<any>(
+      {
+        sell: normalizedId,
+        price,
+      },
+      { category: 'trading' }
+    );
+
+    const sellData = res?.sell;
+    if (!sellData || typeof sellData.sold_for !== 'number') {
+      throw new Error(`Deriv sell response invalid for contract #${contractId}.`);
+    }
+
+    if (typeof sellData.balance_after === 'number') {
+      this.balMgr.applyLiveBalanceUpdate({
+        amount: sellData.balance_after,
+        login_id: this.confirmedAccountId,
+        source: 'SETTLEMENT',
+        sessionGeneration: this.sessionGeneration,
+        connection_id: res.connection_id ?? this.activeConnectionId,
+      });
+    }
+
+    return {
+      sold_for: Number(sellData.sold_for),
+      transaction_id: sellData.transaction_id,
+      balance_after: typeof sellData.balance_after === 'number' ? sellData.balance_after : undefined,
+    };
   }
 
   private scheduleReconnect(): void {

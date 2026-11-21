@@ -1,3 +1,5 @@
+import { EarlyExitPolicyConfig, ExecutionModeSetting } from './trading';
+
 export interface GeneralSettings {
   defaultStake: number; // default: 1.00
   defaultDuration: number; // default: 15
@@ -11,7 +13,12 @@ export interface RiskSettings {
   maxDailyLoss: number; // default: 50 ($)
   maxDailyTrades: number; // default: 100
   maxConsecutiveLosses: number; // default: 3
-  sizingMode: 'FIXED' | 'KELLY_HALF' | 'KELLY_QUARTER';
+  sizingMode: 'FIXED' | 'KELLY_HALF' | 'KELLY_QUARTER' | 'EQUITY_PERCENT';
+  maxStakePercent?: number; // default: 0.05
+  minStake?: number; // default: 0.35
+  maxOpenExposure?: number; // default: 25
+  maxConcurrentContracts?: number; // default: 4
+  maxSessionDrawdownPercent?: number; // default: 5.0
   virtualAnchorBalance: number; // default: 10.00 ($)
   autoReplenishThreshold: number; // default: 1.00 ($)
   strictDurationCompliance: boolean; // default: true
@@ -86,6 +93,8 @@ export interface TerminalSettings {
   general: GeneralSettings;
   risk: RiskSettings;
   trailingStop: TrailingStopSettings;
+  earlyExit?: EarlyExitPolicyConfig;
+  executionMode?: ExecutionModeSetting;
   indicators: IndicatorSettings;
   ai: AISettings;
   audio: AudioSettings;
@@ -109,6 +118,11 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
     maxDailyTrades: 100,
     maxConsecutiveLosses: 3,
     sizingMode: 'KELLY_HALF',
+    maxStakePercent: 0.05,
+    minStake: 0.35,
+    maxOpenExposure: 25.0,
+    maxConcurrentContracts: 4,
+    maxSessionDrawdownPercent: 5.0,
     virtualAnchorBalance: 10.0,
     autoReplenishThreshold: 1.0,
     strictDurationCompliance: true,
@@ -120,6 +134,24 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
     profitLockEnabled: true,
     profitLockThresholdPercent: 50,
     profitLockSecuredPercent: 50,
+  },
+  executionMode: 'SUPERVISED_AUTO',
+  earlyExit: {
+    enabled: true,
+    autoExecute: true,
+    profitTargetEnabled: true,
+    profitTargetPercent: 60,
+    profitProtectionEnabled: true,
+    profitLockTriggerPercent: 35,
+    profitProtectionDrawdownPercent: 40,
+    trailingStopEnabled: true,
+    reversalExitEnabled: true,
+    reversalConfidenceThreshold: 72,
+    signalDeteriorationEnabled: true,
+    maxLossExitEnabled: false,
+    maxLossPercent: 50,
+    timeDecayExitEnabled: false,
+    minRemainingSeconds: 20,
   },
   indicators: {
     rsiPeriod: 14,

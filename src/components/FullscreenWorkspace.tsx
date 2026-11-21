@@ -52,6 +52,8 @@ interface FullscreenWorkspaceProps {
   stake: number;
   onStakeChange: (s: number) => void;
   onExecuteTrade?: (direction: 'CALL' | 'PUT') => void;
+  onRotateSymbol?: (symbol: string) => void;
+  onAdjustStake?: (stake: number, mode?: string) => void;
   isExecuting?: boolean;
   currency?: string;
   balance?: number;
@@ -78,6 +80,8 @@ export const FullscreenWorkspace: React.FC<FullscreenWorkspaceProps> = ({
   stake,
   onStakeChange,
   onExecuteTrade,
+  onRotateSymbol,
+  onAdjustStake,
   isExecuting = false,
   currency = 'USD',
   balance = 10000,
@@ -329,6 +333,9 @@ export const FullscreenWorkspace: React.FC<FullscreenWorkspaceProps> = ({
             profitFactor={coreRiskMetrics?.profitFactor ?? 1.85}
             currentStake={coreRiskMetrics?.recommendedKellyStake ?? stake}
             balance={balance}
+            onExecuteTrade={onExecuteTrade}
+            onRotateSymbol={onRotateSymbol}
+            onAdjustStake={onAdjustStake}
           />
         </div>
       </div>

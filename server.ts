@@ -583,6 +583,9 @@ function calculateAlgorithmicFallbackPrediction(body: any) {
 app.post("/api/ai/predict", async (req, res) => {
   const {
     symbol = "1HZ10V",
+    granularity = 60,
+    strategyVersion = "v4.1.0-baseline",
+    predictionContext,
     currentPrice,
     decision,
     compositeSignal,
@@ -592,11 +595,17 @@ app.post("/api/ai/predict", async (req, res) => {
     activeAgent,
   } = req.body;
 
-  const cacheKey = `predict_${symbol}`;
+  const cacheKey = `predict_${symbol}_${granularity}_${strategyVersion}`;
   const cached = predictionCache.get(cacheKey);
   const now = Date.now();
   if (cached && now - cached.timestamp < 30000) {
-    return res.json({ ...cached.data, cached: true });
+    return res.json({
+      ...cached.data,
+      context: predictionContext
+        ? { ...predictionContext, cached: true }
+        : cached.data?.context,
+      cached: true,
+    });
   }
 
   // Sanitize indicators to prevent any cross-symbol moving average disparity
@@ -695,12 +704,20 @@ Provide your response strictly complying with the specified JSON schema. Determi
       success: true,
       parsed_ok: true,
       ...parsed,
+      context: predictionContext
+        ? { ...predictionContext, responseTimestamp: Date.now() }
+        : undefined,
       timestamp: new Date().toISOString(),
     };
     predictionCache.set(cacheKey, { data: result, timestamp: now });
     res.json(result);
   } catch (err: any) {
-    const fallbackResponse = calculateAlgorithmicFallbackPrediction(req.body);
+    const fallbackResponse = {
+      ...calculateAlgorithmicFallbackPrediction(req.body),
+      context: predictionContext
+        ? { ...predictionContext, responseTimestamp: Date.now(), provider: "algorithmic_fallback" }
+        : undefined,
+    };
     predictionCache.set(cacheKey, { data: fallbackResponse, timestamp: now });
     res.json(fallbackResponse);
   }
@@ -907,6 +924,46 @@ const tradingFunctionDeclarations = [
       required: ["ruleCategory", "proposedRule", "rationale"],
     },
   },
+  {
+    name: "change_timeframe",
+    description: "Switch chart and market analysis timeframe granularity in seconds (60, 120, 300, 900, 1800, 3600).",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        granularity: {
+          type: Type.INTEGER,
+          description: "Granularity in seconds (e.g. 60 for 1m, 300 for 5m, 900 for 15m).",
+        },
+      },
+      required: ["granularity"],
+    },
+  },
+  {
+    name: "inspect_open_contracts",
+    description: "Inspect currently open Deriv contracts, live P&L, and early-selling status.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {},
+    },
+  },
+  {
+    name: "request_early_selling_evaluation",
+    description: "Evaluate all open contracts against active early-selling profit-protection policies.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {},
+    },
+  },
+  {
+    name: "request_market_analysis",
+    description: "Run a fresh AI market prediction scan on the current symbol and timeframe.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        symbol: { type: Type.STRING, description: "Optional symbol override." },
+      },
+    },
+  },
 ];
 
 // AI Strategy Co-Pilot Chat
@@ -941,6 +998,9 @@ app.post("/api/ai/chat", async (req, res) => {
   * Bollinger Bands: ${JSON.stringify(context?.BollingerBands || context?.signals?.bb || "Standard 20,2")}
   * Market Regime: ${context?.regime || "EQUILIBRIUM"}
 - Latest AI Prediction: ${JSON.stringify(context?.aiPrediction || context?.aiPredictions || {})}
+- Active Strategy Version: ${context?.strategyVersion || "v4.1.0-baseline"}
+- Autonomous Lifecycle State: ${context?.autonomyLifecycle || (context?.botActive ? "ACTIVE" : "OFF")}
+- Compact Operational Memory: ${JSON.stringify(context?.memorySummary || [])}
 
 Conversation History:
 ${formattedHistory}
@@ -1067,6 +1127,9 @@ app.post("/api/ai/chat-stream", async (req, res) => {
 - RSI (14): ${rsi}
 - Market Regime: ${regime}
 - Risk Settings: ${JSON.stringify(context?.riskSettings || { maxDailyLoss: 30, maxConsecutiveLosses: 4 })}
+- Active Strategy Version: ${context?.strategyVersion || "v4.1.0-baseline"}
+- Autonomous Lifecycle State: ${context?.autonomyLifecycle || (context?.botActive ? "ACTIVE" : "OFF")}
+- Compact Operational Memory: ${JSON.stringify(context?.memorySummary || [])}
 
 Conversation History:
 ${formattedHistory}

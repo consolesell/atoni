@@ -10,6 +10,8 @@ import {
   CoreRiskMetrics,
   PositionSizingMode,
   TrailingStopConfig,
+  AutonomyLifecycleState,
+  ExecutionModeSetting,
 } from '../types/trading';
 import { TradeDurationUnit, SniperConfluenceResult } from '../types/sniper';
 import { AutonomyMode, AutonomyPreset, AppliedAutonomySettings } from '../types/autonomy';
@@ -80,6 +82,9 @@ export interface TerminalViewProps {
 
   // Autonomy
   autonomyMode: AutonomyMode;
+  lifecycleState?: AutonomyLifecycleState;
+  executionMode?: ExecutionModeSetting;
+  strategyVersion?: string;
   sbagentAutonomyGrant: boolean;
   autonomyPreset: AutonomyPreset;
   appliedSettings?: AppliedAutonomySettings | null;
@@ -137,6 +142,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   onToggleSniperTrigger,
 
   autonomyMode,
+  lifecycleState,
+  executionMode,
+  strategyVersion,
   sbagentAutonomyGrant,
   autonomyPreset,
   appliedSettings,
@@ -215,6 +223,9 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
         <div className="lg:col-span-4 flex flex-col gap-5">
           <AutonomyCard
             autonomyMode={autonomyMode}
+            lifecycleState={lifecycleState}
+            executionMode={executionMode}
+            strategyVersion={strategyVersion}
             sbagentAutonomyGrant={sbagentAutonomyGrant}
             autonomyPreset={autonomyPreset}
             appliedSettings={appliedSettings}

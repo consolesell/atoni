@@ -1,36 +1,219 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // User profile: only the authenticated user can read & write their own profile
+
+    // ===============================================================
+    // Eight-Pillars Hardened Security Helpers
+    // ===============================================================
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid is string && request.auth.uid.size() > 0;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_.:-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function noSecretFields(data) {
+      return !data.keys().hasAny([
+        'token',
+        'apiToken',
+        'derivApiToken',
+        'pat',
+        'secret',
+        'password',
+        'apiKey',
+        'geminiApiKey',
+        'oauthToken',
+        'accessToken',
+        'refreshToken',
+        'credentials',
+        'clientSecret',
+        'privateKey'
+      ]);
+    }
+
+    function isValidBoundedStr(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isValidNonNegOrFiniteNum(val) {
+      return val is number;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasOnly([
+        'uid',
+        'email',
+        'displayName',
+        'photoURL',
+        'accountMode',
+        'demoBalance',
+        'realBalance',
+        'derivAppId',
+        'derivAccounts',
+        'derivActiveAccount',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.uid == userId
+      && (!('accountMode' in data) || data.accountMode in ['DEMO', 'REAL'])
+      && (!('email' in data) || data.email == null || isValidBoundedStr(data.email, 256))
+      && (!('displayName' in data) || data.displayName == null || isValidBoundedStr(data.displayName, 128))
+      && (!('photoURL' in data) || data.photoURL == null || isValidBoundedStr(data.photoURL, 1024))
+      && (!('demoBalance' in data) || isValidNonNegOrFiniteNum(data.demoBalance))
+      && (!('realBalance' in data) || isValidNonNegOrFiniteNum(data.realBalance))
+      && (!('derivAppId' in data) || isValidBoundedStr(data.derivAppId, 64))
+      && (!('derivActiveAccount' in data) || isValidBoundedStr(data.derivActiveAccount, 64))
+      && (!('derivAccounts' in data) || (data.derivAccounts is list && data.derivAccounts.size() <= 32))
+      && (!('createdAt' in data) || isValidBoundedStr(data.createdAt, 64))
+      && (!('updatedAt' in data) || isValidBoundedStr(data.updatedAt, 64));
+    }
+
+    function isValidTopLevelTrade(data) {
+      return data.uid == request.auth.uid
+      && (!('id' in data) || isValidBoundedStr(data.id, 128))
+      && (!('contractId' in data) || data.contractId == null || isValidBoundedStr(data.contractId, 128))
+      && (!('symbol' in data) || isValidBoundedStr(data.symbol, 64))
+      && (!('decision' in data) || data.decision in ['BUY', 'SELL', 'CALL', 'PUT', 'HOLD'])
+      && (!('amount' in data) || (data.amount is number && data.amount >= 0 && data.amount <= 1000000))
+      && (!('entryPrice' in data) || data.entryPrice is number)
+      && (!('result' in data) || data.result in ['WIN', 'LOSS', 'PENDING']);
+    }
+
+    function isValidTradingNote(data) {
+      return data.uid == request.auth.uid
+      && (!('id' in data) || isValidBoundedStr(data.id, 128))
+      && (!('title' in data) || isValidBoundedStr(data.title, 300))
+      && (!('content' in data) || isValidBoundedStr(data.content, 50000))
+      && (!('color' in data) || isValidBoundedStr(data.color, 64))
+      && (!('isPinned' in data) || data.isPinned is bool)
+      && (!('tags' in data) || (data.tags is list && data.tags.size() <= 30));
+    }
+
+    function isValidOwnerScopedDoc(data, userId) {
+      return noSecretFields(data)
+      && (!('uid' in data) || data.uid == userId || data.uid == 'local')
+      && (!('version' in data) || (data.version is number && data.version >= 0))
+      && (!('updatedAt' in data) || (data.updatedAt is number || data.updatedAt is string));
+    }
+
+    // ===============================================================
+    // User Profiles & Owner-Scoped Synced Subcollections
+    // ===============================================================
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create, update: if isOwner(userId)
+        && isValidId(userId)
+        && noSecretFields(incoming())
+        && isValidUserProfile(incoming(), userId);
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /sessions/{sessionId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(sessionId) && isValidOwnerScopedDoc(incoming(), userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /tradingHistory/{tradeId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(tradeId) && isValidOwnerScopedDoc(incoming(), userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /strategyVersions/{versionId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(versionId) && isValidOwnerScopedDoc(incoming(), userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /agentMemory/{memoryId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(memoryId) && isValidOwnerScopedDoc(incoming(), userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /agentTasks/{taskId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(taskId) && isValidOwnerScopedDoc(incoming(), userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /executionEvents/{eventId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(eventId) && isValidOwnerScopedDoc(incoming(), userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /settings/{settingsId} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(settingsId) && isValidOwnerScopedDoc(incoming(), userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /chart_drawings/{symbol} {
+        allow get, list: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && isValidId(symbol)
+          && noSecretFields(incoming())
+          && (!('drawings' in incoming()) || (incoming().drawings is list && incoming().drawings.size() <= 500));
+        allow delete: if isOwner(userId);
+      }
     }
-    
-    // Trades collection: users can read & write their own trade history
+
+    // ===============================================================
+    // Owner-Scoped Top-Level Collections
+    // ===============================================================
     match /trades/{tradeId} {
-      allow read, write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid) && request.resource.data.uid == request.auth.uid;
+      allow get, list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(tradeId) && noSecretFields(incoming()) && isValidTopLevelTrade(incoming());
+      allow update: if isSignedIn() && isValidId(tradeId) && existing().uid == request.auth.uid && noSecretFields(incoming()) && isValidTopLevelTrade(incoming());
+      allow delete: if isSignedIn() && existing().uid == request.auth.uid;
     }
 
-    // Autonomous Subagent configurations
-    match /subagents/{subagentId} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid);
-    }
-
-    // Agent Evolution Logs
-    match /evolution_logs/{logId} {
-      allow read, write: if request.auth != null;
-    }
-
-    // Google Keep style Trading Notes & Strategy Journal
     match /notes/{noteId} {
-      allow read, write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid) && request.resource.data.uid == request.auth.uid;
+      allow get, list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(noteId) && noSecretFields(incoming()) && isValidTradingNote(incoming());
+      allow update: if isSignedIn() && isValidId(noteId) && existing().uid == request.auth.uid && noSecretFields(incoming()) && isValidTradingNote(incoming());
+      allow delete: if isSignedIn() && existing().uid == request.auth.uid;
     }
 
-    // Auto-sync snapshots & Workspace backups (every 10 minutes)
     match /sync_snapshots/{snapshotId} {
-      allow read, write: if request.auth != null && (resource == null || resource.data.uid == request.auth.uid) && request.resource.data.uid == request.auth.uid;
+      allow get, list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(snapshotId) && noSecretFields(incoming()) && incoming().uid == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(snapshotId) && existing().uid == request.auth.uid && noSecretFields(incoming()) && incoming().uid == request.auth.uid;
+      allow delete: if isSignedIn() && existing().uid == request.auth.uid;
+    }
+
+    match /subagents/{subagentId} {
+      allow get, list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(subagentId) && noSecretFields(incoming()) && incoming().uid == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(subagentId) && existing().uid == request.auth.uid && noSecretFields(incoming()) && incoming().uid == request.auth.uid;
+      allow delete: if isSignedIn() && existing().uid == request.auth.uid;
+    }
+
+    match /evolution_logs/{logId} {
+      allow get, list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(logId) && noSecretFields(incoming()) && incoming().uid == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(logId) && existing().uid == request.auth.uid && noSecretFields(incoming()) && incoming().uid == request.auth.uid;
+      allow delete: if isSignedIn() && existing().uid == request.auth.uid;
+    }
+
+    // Global Catch-All Deny
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

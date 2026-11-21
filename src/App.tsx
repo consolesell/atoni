@@ -13,11 +13,22 @@ import {
   PositionSizingMode,
   TrailingStopConfig,
   BalanceSnapshot,
+  ExecutionSource,
 } from './types/trading';
 import { derivWS, DEFAULT_DERIV_APP_ID } from './lib/derivWS';
 import { balanceManager } from './lib/balanceManager';
 import { portfolioReconciler } from './lib/portfolioReconciler';
 import { tradeReadinessGuard } from './lib/readinessGuard';
+import { autonomyManager } from './lib/autonomyManager';
+import { executionController } from './lib/executionController';
+import { earlySellingEngine } from './lib/earlySellingEngine';
+import { intelligenceManager } from './lib/intelligenceManager';
+import { aiActionRegistry } from './lib/aiActionRegistry';
+import { strategyEvolutionManager } from './lib/strategyEvolutionManager';
+import { memoryManager } from './lib/memoryManager';
+import { sessionManager, SessionRecoveryPlan } from './lib/sessionManager';
+import { firebaseSyncManager } from './lib/firebaseSyncManager';
+import { configurationManager, DEFAULT_EARLY_EXIT_POLICY } from './lib/configurationManager';
 import { isDemoAccount } from './lib/derivAccounts';
 import { DERIV_SYMBOLS, getSymbolDetails } from './lib/derivSymbols';
 import {
@@ -72,6 +83,7 @@ import { PlatformHelpModal } from './components/PlatformHelpModal';
 import { AuthModal } from './components/AuthModal';
 import { SubAgentEditorModal } from './components/SubAgentEditorModal';
 import { AgentEvolutionModal } from './components/AgentEvolutionModal';
+import { StrategyEvolutionModal, StrategyMutationProposal } from './components/StrategyEvolutionModal';
 import { GoogleDocsModal } from './components/GoogleDocsModal';
 import { GoogleKeepNotesModal } from './components/GoogleKeepNotesModal';
 import { QuickSettingsModal } from './components/QuickSettingsModal';
@@ -122,11 +134,24 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'terminal' | 'analytics' | 'copilot' | 'markets' | 'blackbox'>('terminal');
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>('overview');
 
+  // Startup session recovery plan (restores UI & open-contract monitoring safely without auto-starting autonomy)
+  const [sessionRecoveryPlan] = useState<SessionRecoveryPlan>(() => sessionManager.buildStartupRecoveryPlan());
+  const [recoveryBannerDismissed, setRecoveryBannerDismissed] = useState<boolean>(false);
+  const restoredContractsSubscribedRef = useRef<boolean>(false);
+
   // Asset & Market State
-  const [selectedSymbol, setSelectedSymbol] = useState<string>(() => settings.general.defaultSymbol || '1HZ10V');
+  const [selectedSymbol, setSelectedSymbol] = useState<string>(() =>
+    sessionRecoveryPlan.restoreUiConfig && sessionRecoveryPlan.snapshot?.symbol
+      ? sessionRecoveryPlan.snapshot.symbol
+      : settings.general.defaultSymbol || '1HZ10V'
+  );
   const symbolDetails = useMemo(() => getSymbolDetails(selectedSymbol), [selectedSymbol]);
   const decimals = symbolDetails.decimals ?? 2;
-  const [granularity, setGranularity] = useState<number>(60);
+  const [granularity, setGranularity] = useState<number>(() =>
+    sessionRecoveryPlan.restoreUiConfig && sessionRecoveryPlan.snapshot?.granularity
+      ? sessionRecoveryPlan.snapshot.granularity
+      : 60
+  );
   const [currentPrice, setCurrentPrice] = useState<number>(0);
   const [prevPrice, setPrevPrice] = useState<number>(0);
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -297,13 +322,17 @@ export default function App() {
     timestamp?: string;
   } | null>(null);
 
-  // Unified Autonomy Control & SBAgent Auto-Grant State
+  // Unified Autonomy Control, Strategy Evolution & SBAgent Auto-Grant State
+  const [autonomySnapshot, setAutonomySnapshot] = useState(() => autonomyManager.getSnapshot());
+  const [strategyState, setStrategyState] = useState(() => strategyEvolutionManager.getState());
   const [autonomyMode, setAutonomyMode] = useState<AutonomyMode>('OFF');
   const [sbagentAutonomyGrant, setSbagentAutonomyGrant] = useState<boolean>(false);
   const [autonomyPreset, setAutonomyPreset] = useState<AutonomyPreset>(() => loadAutonomyPreset());
   const [appliedAutonomySettings, setAppliedAutonomySettings] = useState<AppliedAutonomySettings | null>(null);
   const [lastAutonomyError, setLastAutonomyError] = useState<string[] | string | null>(null);
   const [isAutonomyConfigOpen, setIsAutonomyConfigOpen] = useState<boolean>(false);
+  const [isStrategyEvolutionOpen, setIsStrategyEvolutionOpen] = useState<boolean>(false);
+  const [activeStrategyProposal, setActiveStrategyProposal] = useState<StrategyMutationProposal | null>(null);
 
   // Modals
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
@@ -437,6 +466,147 @@ export default function App() {
       tradeTimeoutsRef.current.clear();
     };
   }, []);
+
+  // Subscribe to centralized AutonomyManager, StrategyEvolutionManager & ExecutionController portfolio context
+  useEffect(() => {
+    const unsubAutonomy = autonomyManager.subscribe((snap) => {
+      setAutonomySnapshot(snap);
+      if (snap.lifecycle === 'OFF' || snap.lifecycle === 'STOPPING' || snap.lifecycle === 'ERROR') {
+        setIsAutonomousRunning(false);
+        setSbagentAutonomyGrant(false);
+        setAutonomyMode('OFF');
+        setBotState((b) => (b.enabled ? { ...b, enabled: false } : b));
+      } else if (snap.lifecycle === 'PAUSED') {
+        setIsAutonomousRunning(false);
+        setSbagentAutonomyGrant(false);
+        setAutonomyMode('ARMED');
+        setBotState((b) => (b.enabled ? { ...b, enabled: false } : b));
+      }
+    });
+    const unsubStrategy = strategyEvolutionManager.subscribe((next) => {
+      setStrategyState(next);
+      configurationManager.update(
+        () => ({ activeStrategyVersion: next.activeVersion }),
+        false
+      );
+    });
+    return () => {
+      unsubAutonomy();
+      unsubStrategy();
+    };
+  }, []);
+
+  const botStateRef = useRef(botState);
+  useEffect(() => {
+    botStateRef.current = botState;
+  }, [botState]);
+
+  const coreRiskMetricsRef = useRef(coreRiskMetrics);
+  useEffect(() => {
+    coreRiskMetricsRef.current = coreRiskMetrics;
+  }, [coreRiskMetrics]);
+
+  useEffect(() => {
+    executionController.setPortfolioProvider({
+      getOpenTrades: () => openTradesRef.current,
+      getDailyLoss: () => botStateRef.current.currentDailyLoss ?? 0,
+      getDrawdownPercent: () => coreRiskMetricsRef.current.maxDrawdownPercent,
+      getConsecutiveLosses: () => botStateRef.current.consecutiveLosses ?? 0,
+      getDailyTradesCount: () => botStateRef.current.dailyTradeCount ?? 0,
+    });
+  }, []);
+
+  // Invalidate cached/active AI prediction whenever symbol, granularity, or strategy version changes
+  useEffect(() => {
+    intelligenceManager.invalidateCurrentPrediction('market_context_changed');
+    setAiPrediction(null);
+  }, [selectedSymbol, granularity, strategyState.activeVersion]);
+
+  // Persist sanitized session state (never storing secrets/tokens) & queue cloud session sync
+  useEffect(() => {
+    const selectedAcct = derivWS.getSelectedAccount();
+    const snap = sessionManager.saveSession({
+      accountRef: loginid
+        ? {
+            accountId: selectedAcct?.account_id || loginid,
+            loginId: loginid,
+            accountType: isLiveMode ? 'real' : 'demo',
+            currency,
+          }
+        : null,
+      symbol: selectedSymbol,
+      granularity,
+      activeStrategyVersion: strategyState.activeVersion,
+      executionMode: autonomySnapshot.executionMode,
+      autonomyLifecycle: autonomySnapshot.lifecycle,
+      autonomyPermissions: autonomySnapshot.permissions,
+      openTrades,
+      pendingIntentIds: portfolioReconciler.getPendingIntents().map((p) => p.intentId),
+      interruptedCleanly: autonomySnapshot.lifecycle === 'OFF',
+    });
+    if (user?.uid) {
+      void firebaseSyncManager
+        .enqueueSync({
+          uid: user.uid,
+          collectionName: 'sessions',
+          docId: 'active_session',
+          data: snap,
+          version: snap.version,
+          updatedAt: snap.lastSavedAt,
+          flushImmediately: false,
+        })
+        .catch(() => {});
+    }
+  }, [
+    user?.uid,
+    loginid,
+    isLiveMode,
+    currency,
+    selectedSymbol,
+    granularity,
+    strategyState.activeVersion,
+    autonomySnapshot.executionMode,
+    autonomySnapshot.lifecycle,
+    autonomySnapshot.permissions,
+    openTrades,
+  ]);
+
+  // Recover open-contract monitoring once authorized without auto-starting autonomous purchasing
+  useEffect(() => {
+    if (!isAuthorized || restoredContractsSubscribedRef.current) return;
+    restoredContractsSubscribedRef.current = true;
+    const refs = sessionRecoveryPlan.snapshot?.openContractRefs || [];
+    if (refs.length > 0 || sessionRecoveryPlan.requiresReconciliation) {
+      refs.forEach((c) => {
+        derivWS.subscribeProposalOpenContract(c.contractId);
+      });
+      void derivWS
+        .requestReconciliationSnapshot()
+        .then(({ openContracts, settledTransactions, portfolioVerified, statementVerified }) => {
+          portfolioReconciler.reconcile({
+            openTrades: openTradesRef.current,
+            broker: {
+              openPortfolioContracts: openContracts,
+              settledTransactions,
+              portfolioChecked: portfolioVerified,
+              statementChecked: statementVerified,
+            },
+          });
+          if (Array.isArray(openContracts) && openContracts.length > 0) {
+            openContracts.forEach((oc: any) => {
+              if (oc?.contract_id) {
+                derivWS.subscribeProposalOpenContract(oc.contract_id);
+              }
+            });
+            addLogRef.current?.(
+              `Resumed monitoring ${openContracts.length} open Deriv contract(s) safely after startup.`,
+              'info'
+            );
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isAuthorized, sessionRecoveryPlan]);
 
   // 10-Minute Intelligent Auto-Sync payload registration & listener
   useEffect(() => {
@@ -642,6 +812,48 @@ export default function App() {
         ...settled,
         uid: currentUser.uid,
       }).catch((err) => console.warn('Firestore settle persist note:', err));
+      void firebaseSyncManager
+        .enqueueSync({
+          uid: currentUser.uid,
+          collectionName: 'tradingHistory',
+          docId: settled.id,
+          data: settled,
+          updatedAt: Date.now(),
+        })
+        .catch(() => {});
+    }
+
+    // Attribute settled outcome to StrategyEvolutionManager & check degradation rollback
+    const stratResult = strategyEvolutionManager.recordCompletedTrade(settled, Boolean(settled.isSniperTrade));
+    if (stratResult.rollbackTriggered && stratResult.rollbackReason) {
+      addLogRef.current?.(`⚠️ [STRATEGY ROLLBACK] ${stratResult.rollbackReason}`, 'warn');
+      hostToast('Strategy auto-rolled back to stable parent');
+    }
+
+    // Persist verified trade outcome into Persistent MemoryManager
+    const memRes = memoryManager.upsert({
+      category: 'OPERATIONAL',
+      trustSource: 'VERIFIED_FACT',
+      key: `trade_${contractId}`,
+      title: `${settled.symbol} ${settled.decision} ${settled.result}`,
+      summary: `Contract #${contractId} settled ${settled.result} (${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}) under ${settled.strategyVersion || 'v4.1.0-baseline'}.`,
+      symbol: settled.symbol,
+      strategyVersion: settled.strategyVersion || strategyEvolutionManager.getActiveVersion().version,
+      regime: settled.regime,
+      relevanceScore: 90,
+    });
+    if (currentUser && memRes.stored) {
+      void firebaseSyncManager
+        .enqueueSync({
+          uid: currentUser.uid,
+          collectionName: 'agentMemory',
+          docId: memRes.record.id,
+          data: memRes.record,
+          version: memRes.record.version,
+          updatedAt: memRes.record.updatedAt,
+          flushImmediately: false,
+        })
+        .catch(() => {});
     }
 
     setClosedTrades((currClosed) => [settled, ...currClosed.filter((t) => t.id !== trade.id)]);
@@ -1190,16 +1402,31 @@ export default function App() {
   }, [addLog]);
 
   const handleStopAutonomy = useCallback((reason = 'user') => {
+    const stopRes = autonomyManager.stopAll(reason);
+    intelligenceManager.invalidateCurrentPrediction(`stop:${reason}`);
+    setIsAutonomousRunning(false);
     setBotState((b) => ({ ...b, enabled: false }));
     setSbagentAutonomyGrant(false);
     setAutonomyMode('OFF');
-    SBAgent.onAutonomyRevoked(reason);
     setAppliedAutonomySettings(null);
     sound.play('click');
     hostHaptic('light');
     hostToast('Autonomy stopped');
-    addLog(`⏹️ Autonomy stopped (${reason}). Trading severed.`, 'info');
+    addLog(
+      `⏹️ Autonomy stopped (${reason}). Severed all autonomous loops (${stopRes.abortedCount} pending AI cycle(s) aborted); open-contract monitoring preserved.`,
+      'info'
+    );
     speakWithHostFallback('Autonomy stopped.', 'tactical');
+    memoryManager.upsert({
+      category: 'SESSION',
+      trustSource: 'USER_DECISION',
+      key: 'last_global_stop',
+      title: 'Global Autonomy Stopped',
+      summary: `Operator/circuit-breaker halted autonomy (${reason}).`,
+      symbol: selectedSymbol,
+      strategyVersion: strategyEvolutionManager.getActiveVersion().version,
+      relevanceScore: 85,
+    });
     auditLogger.record({
       type: 'RISK_SHIELD',
       symbol: selectedSymbol,
@@ -1239,18 +1466,39 @@ export default function App() {
       openExposure,
       risk: autonomyPreset.risk,
       allowedSymbols: autonomyPreset.allowedSymbols,
-      strategyRef: autonomyPreset.strategyProfile || 'sbagent.md-v4.1',
+      strategyRef: strategyState.activeVersion || autonomyPreset.strategyProfile || 'sbagent.md-v4.1',
     };
 
-    // C) GRANT auto autonomy to SBAgent (explicit, auditable)
+    // C) GRANT unified autonomy through AutonomyManager before SBAgent self-configures
+    const startResult = autonomyManager.start({
+      permissions: {
+        allowAutoBot: true,
+        allowSubagent: true,
+        allowAiTriggers: true,
+        allowEarlySelling: true,
+        allowSymbolRotation: botState.autonomousSymbolChange ?? true,
+      },
+      sbagentContext: sessionContext,
+      reason: 'user_run_autonomously',
+    });
+
+    if (!startResult.ok) {
+      setLastAutonomyError([startResult.reason]);
+      sound.play('alert');
+      hostHaptic('error');
+      hostToast(startResult.reason);
+      addLog(`🛑 Autonomy start blocked: ${startResult.reason}`, 'warn');
+      return;
+    }
+
     setSbagentAutonomyGrant(true);
     setAutonomyMode('RUNNING');
-    SBAgent.onAutonomyGranted(sessionContext);
 
     // D) SBAgent intelligent self-configuration (before any order)
     const configResult = SBAgent.configureForAutonomy(sessionContext);
 
     if (!configResult.ok || !configResult.appliedSettings) {
+      autonomyManager.pause('sbagent_config_failed');
       setSbagentAutonomyGrant(false);
       setAutonomyMode('ARMED');
       setBotState((b) => ({ ...b, enabled: false }));
@@ -1288,8 +1536,18 @@ export default function App() {
     sound.play('trade');
     hostHaptic('success');
     hostToast('Autonomy active · SBAgent granted');
-    addLog(`🚀 Autonomy granted — SBAgent calibrated stake $${applied.calibratedStake.toFixed(2)}, ${applied.calibratedDuration}${applied.calibratedDurationUnit.charAt(0)}. Auto-trading active.`, 'success');
+    addLog(`🚀 Autonomy granted (gen ${startResult.generation}) — SBAgent calibrated stake $${applied.calibratedStake.toFixed(2)}, ${applied.calibratedDuration}${applied.calibratedDurationUnit.charAt(0)}. Auto-trading active.`, 'success');
     speakWithHostFallback('Autonomy granted. SBAgent is configuring and starting trading.', 'tactical');
+    memoryManager.upsert({
+      category: 'SESSION',
+      trustSource: 'USER_DECISION',
+      key: 'last_autonomy_grant',
+      title: `Autonomy Started (${selectedSymbol})`,
+      summary: `Stake $${applied.calibratedStake.toFixed(2)}, Strategy ${strategyState.activeVersion}, Mode ${autonomySnapshot.executionMode}.`,
+      symbol: selectedSymbol,
+      strategyVersion: strategyState.activeVersion,
+      relevanceScore: 80,
+    });
     auditLogger.record({
       type: 'AUTONOMOUS_TRADE',
       symbol: sessionContext.symbol,
@@ -1302,13 +1560,18 @@ export default function App() {
       },
     });
   }, [
+    isAuthorized,
     selectedSymbol,
     balance,
     autonomyPreset,
     isLiveMode,
     regime.type,
     openTrades,
+    botState.autonomousSymbolChange,
+    strategyState.activeVersion,
+    autonomySnapshot.executionMode,
     addLog,
+    speakWithHostFallback,
   ]);
 
   // Autonomous Symbol Switch on Market Instability
@@ -1385,17 +1648,25 @@ export default function App() {
     }
   }, [currentPrice, isSniperTriggerArmed, sniperSetup, isExecuting, stake, selectedSymbol]);
 
-  // 3. Gemini AI Scan
+  // 3. Gemini AI Scan (context-bound & cancellation-safe via IntelligenceManager)
   const triggerAIScan = useCallback(async () => {
     if (!indicators || isLoadingAI) return;
     const now = Date.now();
     if (now - lastAiScanTimeRef.current < 8000) return;
     lastAiScanTimeRef.current = now;
 
+    const { context, abortController } = intelligenceManager.beginPredictionRequest({
+      symbol: selectedSymbol,
+      granularity,
+      strategyVersion: strategyState.activeVersion,
+      snapshotTimestamp: candles[candles.length - 1]?.epoch ? candles[candles.length - 1].epoch * 1000 : now,
+    });
+
     setIsLoadingAI(true);
     try {
       const response = await fetch('/api/ai/predict', {
         method: 'POST',
+        signal: abortController.signal,
         headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
         body: JSON.stringify({
           symbol: selectedSymbol,
@@ -1411,19 +1682,42 @@ export default function App() {
             moodRatio: indicators.mood?.ratio,
           },
           timeframe: `${granularity}s`,
+          granularity,
+          strategyVersion: strategyState.activeVersion,
+          predictionContext: context,
+          memorySummary: memoryManager.selectCompactContext({
+            symbol: selectedSymbol,
+            strategyVersion: strategyState.activeVersion,
+            regime: regime.type,
+            maxItems: 4,
+          }),
         }),
       });
 
       const data = await response.json();
       if (data.success) {
-        setAiPrediction(data);
+        const accepted = intelligenceManager.completePrediction(context, data, {
+          symbol: selectedSymbol,
+          granularity,
+          strategyVersion: strategyState.activeVersion,
+          autonomyGeneration: autonomyManager.getGeneration(),
+          configRevision: configurationManager.getRevision(),
+        });
+        if (accepted.accepted && accepted.prediction) {
+          setAiPrediction(accepted.prediction);
+        } else if (accepted.reason) {
+          addLogRef.current?.(`Discarded stale AI prediction: ${accepted.reason}`, 'info');
+        }
       }
-    } catch (err) {
-      console.warn('AI Scan trigger note:', err);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.warn('AI Scan trigger note:', err);
+      }
     } finally {
+      autonomyManager.releaseAbortController('ai_predict');
       setIsLoadingAI(false);
     }
-  }, [indicators, isLoadingAI, selectedSymbol, regime.type, granularity]);
+  }, [indicators, isLoadingAI, selectedSymbol, regime.type, granularity, strategyState.activeVersion, candles]);
 
   // Trigger AI Agent Evolution Cycle (Reinforcement Learning)
   const triggerAgentEvolution = useCallback(async () => {
@@ -1487,13 +1781,13 @@ export default function App() {
     }
   }, [agents, closedTrades, regime, addLog, user]);
 
-  // 4. Single Central Trade Execution Pipeline (Manual, Auto-Bot, Subagent, or Sniper Engine)
+  // 4. Unified Authoritative Execution Pipeline (Manual, Auto-Bot, Subagent, Copilot, or Sniper)
   const executeTrade = useCallback(
     async (
       tradeDirection: 'CALL' | 'PUT',
       tradeStake: number,
       tradeDuration: number,
-      source: 'MANUAL' | 'AUTO_BOT' | 'SUBAGENT_MD' = 'MANUAL',
+      source: ExecutionSource = 'MANUAL',
       tradeDurationUnit: TradeDurationUnit = 'minutes',
       sniperData?: {
         isSniperTrade?: boolean;
@@ -1514,405 +1808,173 @@ export default function App() {
         return;
       }
 
-      // Legal Deriv Contract Duration Compliance
       const validated = validateDerivDuration(selectedSymbol, tradeDuration, tradeDurationUnit);
-      const validDuration = validated.duration;
       if (validated.isAdjusted) {
         addLog(`⏱️ Duration calibrated to legal Deriv bound: ${tradeDuration} → ${validated.exactLegalString}`, 'info');
-      }
-
-      const config = useConfigStore.getState().config;
-      const liveBalanceSnap = derivWS.getBalanceSnapshot();
-      const currentOpenExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
-      const maxTotalOpenExposure = Math.max(
-        config.risk.minPortfolioExposureFloorUSD,
-        liveBalanceSnap.amount * config.risk.maxPortfolioExposurePercent * 5
-      );
-      const maxConcurrent = config.risk.maxConcurrentPositions;
-      const maxAllowedDrawdown = botState.maxSessionDrawdownPercent || config.risk.maxSessionDrawdownPercent;
-      const subStatus = derivWS.getSubscriptionStatus();
-      const selectedAcctId = derivWS.getSelectedAccount()?.account || loginid;
-      const confirmedAcctId = derivWS.getConfirmedAccountId();
-
-      const clientOrderKey = portfolioReconciler.buildClientOrderKey({
-        accountId: selectedAcctId || 'UNSELECTED',
-        symbol: selectedSymbol,
-        contractType: tradeDirection,
-        amount: tradeStake,
-        duration: validDuration,
-        durationUnit: tradeDurationUnit,
-      });
-
-      const baseReadinessInput = {
-        hasValidAuth: derivWS.hasRealToken() && !derivWS.isTokenExpired(),
-        tokenExpired: derivWS.isTokenExpired(),
-        selectedAccountId: selectedAcctId || null,
-        confirmedAccountId: confirmedAcctId || null,
-        connectionState: derivWS.getConnectionState(),
-        isSessionAuthenticated: derivWS.isAuthorized(),
-        balanceSnapshot: liveBalanceSnap,
-        requiredSubscriptionsActive: subStatus.requiredSubscriptionsActive,
-        hasUnresolvedPurchaseTimeout: portfolioReconciler.hasUnresolvedTimeout(),
-        hasPendingReconciliation: portfolioReconciler.hasPendingReconciliation(),
-        emergencyStopActive,
-        symbol: selectedSymbol,
-        stake: tradeStake,
-        winRate: aiPrediction?.ai_predicted_win_probability ?? algorithmicDecision?.confidence ?? 0.62,
-        confidence: algorithmicDecision?.confidence ?? 0.62,
-        sizingMode,
-        maxStakePercent: config.risk.maxPortfolioExposurePercent || 0.05,
-        minStake: 0.35,
-        openExposure: currentOpenExposure,
-        maxOpenExposure: maxTotalOpenExposure,
-        openContractsCount: openTrades.length,
-        maxConcurrentContracts: maxConcurrent,
-        dailyLoss: botState.currentDailyLoss ?? 0,
-        maxDailyLoss: botState.maxDailyLoss,
-        drawdownPercent: coreRiskMetrics.maxDrawdownPercent,
-        maxDrawdownPercent: maxAllowedDrawdown,
-        consecutiveLosses: botState.consecutiveLosses,
-        maxConsecutiveLosses: botState.maxConsecutiveLosses,
-        duplicateIntentActive: portfolioReconciler.hasInFlightOrPendingIntent(clientOrderKey),
-      };
-
-      // Pre-proposal readiness guard across ALL 10 flags + risk bounds
-      const preReadiness = tradeReadinessGuard.evaluate(baseReadinessInput);
-      if (!preReadiness.ready) {
-        hostHaptic('error');
-        const primaryBlocker = preReadiness.blockers[0] || 'Trade execution blocked by readiness guard.';
-        hostToast(primaryBlocker);
-        addLog(`🛑 [READINESS GUARD] ${preReadiness.blockers.join(' | ')}`, 'warn');
-        sound.play('alert');
-        if (!preReadiness.flags.VALID_AUTHENTICATION) {
-          setIsTokenModalOpen(true);
-        }
-        if (source !== 'MANUAL' && !preReadiness.flags.RISK_ENGINE_APPROVAL && coreRiskMetrics.maxDrawdownPercent >= maxAllowedDrawdown) {
-          setBotState((b) => ({ ...b, enabled: false }));
-        }
-        return;
-      }
-
-      const uniqueSuffix = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 7).toUpperCase();
-      const tradeId = `TRD-${uniqueSuffix}`;
-
-      const intentReg = portfolioReconciler.registerIntent({
-        intentId: tradeId,
-        accountId: selectedAcctId || 'UNKNOWN',
-        symbol: selectedSymbol,
-        contractType: tradeDirection,
-        amount: tradeStake,
-        duration: validDuration,
-        durationUnit: tradeDurationUnit,
-      });
-
-      if (!intentReg.ok) {
-        hostHaptic('error');
-        hostToast('Duplicate or pending order intent blocked');
-        addLog(`🛑 [INTENT LOCK] ${intentReg.reason}`, 'warn');
-        sound.play('alert');
-        return;
       }
 
       isExecutingRef.current = true;
       setIsExecuting(true);
       hostHaptic('medium');
 
-      const unitSuffix = tradeDurationUnit === 'ticks' ? 't' : tradeDurationUnit === 'seconds' ? 's' : 'm';
-
-      // Step 1: Request authoritative Deriv proposal & validate real quote expiry / ask_price
-      let proposalQuote;
       try {
-        proposalQuote = await derivWS.requestProposalQuote({
+        const result = await executionController.executePurchase({
+          source,
           symbol: selectedSymbol,
-          amount: tradeStake,
-          contract_type: tradeDirection,
-          duration: validDuration,
-          duration_unit: unitSuffix,
-          currency: currency || 'USD',
+          contractType: tradeDirection,
+          stake: tradeStake,
+          duration: validated.duration,
+          durationUnit: validated.unit,
+          confidence: sniperData?.confluenceScore
+            ? sniperData.confluenceScore / 100
+            : algorithmicDecision?.confidence || 0.62,
+          agent: sniperData?.isSniperTrade
+            ? 'Sniper Confluence Pro'
+            : source === 'SUBAGENT_MD'
+            ? 'sbagent (sbagent.md)'
+            : algorithmicDecision?.agent || 'Consensus',
+          regime: regime.type,
+          isSniperTrade: sniperData?.isSniperTrade,
+          confluenceScore: sniperData?.confluenceScore,
+          trailingStopEnabled: Boolean(trailingStopOptions?.enabled),
+          strategyVersion: strategyState.activeVersion,
+          autonomyGeneration: source === 'MANUAL' ? undefined : autonomyManager.getGeneration(),
+          predictionContext: aiPrediction?.context,
         });
-      } catch (propErr: any) {
-        portfolioReconciler.markIntentFailed(tradeId);
-        isExecutingRef.current = false;
-        setIsExecuting(false);
-        hostHaptic('error');
-        const msg = propErr?.message || 'Deriv proposal request failed.';
-        hostToast(msg);
-        addLog(`Deriv proposal rejected: ${msg}`, 'error');
-        sound.play('alert');
-        return;
-      }
 
-      // Step 2: Re-evaluate TradeReadinessGuard WITH the live verified proposal quote before sending buy
-      const postReadiness = tradeReadinessGuard.evaluate({
-        ...baseReadinessInput,
-        balanceSnapshot: derivWS.getBalanceSnapshot(),
-        confirmedAccountId: derivWS.getConfirmedAccountId(),
-        connectionState: derivWS.getConnectionState(),
-        isSessionAuthenticated: derivWS.isAuthorized(),
-        requiredSubscriptionsActive: derivWS.getSubscriptionStatus().requiredSubscriptionsActive,
-        hasUnresolvedPurchaseTimeout: portfolioReconciler.hasUnresolvedTimeout(),
-        hasPendingReconciliation: portfolioReconciler.hasPendingReconciliation(),
-        duplicateIntentActive: false, // Current intent is tradeId itself
-        proposal: proposalQuote,
-      });
-
-      if (!postReadiness.ready) {
-        portfolioReconciler.markIntentFailed(tradeId);
-        isExecutingRef.current = false;
-        setIsExecuting(false);
-        hostHaptic('error');
-        const primaryBlocker = postReadiness.blockers[0] || 'Proposal failed post-quote readiness guard.';
-        hostToast(primaryBlocker);
-        addLog(`🛑 [QUOTE GUARD] ${postReadiness.blockers.join(' | ')}`, 'warn');
-        sound.play('alert');
-        return;
-      }
-
-      portfolioReconciler.attachProposalId(tradeId, proposalQuote.proposalId);
-      const maxPurchasePrice = Number(proposalQuote.askPrice.toFixed(2));
-
-      let tslProps: Partial<TradeRecord> = {};
-      if (trailingStopOptions?.enabled) {
-        const trailingDist = calculateTrailingDistance(
-          entrySpot,
-          candles,
-          indicators,
-          trailingStopOptions
-        );
-        const tslParams = initializeTrailingStopParams(
-          entrySpot,
-          tradeDirection,
-          trailingDist,
-          decimals,
-          trailingStopOptions
-        );
-        tslProps = {
-          trailingStopEnabled: true,
-          trailingStopDistanceType: trailingStopOptions.distanceType,
-          trailingStopDistance: trailingDist,
-          initialStopPrice: tslParams.initialStopPrice,
-          currentTrailingStopPrice: tslParams.currentTrailingStopPrice,
-          highestFavorablePrice: tslParams.highestFavorablePrice,
-          lowestFavorablePrice: tslParams.lowestFavorablePrice,
-          lockedInProfit: 0,
-          peakProfit: 0,
-          profitLockEnabled: trailingStopOptions.profitLockEnabled ?? true,
-          profitLockThresholdPercent: trailingStopOptions.profitLockThresholdPercent ?? 50,
-          profitLockTriggered: false,
-          profitLockSecuredAmount: 0,
-        };
-      }
-
-      const newTrade: TradeRecord = {
-        id: tradeId,
-        timestamp: new Date().toISOString(),
-        mode: isLiveMode ? 'REAL' : 'DEMO',
-        symbol: selectedSymbol,
-        amount: maxPurchasePrice,
-        payout: proposalQuote.payout,
-        proposalId: proposalQuote.proposalId,
-        decision: tradeDirection === 'CALL' ? 'BUY' : 'SELL',
-        result: 'PENDING',
-        profit: 0,
-        confidence: sniperData?.confluenceScore
-          ? sniperData.confluenceScore / 100
-          : algorithmicDecision?.confidence || 0.6,
-        agent: sniperData?.isSniperTrade
-          ? 'Sniper Confluence Pro'
-          : source === 'SUBAGENT_MD'
-          ? 'sbagent (sbagent.md)'
-          : algorithmicDecision?.agent || 'Consensus',
-        regime: regime.type,
-        duration: validDuration,
-        durationUnit: tradeDurationUnit,
-        entryPrice: entrySpot,
-        dateExpiry: proposalQuote.dateExpiryMs ? Math.floor(proposalQuote.dateExpiryMs / 1000) : undefined,
-        isValidToSell: false,
-        isSniperTrade: sniperData?.isSniperTrade,
-        confluenceScore: sniperData?.confluenceScore,
-        ...tslProps,
-      };
-
-      openTradesRef.current = [newTrade, ...openTradesRef.current];
-      setOpenTrades((prev) => [newTrade, ...prev]);
-
-      const sniperTag = sniperData?.isSniperTrade ? ` [SNIPER ${sniperData.confluenceScore}%]` : '';
-      const tslTag = trailingStopOptions?.enabled
-        ? ` [TSL Stop: ${tslProps.currentTrailingStopPrice?.toFixed(decimals)}]`
-        : '';
-
-      const triggerStatementReconciliation = (reasonMsg: string) => {
-        portfolioReconciler.markIntentTimedOut(tradeId);
-        balanceManager.markReconciliationPending();
-        isExecutingRef.current = false;
-        setIsExecuting(false);
-        addLogRef.current?.(
-          `⏳ Order ${tradeId} uncertain (${reasonMsg}) — entered RECONCILIATION_PENDING lock. Verifying Deriv account statement & portfolio before allowing new purchases...`,
-          'warn'
-        );
-        derivWS
-          .requestReconciliationSnapshot()
-          .then(({ openContracts, settledTransactions, portfolioVerified, statementVerified }) => {
-            const rec = portfolioReconciler.reconcile({
-              openTrades: openTradesRef.current,
-              broker: {
-                openPortfolioContracts: openContracts,
-                settledTransactions,
-                portfolioChecked: portfolioVerified,
-                statementChecked: statementVerified,
+        if (user?.uid) {
+          void firebaseSyncManager
+            .enqueueSync({
+              uid: user.uid,
+              collectionName: 'executionEvents',
+              docId: `exec_${result.timestamp}`,
+              data: {
+                source,
+                symbol: selectedSymbol,
+                status: result.status,
+                reason: result.reason,
+                contractId: result.contractId,
+                proposalId: result.proposalId,
+                amount: result.buyPrice ?? tradeStake,
+                strategyVersion: strategyState.activeVersion,
               },
-            });
-            const recoveredContractId = rec.matchedOpenContractIds[0];
-            openTradesRef.current = rec.updatedOpenTrades
-              .map((t) =>
-                t.id === tradeId && !t.contract_id && recoveredContractId
-                  ? { ...t, contract_id: recoveredContractId, isDerivRealTime: true }
-                  : t
-              )
-              .filter((t) => t.id !== tradeId || Boolean(t.contract_id));
-            setOpenTrades(openTradesRef.current);
-
-            if (recoveredContractId) {
-              derivWS.subscribeProposalOpenContract(recoveredContractId);
-            }
-            if (!rec.stillPendingReconciliation) {
-              balanceManager.clearReconciliationPending();
-              derivWS.refreshBalance();
-              addLogRef.current?.(
-                `✅ Order ${tradeId} reconciled via Deriv account statement & portfolio.`,
-                'info'
-              );
-            } else {
-              addLogRef.current?.(
-                `⚠️ Statement verification incomplete for ${tradeId}; trading remains locked until statement & portfolio sync completes.`,
-                'warn'
-              );
-            }
-          })
-          .catch(() => {});
-      };
-
-      // Timeout safety guard in case socket stalls without resolving/rejecting RPC
-      const buyTimeoutId = setTimeout(() => {
-        tradeTimeoutsRef.current.delete(tradeId);
-        const stillUnconfirmed = openTradesRef.current.find((t) => t.id === tradeId && !t.contract_id);
-        if (stillUnconfirmed) {
-          triggerStatementReconciliation('timeout awaiting broker buy confirmation');
-        }
-      }, 15000);
-      tradeTimeoutsRef.current.set(tradeId, buyTimeoutId);
-
-      // Step 3: Buy strictly by verified proposal_id and maximum quote ask_price with req_id correlation
-      try {
-        const buyResult = await derivWS.buyProposal({
-          proposalId: proposalQuote.proposalId,
-          maxPrice: maxPurchasePrice,
-          timeoutMs: 15000,
-        });
-
-        clearTimeout(buyTimeoutId);
-        tradeTimeoutsRef.current.delete(tradeId);
-        portfolioReconciler.markIntentConfirmed(tradeId, buyResult.contractId);
-
-        openTradesRef.current = openTradesRef.current.map((t) =>
-          t.id === tradeId
-            ? {
-                ...t,
-                contract_id: buyResult.contractId,
-                amount: buyResult.buyPrice,
-                payout: buyResult.payout ?? t.payout,
-                isDerivRealTime: true,
-              }
-            : t
-        );
-        setOpenTrades((prev) =>
-          prev.map((t) =>
-            t.id === tradeId
-              ? {
-                  ...t,
-                  contract_id: buyResult.contractId,
-                  amount: buyResult.buyPrice,
-                  payout: buyResult.payout ?? t.payout,
-                  isDerivRealTime: true,
-                }
-              : t
-          )
-        );
-
-        if (typeof buyResult.balanceAfter === 'number') {
-          setBalance(buyResult.balanceAfter);
-          const isVirt = Boolean(loginidRef.current?.startsWith('VRTC') || !isLiveModeRef.current);
-          updateBalancesRef.current?.(isVirt ? buyResult.balanceAfter : undefined, !isVirt ? buyResult.balanceAfter : undefined);
+              updatedAt: result.timestamp,
+              flushImmediately: false,
+            })
+            .catch(() => {});
         }
 
-        isExecutingRef.current = false;
-        setIsExecuting(false);
+        if (!result.executed || !result.tradeRecord) {
+          hostHaptic('error');
+          const primaryBlocker = result.blockers[0] || result.reason || 'Trade execution blocked.';
+          hostToast(primaryBlocker);
+          addLog(`🛑 [${result.status}] ${primaryBlocker}`, 'warn');
+          sound.play('alert');
+          if (!derivWS.hasRealToken() || derivWS.isTokenExpired()) {
+            setIsTokenModalOpen(true);
+          }
+          if (result.reconciliationPending) {
+            balanceManager.markReconciliationPending();
+          }
+          return;
+        }
+
+        let tslProps: Partial<TradeRecord> = {};
+        if (trailingStopOptions?.enabled) {
+          const trailingDist = calculateTrailingDistance(
+            entrySpot,
+            candles,
+            indicators,
+            trailingStopOptions
+          );
+          const tslParams = initializeTrailingStopParams(
+            entrySpot,
+            tradeDirection,
+            trailingDist,
+            decimals,
+            trailingStopOptions
+          );
+          tslProps = {
+            trailingStopEnabled: true,
+            trailingStopDistanceType: trailingStopOptions.distanceType,
+            trailingStopDistance: trailingDist,
+            initialStopPrice: tslParams.initialStopPrice,
+            currentTrailingStopPrice: tslParams.currentTrailingStopPrice,
+            highestFavorablePrice: tslParams.highestFavorablePrice,
+            lowestFavorablePrice: tslParams.lowestFavorablePrice,
+            lockedInProfit: 0,
+            peakProfit: 0,
+            profitLockEnabled: trailingStopOptions.profitLockEnabled ?? true,
+            profitLockThresholdPercent: trailingStopOptions.profitLockThresholdPercent ?? 50,
+            profitLockTriggered: false,
+            profitLockSecuredAmount: 0,
+          };
+        }
+
+        const enrichedTrade: TradeRecord = {
+          ...result.tradeRecord,
+          entryPrice: result.tradeRecord.entryPrice || entrySpot,
+          ...tslProps,
+        };
+
+        if (!openTradesRef.current.some((t) => t.contract_id === enrichedTrade.contract_id || t.id === enrichedTrade.id)) {
+          openTradesRef.current = [enrichedTrade, ...openTradesRef.current];
+          setOpenTrades((prev) =>
+            prev.some((t) => t.contract_id === enrichedTrade.contract_id || t.id === enrichedTrade.id)
+              ? prev
+              : [enrichedTrade, ...prev]
+          );
+        }
+
+        const unitSuffix = validated.unit === 'ticks' ? 't' : validated.unit === 'seconds' ? 's' : 'm';
+        const sniperTag = sniperData?.isSniperTrade ? ` [SNIPER ${sniperData.confluenceScore}%]` : '';
+        const tslTag = trailingStopOptions?.enabled && tslProps.currentTrailingStopPrice
+          ? ` [TSL Stop: ${tslProps.currentTrailingStopPrice.toFixed(decimals)}]`
+          : '';
+
         addLog(
           `[${source}${sniperTag}${tslTag}] Purchased ${isLiveMode ? 'REAL' : 'DEMO'} Deriv ${
             tradeDirection === 'CALL' ? 'RISE' : 'FALL'
-          } contract #${buyResult.contractId} on ${selectedSymbol} via proposal ${proposalQuote.proposalId} (max $${maxPurchasePrice.toFixed(2)}, ${validDuration}${unitSuffix})`,
+          } contract #${enrichedTrade.contract_id} on ${selectedSymbol} via proposal ${enrichedTrade.proposalId} ($${enrichedTrade.amount.toFixed(2)}, ${validated.duration}${unitSuffix})`,
           'success'
         );
-      } catch (err: any) {
-        clearTimeout(buyTimeoutId);
-        tradeTimeoutsRef.current.delete(tradeId);
-        const errMsg = err?.message || 'Unknown error';
-        const isUncertainTimeoutOrDisconnect =
-          /timed out|closed|not open|reconnecting|interrupted/i.test(errMsg);
-
-        if (isUncertainTimeoutOrDisconnect) {
-          triggerStatementReconciliation(errMsg);
-        } else {
-          // Definitive broker rejection before execution
-          portfolioReconciler.markIntentFailed(tradeId);
-          openTradesRef.current = openTradesRef.current.filter((t) => t.id !== tradeId);
-          setOpenTrades((prev) => prev.filter((t) => t.id !== tradeId));
-          isExecutingRef.current = false;
-          setIsExecuting(false);
-          if (derivWS.hasRealToken()) {
-            derivWS.refreshBalance();
-          }
-          addLog(`Deriv contract purchase rejected: ${errMsg}`, 'error');
-        }
+      } finally {
+        isExecutingRef.current = false;
+        setIsExecuting(false);
       }
     },
     [
       isExecuting,
-      loginid,
-      currency,
       isLiveMode,
       selectedSymbol,
-      openTrades,
-      emergencyStopActive,
-      sizingMode,
-      aiPrediction?.ai_predicted_win_probability,
-      botState.maxSessionDrawdownPercent,
-      botState.currentDailyLoss,
-      botState.maxDailyLoss,
-      botState.consecutiveLosses,
-      botState.maxConsecutiveLosses,
-      coreRiskMetrics.maxDrawdownPercent,
       algorithmicDecision,
-      regime,
-      addLog,
+      regime.type,
+      strategyState.activeVersion,
+      aiPrediction?.context,
+      user?.uid,
       candles,
       indicators,
       decimals,
+      addLog,
     ]
   );
 
-  // 5. Autonomous Subagent (sbagent.md) Execution Loop
+  // 5. Autonomous Subagent (sbagent.md) Execution Loop (bound to AutonomyManager generation & AbortController)
   const runSubAgentStep = useCallback(async () => {
     if (!indicators || openTrades.length > 0) return;
-    try {
-      // 1. Fetch live markdown
-      const scriptRes = await fetch('/api/subagent/script');
-      const scriptData = await scriptRes.json();
-      if (!scriptData.success) return;
+    if (autonomyManager.getLifecycle() !== 'ACTIVE' || !autonomyManager.getSnapshot().permissions.allowSubagent) {
+      return;
+    }
 
-      // 2. Evaluate with Gemini
+    const { controller, generation } = autonomyManager.registerAbortController('subagent_step');
+    try {
+      const scriptRes = await fetch('/api/subagent/script', { signal: controller.signal });
+      const scriptData = await scriptRes.json();
+      if (!scriptData.success || !autonomyManager.isGenerationCurrent(generation)) return;
+
       const evalRes = await fetch('/api/subagent/execute-step', {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json', ...getAIRequestHeaders() },
         body: JSON.stringify({
           subagentMarkdown: scriptData.content,
@@ -1930,6 +1992,10 @@ export default function App() {
       });
 
       const evalData = await evalRes.json();
+      if (!autonomyManager.isGenerationCurrent(generation) || autonomyManager.getLifecycle() !== 'ACTIVE') {
+        return;
+      }
+
       if (evalData.success) {
         setLastSubagentDecision({
           action: evalData.action,
@@ -1972,16 +2038,6 @@ export default function App() {
         }
 
         if (evalData.action === 'BUY' || evalData.action === 'SELL') {
-          // Check 5% session drawdown circuit breaker
-          if (coreRiskMetrics.maxDrawdownPercent >= 5.0) {
-            addLog(
-              `🛑 [CIRCUIT BREAKER] Subagent auto-fire blocked: 5% session drawdown reached (${coreRiskMetrics.maxDrawdownPercent.toFixed(1)}%).`,
-              'error'
-            );
-            return;
-          }
-
-          // Check consensus gate
           const consensus = algorithmicDecision?.consensus;
           if (consensus && !consensus.hasConsensus) {
             addLog(`🛡️ [CONSENSUS GATE] Subagent auto-fire blocked: ${consensus.rationale}`, 'warn');
@@ -1991,11 +2047,15 @@ export default function App() {
           const dir = evalData.action === 'BUY' ? 'CALL' : 'PUT';
           const dur = evalData.suggested_duration_mins || 15;
           addLog(`🤖 Subagent (sbagent.md) triggered: ${dir} (${evalData.rule_matched})`, 'success');
-          executeTrade(dir, stake, dur, 'SUBAGENT_MD');
+          void executeTrade(dir, stake, dur, 'SUBAGENT_MD');
         }
       }
     } catch (err: any) {
-      console.warn('Subagent execution step notice:', err);
+      if (err?.name !== 'AbortError') {
+        console.warn('Subagent execution step notice:', err);
+      }
+    } finally {
+      autonomyManager.releaseAbortController('subagent_step');
     }
   }, [
     indicators,
@@ -2004,7 +2064,6 @@ export default function App() {
     regime,
     stake,
     granularity,
-    coreRiskMetrics.maxDrawdownPercent,
     algorithmicDecision?.consensus,
     botState.allowedRotationSymbols,
     botState.autonomousSymbolChange,
@@ -2014,18 +2073,19 @@ export default function App() {
     executeTrade,
   ]);
 
-  // Autonomous Subagent Timer
+  // Autonomous Subagent Timer (strictly obeys AutonomyManager ACTIVE lifecycle)
   useEffect(() => {
-    if (!isAutonomousRunning || openTrades.length > 0) return;
+    if (!isAutonomousRunning || autonomySnapshot.lifecycle !== 'ACTIVE' || openTrades.length > 0) return;
     const interval = setInterval(() => {
+      if (autonomyManager.getLifecycle() !== 'ACTIVE') return;
       const now = Date.now();
       if (now - lastSubagentRunTimeRef.current > 15000) {
         lastSubagentRunTimeRef.current = now;
-        runSubAgentStep();
+        void runSubAgentStep();
       }
     }, 15000);
     return () => clearInterval(interval);
-  }, [isAutonomousRunning, openTrades.length, runSubAgentStep]);
+  }, [isAutonomousRunning, autonomySnapshot.lifecycle, openTrades.length, runSubAgentStep]);
 
   // 6. Automated Bot Deliberation Loop
   useEffect(() => {
@@ -2216,8 +2276,8 @@ export default function App() {
     regime,
   ]);
 
-  // Early close position handler — dispatches real Deriv sell order and settles strictly on broker confirmation
-  const handleEarlyExit = (tradeId: string) => {
+  // Early close position handler — dispatches through ExecutionController with duplicate lock & broker check
+  const handleEarlyExit = useCallback(async (tradeId: string) => {
     const trade = openTradesRef.current.find((t) => t.id === tradeId);
     if (!trade) return;
 
@@ -2226,69 +2286,71 @@ export default function App() {
       return;
     }
 
-    if (closingContractIdsRef.current.has(trade.contract_id)) {
+    if (executionController.isSellPending(trade.contract_id)) {
       return;
     }
 
-    if (trade.isValidToSell !== true) {
+    const res = await executionController.executeSell({
+      source: 'MANUAL',
+      trade,
+      minPrice: 0,
+      reason: 'Manual operator early exit requested.',
+    });
+
+    if (res.sold) {
+      addLog(`Deriv contract #${trade.contract_id} market resale executed (sold for $${res.soldFor?.toFixed(2)}).`, 'info');
+    } else {
       sound.play('alert');
-      addLog(
-        `Deriv contract #${trade.contract_id} requires active is_valid_to_sell confirmation before early resale.`,
-        'warn'
-      );
-      return;
+      addLog(`Early resale notice for #${trade.contract_id}: ${res.reason}`, 'warn');
     }
+  }, [addLog]);
 
-    closingContractIdsRef.current.add(trade.contract_id);
-    try {
-      derivWS.sellContract(trade.contract_id, 0);
-      addLog(`Deriv contract #${trade.contract_id} market resale order dispatched. Awaiting settlement...`, 'info');
-    } catch (err: any) {
-      closingContractIdsRef.current.delete(trade.contract_id);
-      addLog(`Failed to dispatch Deriv sell order: ${err?.message || 'Unknown error'}`, 'error');
-    }
-  };
-
-  // 4b. Trailing Stop-Loss Real-Time Ratchet & Deriv Sell Trigger Loop
+  // 4b. Intelligent Early-Selling & Trailing Stop-Loss Monitoring Loop (always active for open contracts even after Stop)
   useEffect(() => {
-    if (openTrades.length === 0 || !currentPrice || currentPrice <= 0) return;
+    if (openTrades.length === 0) return;
 
-    const hasTSLTrades = openTrades.some((t) => t.trailingStopEnabled && t.currentTrailingStopPrice);
-    if (!hasTSLTrades) return;
-
+    const earlyPolicy = settings.earlyExit ?? DEFAULT_EARLY_EXIT_POLICY;
     const sellTriggers: {
       trade: TradeRecord;
       reason: string;
+      policyTriggered: string | null;
     }[] = [];
 
     setOpenTrades((prevOpen) => {
       let stateChanged = false;
       const updatedList = prevOpen.map((trade) => {
-        if (!trade.trailingStopEnabled || !trade.currentTrailingStopPrice) {
-          return trade;
-        }
+        const evalOut = earlySellingEngine.evaluateContract({
+          trade,
+          policy: earlyPolicy,
+          currentSpot: currentPrice > 0 ? currentPrice : trade.currentSpot,
+          candles,
+          indicators,
+          aiPrediction,
+          decimals,
+        });
 
-        const evalResult = evaluateTrailingStop(trade, currentPrice, decimals);
-
-        if (evalResult.isTriggered) {
+        if (evalOut.evaluation.shouldSellNow && earlyPolicy.autoExecute) {
           sellTriggers.push({
-            trade: evalResult.updatedTrade,
-            reason: evalResult.triggerReason || 'Trailing Stop Reached',
+            trade: evalOut.updatedTrade,
+            reason: evalOut.evaluation.reason,
+            policyTriggered: evalOut.evaluation.policyTriggered,
           });
         }
 
+        const t = evalOut.updatedTrade;
         if (
-          evalResult.updatedTrade.currentTrailingStopPrice !== trade.currentTrailingStopPrice ||
-          evalResult.updatedTrade.highestFavorablePrice !== trade.highestFavorablePrice ||
-          evalResult.updatedTrade.lowestFavorablePrice !== trade.lowestFavorablePrice ||
-          evalResult.updatedTrade.lockedInProfit !== trade.lockedInProfit ||
-          evalResult.updatedTrade.peakProfit !== trade.peakProfit ||
-          evalResult.updatedTrade.profitLockTriggered !== trade.profitLockTriggered
+          t.currentTrailingStopPrice !== trade.currentTrailingStopPrice ||
+          t.highestFavorablePrice !== trade.highestFavorablePrice ||
+          t.lowestFavorablePrice !== trade.lowestFavorablePrice ||
+          t.lockedInProfit !== trade.lockedInProfit ||
+          t.peakProfit !== trade.peakProfit ||
+          t.profitLockTriggered !== trade.profitLockTriggered ||
+          t.earlyExitDecision !== trade.earlyExitDecision ||
+          t.earlyExitReason !== trade.earlyExitReason
         ) {
           stateChanged = true;
-          return evalResult.updatedTrade;
+          return t;
         }
-
         return trade;
       });
 
@@ -2296,34 +2358,35 @@ export default function App() {
     });
 
     if (sellTriggers.length > 0) {
-      sellTriggers.forEach(({ trade, reason }) => {
-        if (!trade.contract_id || tslSellRequestedRef.current.has(trade.contract_id)) {
+      sellTriggers.forEach(({ trade, reason, policyTriggered }) => {
+        if (!trade.contract_id || tslSellRequestedRef.current.has(trade.contract_id) || executionController.isSellPending(trade.contract_id)) {
           return;
         }
-        tslSellRequestedRef.current.add(trade.contract_id);
+        if (!trade.isValidToSell) return;
 
-        if (trade.isValidToSell) {
-          closingContractIdsRef.current.add(trade.contract_id);
-          try {
-            derivWS.sellContract(trade.contract_id, 0);
-            addLog(
-              `🛡️ [TRAILING STOP] ${reason} — dispatched Deriv market resale for #${trade.contract_id}.`,
-              'info'
-            );
-          } catch (err: any) {
-            closingContractIdsRef.current.delete(trade.contract_id);
-            tslSellRequestedRef.current.delete(trade.contract_id);
-            addLog(`Trailing stop sell error on #${trade.contract_id}: ${err?.message || 'Unknown error'}`, 'warn');
-          }
-        } else {
-          addLog(
-            `🛡️ [TRAILING STOP] ${reason} on #${trade.contract_id}, but Deriv marks contract ineligible for early resale; holding to expiry.`,
-            'warn'
-          );
-        }
+        tslSellRequestedRef.current.add(trade.contract_id);
+        void executionController
+          .executeSell({
+            source: 'EARLY_SELLING',
+            trade,
+            minPrice: 0,
+            reason,
+            policyTriggered,
+          })
+          .then((res) => {
+            if (res.sold) {
+              addLog(
+                `🛡️ [EARLY SELLING • ${policyTriggered || 'POLICY'}] ${reason} — sold #${trade.contract_id} for $${res.soldFor?.toFixed(2)}.`,
+                'info'
+              );
+            } else {
+              tslSellRequestedRef.current.delete(trade.contract_id!);
+              addLog(`Early-selling skipped/rejected on #${trade.contract_id}: ${res.reason}`, 'warn');
+            }
+          });
       });
     }
-  }, [currentPrice, decimals, openTrades, addLog]);
+  }, [currentPrice, decimals, openTrades, settings.earlyExit, candles, indicators, aiPrediction, addLog]);
 
   // Balance Refresh Callback
   const handleRefreshBalance = useCallback(() => {
@@ -2417,6 +2480,233 @@ export default function App() {
     );
   }, [currentPrice, indicators, algorithmicDecision, aiPrediction, regime, closedTrades, selectedSymbol, alertRules]);
 
+  const exportTradingJournalCSV = useCallback(() => {
+    if (closedTrades.length === 0) {
+      addLog('No closed trades in journal to export.', 'info');
+      return false;
+    }
+    const headers = ['ID', 'Timestamp', 'Symbol', 'Type', 'Stake', 'Profit', 'Result', 'Agent', 'Regime'];
+    const rows = closedTrades.map((t) => [
+      t.id,
+      t.timestamp,
+      t.symbol,
+      t.decision,
+      t.amount,
+      t.profit,
+      t.result,
+      t.agent,
+      t.regime,
+    ]);
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `trade_journal_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    addLog('📁 Exported trade journal history to CSV', 'success');
+    return true;
+  }, [closedTrades, addLog]);
+
+  // Register unified AIActionRegistry runtime handlers across Chat, BottomSheet, Fullscreen, Gemini & SBAgent
+  useEffect(() => {
+    aiActionRegistry.registerHandlers({
+      rotate_symbol: (args) => {
+        const nextSym = String(args.symbol || '').trim();
+        if (!nextSym) {
+          return { status: 'REJECTED', action: 'rotate_symbol', message: 'Target symbol missing.', timestamp: Date.now() };
+        }
+        setSelectedSymbol(nextSym);
+        derivWS.fetchCandles(nextSym, granularity, 120);
+        derivWS.subscribeTicks(nextSym);
+        addLog(`🔄 [AI ACTION] Rotated market symbol to ${nextSym}.`, 'info');
+        return { status: 'SUCCESS', action: 'rotate_symbol', message: `Switched market to ${nextSym}.`, data: { symbol: nextSym }, timestamp: Date.now() };
+      },
+      change_timeframe: (args) => {
+        const nextGran = Number(args.granularity || args.seconds || 60);
+        if (!Number.isFinite(nextGran) || nextGran < 60) {
+          return { status: 'REJECTED', action: 'change_timeframe', message: 'Invalid timeframe granularity.', timestamp: Date.now() };
+        }
+        setGranularity(nextGran);
+        derivWS.fetchCandles(selectedSymbol, nextGran, 120);
+        return { status: 'SUCCESS', action: 'change_timeframe', message: `Changed timeframe to ${nextGran}s.`, data: { granularity: nextGran }, timestamp: Date.now() };
+      },
+      adjust_stake_mode: (args) => {
+        const nextStake = Number(args.stake);
+        if (Number.isFinite(nextStake) && nextStake >= 0.35) {
+          setStake(Number(nextStake.toFixed(2)));
+        }
+        if (args.mode && ['FIXED', 'EQUITY_PERCENT', 'KELLY_HALF', 'KELLY_QUARTER'].includes(String(args.mode))) {
+          setSizingMode(String(args.mode) as PositionSizingMode);
+        }
+        return {
+          status: 'SUCCESS',
+          action: 'adjust_stake_mode',
+          message: `Updated stake to $${Number.isFinite(nextStake) ? nextStake.toFixed(2) : stake.toFixed(2)}.`,
+          timestamp: Date.now(),
+        };
+      },
+      adjust_strategy: (args) => {
+        const minConf = typeof args.minConfidence === 'number' ? args.minConfidence : undefined;
+        if (minConf !== undefined) {
+          setBotState((prev) => ({ ...prev, minConfidence: Math.max(0.35, Math.min(0.9, minConf)) }));
+        }
+        return {
+          status: 'SUCCESS',
+          action: 'adjust_strategy',
+          message: `Strategy parameters calibrated (${strategyState.activeVersion}).`,
+          timestamp: Date.now(),
+        };
+      },
+      tighten_stop: (args) => {
+        const dist = Number(args.distanceValue || 1.2);
+        const nextTsl: TrailingStopConfig = {
+          ...trailingStopConfig,
+          enabled: true,
+          distanceValue: Math.max(0.2, dist),
+        };
+        setTrailingStopConfig(nextTsl);
+        updateTrailingStop(nextTsl);
+        addLog(`🛡️ [AI ACTION] Tightened Trailing Stop distance to ${nextTsl.distanceValue}.`, 'info');
+        return { status: 'SUCCESS', action: 'tighten_stop', message: `Trailing stop tightened to ${nextTsl.distanceValue}.`, timestamp: Date.now() };
+      },
+      request_market_analysis: async () => {
+        await triggerAIScan();
+        return { status: 'SUCCESS', action: 'request_market_analysis', message: `Triggered fresh Gemini analysis on ${selectedSymbol}.`, timestamp: Date.now() };
+      },
+      inspect_open_contracts: () => {
+        return {
+          status: 'SUCCESS',
+          action: 'inspect_open_contracts',
+          message: `${openTradesRef.current.length} open contract(s) tracked (${currency} ${balance.toFixed(2)}).`,
+          data: openTradesRef.current.map((t) => ({
+            id: t.contract_id ?? t.id,
+            symbol: t.symbol,
+            profit: t.profit,
+            earlyExitDecision: t.earlyExitDecision,
+            isValidToSell: t.isValidToSell,
+          })),
+          timestamp: Date.now(),
+        };
+      },
+      request_early_selling_evaluation: () => {
+        const evals = openTradesRef.current.map((trade) =>
+          earlySellingEngine.evaluateContract({
+            trade,
+            policy: settings.earlyExit ?? DEFAULT_EARLY_EXIT_POLICY,
+            currentSpot: currentPriceRef.current,
+            candles,
+            indicators,
+            aiPrediction,
+            decimals,
+          }).evaluation
+        );
+        return {
+          status: 'SUCCESS',
+          action: 'request_early_selling_evaluation',
+          message: `Evaluated ${evals.length} open contract(s) against early-selling rules.`,
+          data: evals,
+          timestamp: Date.now(),
+        };
+      },
+      export_trading_journal: () => {
+        const exported = exportTradingJournalCSV();
+        return {
+          status: exported ? 'SUCCESS' : 'REJECTED',
+          action: 'export_trading_journal',
+          message: exported ? 'Trading journal exported to CSV.' : 'No closed trades available to export.',
+          timestamp: Date.now(),
+        };
+      },
+      propose_strategy_updates: (args) => {
+        const proposal: StrategyMutationProposal = {
+          id: `PROP-${Date.now()}`,
+          ruleCategory: String(args.ruleCategory || args.category || 'Entry & Risk'),
+          proposedRule: String(args.proposedRule || args.rule || 'Tighten confidence & profit lock thresholds.'),
+          rationale: String(args.rationale || 'AI Copilot empirical strategy optimization proposal.'),
+          expectedEdge: String(args.expectedEdge || '+4% Profit Factor stability'),
+          riskMitigation: String(args.riskMitigation || 'Preserves 5% session drawdown ceiling & Half-Kelly cap'),
+          timestamp: Date.now(),
+        };
+        setActiveStrategyProposal(proposal);
+        setIsStrategyEvolutionOpen(true);
+        return {
+          status: 'SUCCESS',
+          action: 'propose_strategy_updates',
+          message: 'Opened Strategy Evolution review modal with proposed mutation.',
+          data: proposal,
+          timestamp: Date.now(),
+        };
+      },
+      request_manual_trade_confirmation: (args) => {
+        const dir = String(args.direction || 'CALL').toUpperCase() === 'PUT' ? 'PUT' : 'CALL';
+        setDirection(dir);
+        hostToast(`Confirm ${dir} $${stake.toFixed(2)} on ${selectedSymbol}`);
+        return {
+          status: 'REQUIRES_CONFIRMATION',
+          action: 'request_manual_trade_confirmation',
+          message: `Prepared ${dir} order ($${stake.toFixed(2)} on ${selectedSymbol}); explicit operator confirmation required.`,
+          timestamp: Date.now(),
+        };
+      },
+      execute_authorized_trade: async (args, meta) => {
+        const dir = String(args.direction || direction).toUpperCase() === 'PUT' ? 'PUT' : 'CALL';
+        const tradeStakeVal = Number(args.stake || stake);
+        const execSource: ExecutionSource = meta.source === 'SUBAGENT_MD' ? 'SUBAGENT_MD' : meta.source === 'GEMINI_AI' ? 'GEMINI_AI' : 'COPILOT';
+
+        if (autonomyManager.getExecutionMode() === 'MANUAL_ONLY') {
+          return {
+            status: 'REQUIRES_CONFIRMATION',
+            action: 'execute_authorized_trade',
+            message: 'Execution mode is MANUAL_ONLY. Confirm trade manually in the terminal execution deck.',
+            timestamp: Date.now(),
+          };
+        }
+
+        const authRes = autonomyManager.authorizeExecution({ source: execSource, operation: 'PURCHASE' });
+        if (!authRes.authorized) {
+          return {
+            status: 'UNAUTHORIZED',
+            action: 'execute_authorized_trade',
+            message: authRes.reason || 'Autonomous AI trade execution requires active Autonomy Mode.',
+            timestamp: Date.now(),
+          };
+        }
+
+        await executeTrade(dir, tradeStakeVal, duration, execSource, durationUnit, undefined, trailingStopConfig);
+        return {
+          status: 'SUCCESS',
+          action: 'execute_authorized_trade',
+          message: `Authorized ${dir} execution submitted via ExecutionController (${execSource}).`,
+          timestamp: Date.now(),
+        };
+      },
+    });
+  }, [
+    selectedSymbol,
+    granularity,
+    stake,
+    duration,
+    durationUnit,
+    direction,
+    balance,
+    currency,
+    strategyState.activeVersion,
+    trailingStopConfig,
+    settings.earlyExit,
+    candles,
+    indicators,
+    aiPrediction,
+    decimals,
+    triggerAIScan,
+    updateTrailingStop,
+    exportTradingJournalCSV,
+    executeTrade,
+    addLog,
+  ]);
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950">
       {/* Top Fixed Header Navbar */}
@@ -2497,6 +2787,38 @@ export default function App() {
           balanceFreshness={balanceSnapshot.freshness}
           authMethod={derivWS.getAuthMethod()}
         />
+
+        {/* Startup Session Recovery Banner (non-intrusive; never auto-starts autonomous trading) */}
+        {sessionRecoveryPlan.hasRecoverableSession && !recoveryBannerDismissed && (
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 bg-slate-900/95 border border-cyan-500/35 rounded-xl text-xs font-mono">
+            <div className="flex items-center gap-2 text-cyan-200">
+              <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0" />
+              <span>{sessionRecoveryPlan.summary}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {sessionRecoveryPlan.requiresExplicitAutonomyResume && autonomySnapshot.lifecycle === 'OFF' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRecoveryBannerDismissed(true);
+                    handleRunAutonomously();
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-bold hover:bg-emerald-500/30 transition-all"
+                >
+                  Resume Autonomy
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setRecoveryBannerDismissed(true)}
+                className="text-slate-400 hover:text-white p-1"
+                title="Dismiss recovery notice"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* View 1: Main Trading Terminal (Persistently mounted to prevent chart canvas remount flash) */}
         <div className={`flex flex-col gap-4 ${activeTab === 'terminal' ? 'block tab-crossfade-enter' : 'hidden'}`}>
@@ -2591,6 +2913,9 @@ export default function App() {
             isSniperTriggerArmed={isSniperTriggerArmed}
             onToggleSniperTrigger={() => setIsSniperTriggerArmed(!isSniperTriggerArmed)}
             autonomyMode={autonomyMode}
+            lifecycleState={autonomySnapshot.lifecycle}
+            executionMode={autonomySnapshot.executionMode}
+            strategyVersion={strategyState.activeVersion}
             sbagentAutonomyGrant={sbagentAutonomyGrant}
             autonomyPreset={autonomyPreset}
             appliedSettings={appliedAutonomySettings}
@@ -2659,6 +2984,23 @@ export default function App() {
                 currentStake={coreRiskMetrics.recommendedKellyStake ?? stake}
                 balance={balance}
                 onExpandFullscreen={() => setIsFullscreenWorkspaceOpen(true)}
+                onRotateSymbol={(sym) => {
+                  setSelectedSymbol(sym);
+                  derivWS.fetchCandles(sym, granularity, 120);
+                  derivWS.subscribeTicks(sym);
+                }}
+                onAdjustStake={(nextStake, mode) => {
+                  setStake(nextStake);
+                  if (mode && ['FIXED', 'EQUITY_PERCENT', 'KELLY_HALF', 'KELLY_QUARTER'].includes(mode)) {
+                    setSizingMode(mode as PositionSizingMode);
+                  }
+                }}
+                onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'COPILOT', durationUnit, undefined, trailingStopConfig)}
+                onExportJournal={exportTradingJournalCSV}
+                onProposeSbagentUpdate={(proposal) => {
+                  setActiveStrategyProposal(proposal);
+                  setIsStrategyEvolutionOpen(true);
+                }}
               />
             </div>
             <div className="lg:col-span-4 flex flex-col gap-5">
@@ -2754,7 +3096,17 @@ export default function App() {
         isAutonomousRunning={isAutonomousRunning}
         lastAutonomousDecision={lastSubagentDecision}
         onToggleAutonomous={() => {
-          setIsAutonomousRunning(!isAutonomousRunning);
+          const next = !isAutonomousRunning;
+          setIsAutonomousRunning(next);
+          if (next) {
+            if (autonomyManager.getLifecycle() !== 'ACTIVE') {
+              handleRunAutonomously();
+            } else {
+              autonomyManager.updatePermissions({ allowSubagent: true }, 'subagent_modal_enabled');
+            }
+          } else {
+            autonomyManager.updatePermissions({ allowSubagent: false }, 'subagent_modal_disabled');
+          }
           sound.play('toggle');
         }}
       />
@@ -2766,6 +3118,26 @@ export default function App() {
         evolutionLogs={evolutionLogs}
         onTriggerEvolution={triggerAgentEvolution}
         isEvolving={isEvolving}
+      />
+
+      <StrategyEvolutionModal
+        isOpen={isStrategyEvolutionOpen}
+        onClose={() => setIsStrategyEvolutionOpen(false)}
+        activeProposal={activeStrategyProposal}
+        closedTrades={closedTrades}
+        onApplyProposal={async (proposal) => {
+          const validated = strategyEvolutionManager.validateCandidateProposal({
+            proposedParameters: strategyEvolutionManager.getActiveVersion().parameters,
+            rationale: `${proposal.ruleCategory}: ${proposal.proposedRule} — ${proposal.rationale}`,
+            closedTrades,
+          });
+          if (validated.riskCheckPassed) {
+            strategyEvolutionManager.promoteProposal(validated.id);
+          }
+          setActiveStrategyProposal(null);
+        }}
+        onRejectProposal={() => setActiveStrategyProposal(null)}
+        onNotify={(msg) => addLog(msg, 'info')}
       />
 
       <AccountTokenModal
@@ -2993,6 +3365,17 @@ export default function App() {
         stake={stake}
         onStakeChange={setStake}
         onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
+        onRotateSymbol={(sym) => {
+          setSelectedSymbol(sym);
+          derivWS.fetchCandles(sym, granularity, 120);
+          derivWS.subscribeTicks(sym);
+        }}
+        onAdjustStake={(nextStake, mode) => {
+          setStake(nextStake);
+          if (mode && ['FIXED', 'EQUITY_PERCENT', 'KELLY_HALF', 'KELLY_QUARTER'].includes(mode)) {
+            setSizingMode(mode as PositionSizingMode);
+          }
+        }}
         isExecuting={isExecuting}
         currency={currency}
         balance={balance}

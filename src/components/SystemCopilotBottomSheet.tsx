@@ -30,6 +30,11 @@ import { sound } from '../lib/soundEngine';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import { voiceInput } from '../lib/voiceInputEngine';
 import { getAIRequestHeaders } from '../lib/aiClientConfig';
+import { consumeSSEStream } from '../lib/sseParser';
+import { aiActionRegistry } from '../lib/aiActionRegistry';
+import { memoryManager } from '../lib/memoryManager';
+import { strategyEvolutionManager } from '../lib/strategyEvolutionManager';
+import { autonomyManager } from '../lib/autonomyManager';
 
 interface SystemCopilotBottomSheetProps {
   symbol: string;
@@ -172,12 +177,24 @@ How can I assist your execution or risk audit?`,
     setIsLoading(true);
     setActiveActivities([]);
 
+    const activeStrategy = strategyEvolutionManager.getActiveVersion();
+    const autonomySnap = autonomyManager.getSnapshot();
+    const memorySummary = memoryManager.selectCompactContext({
+      symbol,
+      strategyVersion: activeStrategy.version,
+      regime: regime?.type,
+      maxItems: 5,
+    });
+
     const fullContext = {
       symbol,
       currentPrice,
       price: currentPrice,
       timeframe,
       candlesCount: candles.length,
+      strategyVersion: activeStrategy.version,
+      autonomyLifecycle: autonomySnap.lifecycle,
+      memorySummary,
       signals: {
         rsi: indicators?.rsiNow,
         ma14: indicators?.ma14Now,
@@ -226,79 +243,107 @@ How can I assist your execution or risk audit?`,
       }
 
       const reader = res.body.getReader();
-      const decoder = new TextDecoder('utf-8');
       let streamedAssistantText = '';
       let hasAddedAssistantPlaceholder = false;
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        const textChunk = decoder.decode(value, { stream: true });
-        const lines = textChunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === 'activity') {
-                setActiveActivities((prev) => {
-                  const filtered = prev.filter((a) => a.step !== data.step);
-                  return [
-                    ...filtered,
-                    {
-                      step: data.step,
-                      tool: data.tool,
-                      label: data.label,
-                      detail: data.detail,
-                      status: data.status,
-                      timestamp: data.timestamp,
-                    },
-                  ];
-                });
-              } else if (data.type === 'chunk') {
-                streamedAssistantText += data.text;
-                if (!hasAddedAssistantPlaceholder) {
-                  hasAddedAssistantPlaceholder = true;
-                  setMessages((prev) => [
-                    ...prev,
-                    {
-                      id: `ast_${Date.now()}`,
-                      role: 'assistant',
-                      content: streamedAssistantText,
-                      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                      isStreaming: true,
-                    },
-                  ]);
-                } else {
-                  setMessages((prev) => {
-                    const lastIdx = prev.length - 1;
-                    const updated = [...prev];
-                    updated[lastIdx] = {
-                      ...updated[lastIdx],
-                      content: streamedAssistantText,
-                    };
-                    return updated;
-                  });
-                }
-              } else if (data.type === 'done') {
-                setMessages((prev) => {
-                  const lastIdx = prev.length - 1;
-                  const updated = [...prev];
-                  if (updated[lastIdx]?.role === 'assistant') {
-                    updated[lastIdx].isStreaming = false;
-                  }
-                  return updated;
-                });
-                sound.play('toggle');
-              }
-            } catch (e) {
-              // Ignore parse errors
-            }
+      await consumeSSEStream(reader, async (evt) => {
+        if (!evt.json) return;
+        const data = evt.json;
+        if (data.type === 'activity') {
+          setActiveActivities((prev) => {
+            const filtered = prev.filter((a) => a.step !== data.step);
+            return [
+              ...filtered,
+              {
+                step: data.step,
+                tool: data.tool,
+                label: data.label,
+                detail: data.detail,
+                status: data.status,
+                timestamp: data.timestamp,
+              },
+            ];
+          });
+        } else if (data.type === 'chunk') {
+          streamedAssistantText += data.text || '';
+          if (!hasAddedAssistantPlaceholder) {
+            hasAddedAssistantPlaceholder = true;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `ast_${Date.now()}`,
+                role: 'assistant',
+                content: streamedAssistantText,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                isStreaming: true,
+              },
+            ]);
+          } else {
+            setMessages((prev) => {
+              const lastIdx = prev.length - 1;
+              const updated = [...prev];
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                content: streamedAssistantText,
+              };
+              return updated;
+            });
           }
+        } else if (data.type === 'tool_call') {
+          const mappedName =
+            data.name === 'execute_trade'
+              ? 'execute_authorized_trade'
+              : data.name === 'export_journal'
+              ? 'export_trading_journal'
+              : data.name === 'propose_sbagent_update'
+              ? 'propose_strategy_updates'
+              : data.name;
+          const result = await aiActionRegistry.dispatch({
+            action: mappedName,
+            args: data.args || {},
+            source: 'COPILOT',
+          });
+          const badge = `\n\n> **${result.status}** (\`${result.action}\`): ${result.message}`;
+          streamedAssistantText += badge;
+          if (!hasAddedAssistantPlaceholder) {
+            hasAddedAssistantPlaceholder = true;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `ast_${Date.now()}`,
+                role: 'assistant',
+                content: streamedAssistantText,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                isStreaming: true,
+              },
+            ]);
+          } else {
+            setMessages((prev) => {
+              const lastIdx = prev.length - 1;
+              const updated = [...prev];
+              if (updated[lastIdx]?.role === 'assistant') {
+                updated[lastIdx] = {
+                  ...updated[lastIdx],
+                  content: streamedAssistantText,
+                };
+              }
+              return updated;
+            });
+          }
+        } else if (data.type === 'done') {
+          setMessages((prev) => {
+            const lastIdx = prev.length - 1;
+            const updated = [...prev];
+            if (updated[lastIdx]?.role === 'assistant') {
+              updated[lastIdx].isStreaming = false;
+            }
+            return updated;
+          });
+          sound.play('toggle');
         }
-      }
-    } catch (streamErr) {
+      });
+    } catch (streamErr: any) {
+      if (streamErr?.name === 'AbortError') return;
       // Standard fetch fallback
       try {
         const res = await fetch('/api/ai/chat', {
@@ -311,23 +356,23 @@ How can I assist your execution or risk audit?`,
         });
 
         const data = await res.json();
+        if (!res.ok || !data?.message) {
+          throw new Error(data?.error || `HTTP ${res.status}`);
+        }
         const assistantMsg: ChatMessage = {
           id: `ast_${Date.now()}`,
           role: 'assistant',
-          content: data.message || 'Analysis complete.',
+          content: data.message,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
 
         setMessages((prev) => [...prev, assistantMsg]);
         sound.play('toggle');
-      } catch (err) {
-        console.warn('Copilot request failed:', err);
+      } catch (err: any) {
         const errorMsg: ChatMessage = {
           id: `err_${Date.now()}`,
           role: 'assistant',
-          content: `Quantitative Strategist: Spot price is ${currentPrice} with RSI at ${
-            indicators?.rsiNow ? indicators.rsiNow.toFixed(1) : 50
-          }. Keep risk controlled and maintain stop loss discipline.`,
+          content: `**Connection Error**: Unable to reach SBAgent backend (${err?.message || 'stream interrupted'}). No response was fabricated; check network/server connectivity and retry.`,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, errorMsg]);

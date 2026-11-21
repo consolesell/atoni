@@ -155,6 +155,8 @@ export interface AIPredictionResult {
   resistance_level?: number;
   timestamp?: string;
   parsed_ok?: boolean;
+  is_algorithmic_fallback?: boolean;
+  context?: PredictionContext;
 }
 
 export interface TrailingStopConfig {
@@ -221,6 +223,12 @@ export interface TradeRecord {
   status?: string;
   indicators?: any;
   aiCritique?: AICritiqueResult | null;
+  strategyVersion?: string;
+  executionSource?: ExecutionSource;
+  earlyExitDecision?: EarlyExitDecision;
+  earlyExitReason?: string;
+  earlyExitPolicyTriggered?: string;
+  earlyExitEvaluatedAt?: number;
 }
 
 export interface AICritiqueResult {
@@ -510,5 +518,268 @@ export interface CoreRiskMetrics {
   recommendedKellyStake: number;
   kellyFraction: number;
 }
+
+// ── Stage 1 + Stage 2 Unified Architecture Types ──
+
+export type AutonomyLifecycleState =
+  | 'OFF'
+  | 'STARTING'
+  | 'ACTIVE'
+  | 'PAUSED'
+  | 'STOPPING'
+  | 'ERROR';
+
+export interface AutonomyPermissions {
+  allowAutoBot: boolean;
+  allowSubagent: boolean;
+  allowAiTriggers: boolean;
+  allowEarlySelling: boolean;
+  allowSymbolRotation: boolean;
+}
+
+export type ExecutionSource =
+  | 'MANUAL'
+  | 'AUTO_BOT'
+  | 'SUBAGENT_MD'
+  | 'GEMINI_AI'
+  | 'LOCAL_AI'
+  | 'COPILOT'
+  | 'STRATEGY_AUTOMATION'
+  | 'EARLY_SELLING';
+
+export type ExecutionModeSetting = 'MANUAL_ONLY' | 'SUPERVISED_AUTO' | 'FULL_AUTONOMOUS';
+
+export interface PredictionContext {
+  requestId: string;
+  symbol: string;
+  granularity: number;
+  snapshotTimestamp: number;
+  requestTimestamp: number;
+  responseTimestamp: number;
+  strategyVersion: string;
+  expiresAt: number;
+  provider?: string;
+  model?: string;
+  autonomyGeneration?: number;
+  configRevision?: number;
+}
+
+export interface ExecutionRequest {
+  source: ExecutionSource;
+  symbol: string;
+  contractType: 'CALL' | 'PUT';
+  stake: number;
+  duration: number;
+  durationUnit: 'ticks' | 'seconds' | 'minutes';
+  confidence?: number;
+  compositeSignal?: number;
+  agent?: string;
+  regime?: string;
+  strategyVersion?: string;
+  reasoning?: string;
+  isSniperTrade?: boolean;
+  confluenceScore?: number;
+  trailingStopEnabled?: boolean;
+  trailingStopConfig?: TrailingStopConfig;
+  autonomyGeneration?: number;
+  predictionContext?: PredictionContext;
+  aiPrediction?: AIPredictionResult | null;
+  indicators?: Partial<TechnicalIndicators>;
+  takeProfitEnabled?: boolean;
+  takeProfitAmount?: number;
+  targetPrice?: number;
+  stopPrice?: number;
+}
+
+export interface ExecutionResult {
+  executed: boolean;
+  status: 'EXECUTED' | 'BLOCKED' | 'RECONCILIATION_PENDING' | 'FAILED';
+  contractId?: string | number;
+  proposalId?: string;
+  buyPrice?: number;
+  payout?: number;
+  blockers: string[];
+  reason: string;
+  tradeRecord?: TradeRecord;
+  reconciliationPending?: boolean;
+  timestamp: number;
+}
+
+export type EarlyExitDecision = 'HOLD' | 'PROTECT' | 'SELL' | 'MONITOR';
+
+export interface EarlyExitPolicyConfig {
+  enabled: boolean;
+  autoExecute: boolean;
+  profitTargetEnabled: boolean;
+  profitTargetPercent: number; // % of stake, e.g. 55
+  profitProtectionEnabled: boolean;
+  profitLockTriggerPercent: number; // peak % return before drawdown protection arms, e.g. 35
+  profitProtectionDrawdownPercent: number; // allowable drop from peak % return, e.g. 40% of peak
+  trailingStopEnabled: boolean;
+  reversalExitEnabled: boolean;
+  reversalConfidenceThreshold: number; // 0-100, e.g. 72
+  signalDeteriorationEnabled: boolean;
+  maxLossExitEnabled: boolean;
+  maxLossPercent: number; // % of stake lost allowed before early cut if valid to sell, e.g. 45
+  timeDecayExitEnabled: boolean;
+  minRemainingSeconds: number; // don't force time-decay exit inside final Ns unless danger
+  strategyOverrides?: Record<string, Partial<EarlyExitPolicyConfig>>;
+}
+
+export interface EarlyExitEvaluation {
+  contractId: string | number;
+  symbol: string;
+  decision: EarlyExitDecision;
+  shouldSellNow: boolean;
+  isValidToSell: boolean;
+  reason: string;
+  policyTriggered: string | null;
+  urgency: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  expectedPnL: number;
+  expectedReturnPercent: number;
+  peakReturnPercent: number;
+  remainingSeconds: number | null;
+  bidPrice: number | null;
+  evaluatedAt: number;
+}
+
+export type ActionStatus =
+  | 'SUCCESS'
+  | 'REJECTED'
+  | 'REQUIRES_CONFIRMATION'
+  | 'UNAUTHORIZED'
+  | 'UNAVAILABLE'
+  | 'FAILED';
+
+export interface ActionResult<T = any> {
+  status: ActionStatus;
+  action: string;
+  message: string;
+  data?: T;
+  timestamp: number;
+}
+
+export interface StrategyPerformanceMetrics {
+  tradesCount: number;
+  wins: number;
+  losses: number;
+  earlyExits: number;
+  winRate: number;
+  netProfit: number;
+  grossProfit: number;
+  grossLoss: number;
+  profitFactor: number;
+  expectancy: number;
+  maxDrawdownPercent: number;
+  aiAlignmentWinRate: number;
+  regimeBreakdown: Record<string, { trades: number; wins: number; netProfit: number }>;
+  symbolBreakdown: Record<string, { trades: number; wins: number; netProfit: number }>;
+}
+
+export interface StrategyParameters {
+  minConfidence: number; // 0.35 - 0.90
+  consensusThreshold: number; // 0.50 - 0.85
+  kellyFractionScale: number; // 0.25 - 0.50
+  maxStakePercent: number; // 0.01 - 0.08
+  rsiOverbought: number; // 65 - 85
+  rsiOversold: number; // 15 - 35
+  earlyExit: Pick<
+    EarlyExitPolicyConfig,
+    'profitTargetPercent' | 'profitLockTriggerPercent' | 'profitProtectionDrawdownPercent' | 'maxLossPercent'
+  >;
+}
+
+export type StrategyRolloutMode = 'MANUAL_APPROVAL' | 'AUTO_PROMOTE_SAFE';
+
+export interface StrategyVersionRecord {
+  version: string;
+  parentVersion: string | null;
+  createdAt: string;
+  activatedAt?: string;
+  retiredAt?: string;
+  status: 'BASELINE' | 'CANDIDATE' | 'ACTIVE' | 'ROLLED_BACK' | 'RETIRED';
+  rationale: string;
+  parameters: StrategyParameters;
+  metrics: StrategyPerformanceMetrics;
+  rollbackReason?: string;
+}
+
+export interface StrategyEvolutionProposal {
+  id: string;
+  candidateVersion: string;
+  baseVersion: string;
+  createdAt: number;
+  rationale: string;
+  proposedParameters: StrategyParameters;
+  expectedWinRateDelta: number;
+  expectedProfitFactor: number;
+  simulatedMaxDrawdownPercent: number;
+  riskCheckPassed: boolean;
+  riskRejectionReasons: string[];
+  approved?: boolean;
+}
+
+export type MemoryCategory = 'SESSION' | 'STRATEGY' | 'AGENT' | 'OPERATIONAL';
+
+export type MemoryTrustSource =
+  | 'VERIFIED_FACT'
+  | 'USER_DECISION'
+  | 'AI_OBSERVATION'
+  | 'HYPOTHESIS'
+  | 'RECOMMENDATION';
+
+export interface MemoryRecord {
+  id: string;
+  category: MemoryCategory;
+  trustSource: MemoryTrustSource;
+  verified: boolean;
+  key: string;
+  title: string;
+  summary: string;
+  symbol?: string;
+  strategyVersion?: string;
+  regime?: string;
+  tags: string[];
+  relevanceScore: number;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt?: number;
+  version: number;
+  metadata?: Record<string, any>;
+}
+
+export type SyncStatus = 'LOCAL_ONLY' | 'PENDING_SYNC' | 'SYNCED' | 'SYNC_FAILED';
+
+export interface SessionStateSnapshot {
+  sessionId: string;
+  version: number;
+  startTime: number;
+  lastSavedAt: number;
+  accountRef: {
+    accountId: string | null;
+    loginId: string | null;
+    accountType: 'demo' | 'real' | null;
+    currency: string;
+  } | null;
+  symbol: string;
+  granularity: number;
+  activeStrategyVersion: string;
+  executionMode: ExecutionModeSetting;
+  autonomyLifecycle: AutonomyLifecycleState;
+  autonomyPermissions: AutonomyPermissions;
+  openContractRefs: Array<{
+    contractId: string | number;
+    symbol: string;
+    buyPrice: number;
+    decision: string;
+    dateStart?: number;
+    dateExpiry?: number;
+    strategyVersion?: string;
+  }>;
+  pendingIntentIds: string[];
+  interruptedCleanly: boolean;
+  recoverySummary?: string;
+}
+
 
 

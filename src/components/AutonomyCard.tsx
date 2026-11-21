@@ -9,10 +9,14 @@ import {
   X,
 } from 'lucide-react';
 import { AutonomyMode, AutonomyPreset, AppliedAutonomySettings } from '../types/autonomy';
+import { AutonomyLifecycleState, ExecutionModeSetting } from '../types/trading';
 import { sound } from '../lib/soundEngine';
 
 interface AutonomyCardProps {
   autonomyMode: AutonomyMode;
+  lifecycleState?: AutonomyLifecycleState;
+  executionMode?: ExecutionModeSetting;
+  strategyVersion?: string;
   sbagentAutonomyGrant: boolean;
   autonomyPreset: AutonomyPreset;
   appliedSettings?: AppliedAutonomySettings | null;
@@ -26,6 +30,9 @@ interface AutonomyCardProps {
 
 export const AutonomyCard: React.FC<AutonomyCardProps> = ({
   autonomyMode,
+  lifecycleState,
+  executionMode = 'SUPERVISED_AUTO',
+  strategyVersion = 'v4.1.0-baseline',
   sbagentAutonomyGrant,
   autonomyPreset,
   appliedSettings,
@@ -36,7 +43,9 @@ export const AutonomyCard: React.FC<AutonomyCardProps> = ({
   currentSymbol,
   balance,
 }) => {
-  const isRunning = autonomyMode === 'RUNNING';
+  const effectiveLifecycle: AutonomyLifecycleState =
+    lifecycleState || (autonomyMode === 'RUNNING' ? 'ACTIVE' : autonomyMode === 'ARMED' ? 'PAUSED' : 'OFF');
+  const isRunning = effectiveLifecycle === 'ACTIVE' || effectiveLifecycle === 'STARTING' || autonomyMode === 'RUNNING';
 
   const [configuringPhase, setConfiguringPhase] = useState<'idle' | 'validating' | 'configuring' | 'starting'>('idle');
   const [showMobileErrors, setShowMobileErrors] = useState(false);
@@ -137,13 +146,18 @@ export const AutonomyCard: React.FC<AutonomyCardProps> = ({
                   className={`text-[10px] font-mono font-bold uppercase tracking-wider ${
                     isRunning
                       ? 'text-cyan-300'
-                      : autonomyMode === 'ARMED'
+                      : effectiveLifecycle === 'ERROR'
+                      ? 'text-rose-400'
+                      : effectiveLifecycle === 'PAUSED'
                       ? 'text-amber-300'
                       : 'text-slate-400'
                   }`}
                 >
-                  {autonomyMode} • {sbagentAutonomyGrant ? 'SBAgent GRANTED' : 'SBAgent idle'}
+                  {effectiveLifecycle} • {executionMode.replace('_', ' ')} • {sbagentAutonomyGrant ? 'SBAgent GRANTED' : 'SBAgent idle'}
                 </span>
+              </div>
+              <div className="text-[9px] text-slate-500 font-mono mt-0.5">
+                Strategy {strategyVersion}
               </div>
             </div>
           </div>

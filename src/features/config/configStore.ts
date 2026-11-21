@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { TerminalConfig, DEFAULT_TERMINAL_CONFIG, validateTerminalConfig } from '../../config/terminalConfig';
+import { configurationManager } from '../../lib/configurationManager';
 
 interface ConfigState {
   config: TerminalConfig;
@@ -42,6 +43,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
         consensus: { ...state.config.consensus, ...updates },
       });
       persistConfig(nextConfig);
+      configurationManager.syncFromTerminalConfig(nextConfig);
       return { config: nextConfig };
     }),
 
@@ -52,6 +54,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
         risk: { ...state.config.risk, ...updates },
       });
       persistConfig(nextConfig);
+      configurationManager.syncFromTerminalConfig(nextConfig);
       return { config: nextConfig };
     }),
 
@@ -62,6 +65,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
         market: { ...state.config.market, ...updates },
       });
       persistConfig(nextConfig);
+      configurationManager.syncFromTerminalConfig(nextConfig);
       return { config: nextConfig };
     }),
 
@@ -72,11 +76,13 @@ export const useConfigStore = create<ConfigState>((set) => ({
         autonomy: { ...state.config.autonomy, ...updates },
       });
       persistConfig(nextConfig);
+      configurationManager.syncFromTerminalConfig(nextConfig);
       return { config: nextConfig };
     }),
 
   resetToDefaults: () => {
     persistConfig(DEFAULT_TERMINAL_CONFIG);
+    configurationManager.syncFromTerminalConfig(DEFAULT_TERMINAL_CONFIG);
     set({ config: DEFAULT_TERMINAL_CONFIG });
   },
 }));

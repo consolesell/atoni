@@ -17,6 +17,8 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
+import { strategyEvolutionManager } from '../lib/strategyEvolutionManager';
+import { StrategyVersionRecord, StrategyEvolutionProposal, TradeRecord } from '../types/trading';
 
 export interface StrategyMutationProposal {
   id: string;
@@ -46,6 +48,7 @@ interface StrategyEvolutionModalProps {
   isOpen: boolean;
   onClose: () => void;
   activeProposal: StrategyMutationProposal | null;
+  closedTrades?: TradeRecord[];
   onApplyProposal: (proposal: StrategyMutationProposal) => void;
   onRejectProposal: () => void;
   onNotify?: (msg: string) => void;
@@ -55,6 +58,7 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
   isOpen,
   onClose,
   activeProposal,
+  closedTrades = [],
   onApplyProposal,
   onRejectProposal,
   onNotify,
@@ -62,34 +66,14 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
   const [activeTab, setActiveTab] = useState<'proposal' | 'versions' | 'ab_test'>('proposal');
   const [currentScript, setCurrentScript] = useState<string>('');
   const [isLoadingScript, setIsLoadingScript] = useState(false);
-  const [versions, setVersions] = useState<StrategyVersion[]>([
-    {
-      id: 'v3.1.0',
-      versionName: 'v3.1.0-Kelly Baseline',
-      createdAt: Date.now() - 86400000 * 3,
-      author: 'Givan (Kingvan)',
-      ruleChangesSummary: 'Half-Kelly Dynamic Position Sizing + 5% Circuit Breaker Protection.',
-      trafficAllocation: 70,
-      tradesCount: 42,
-      winRate: 66.7,
-      profitFactor: 1.85,
-      isActive: true,
-    },
-    {
-      id: 'v3.2.0-experimental',
-      versionName: 'v3.2.0-Adaptive Squeeze',
-      createdAt: Date.now() - 86400000,
-      author: 'SBAgent Autonomous Mutation',
-      ruleChangesSummary: 'Tighter RSI oversold gates (< 35) + 3-candle momentum cooldown filter.',
-      trafficAllocation: 30,
-      tradesCount: 18,
-      winRate: 72.2,
-      profitFactor: 2.15,
-      isActive: false,
-    },
-  ]);
-
+  const [evolutionState, setEvolutionState] = useState(() => strategyEvolutionManager.getState());
   const [allocationA, setAllocationA] = useState(70);
+
+  useEffect(() => {
+    return strategyEvolutionManager.subscribe((next) => {
+      setEvolutionState(next);
+    });
+  }, []);
 
   useEffect(() => {
     if (isOpen) {
@@ -117,6 +101,11 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
 
   if (!isOpen) return null;
 
+  const versions = evolutionState.versions;
+  const activeVersion = evolutionState.versions.find((v) => v.version === evolutionState.activeVersion) || evolutionState.versions[0];
+  const candidateOrParent = evolutionState.versions[1] || activeVersion;
+  const latestCandidateProposal: StrategyEvolutionProposal | undefined = evolutionState.proposals[0];
+
   const handleApproveMutation = () => {
     if (!activeProposal) return;
     sound.play('trade');
@@ -125,15 +114,34 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
     onClose();
   };
 
-  const handleRollbackVersion = (ver: StrategyVersion) => {
+  const handleGenerateRealCandidate = () => {
     sound.play('click');
-    setVersions((prev) =>
-      prev.map((v) => ({
-        ...v,
-        isActive: v.id === ver.id,
-      }))
+    const proposal = strategyEvolutionManager.generateBoundedCandidate(closedTrades);
+    onNotify?.(
+      proposal.riskCheckPassed
+        ? `Generated validated candidate ${proposal.candidateVersion}.`
+        : `Candidate ${proposal.candidateVersion} rejected by risk filter: ${proposal.riskRejectionReasons.join('; ')}`
     );
-    onNotify?.(`Rolled back active strategy to ${ver.versionName}.`);
+  };
+
+  const handlePromoteCandidate = (proposalId: string) => {
+    const res = strategyEvolutionManager.promoteProposal(proposalId);
+    if (res.ok) {
+      sound.play('win');
+      onNotify?.(`Promoted strategy version ${res.version?.version}.`);
+    } else {
+      onNotify?.(res.reason || 'Promotion blocked.');
+    }
+  };
+
+  const handleRollbackVersion = (ver: StrategyVersionRecord) => {
+    sound.play('click');
+    const res = strategyEvolutionManager.rollbackToParent(`Manual rollback requested from ${evolutionState.activeVersion} toward ${ver.version}`);
+    onNotify?.(
+      res.ok
+        ? `Rolled back active strategy to ${res.activeVersion}.`
+        : `Active baseline ${res.activeVersion} has no parent rollback target.`
+    );
   };
 
   return (
@@ -288,31 +296,69 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
                   </div>
                 </div>
               ) : (
-                <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
+                <div className="py-6 flex flex-col items-center justify-center text-center space-y-3">
                   <div className="w-12 h-12 rounded-2xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-400">
                     <Sparkles className="w-6 h-6" />
                   </div>
-                  <h3 className="text-sm font-bold text-slate-200 font-mono">No Pending Mutation Proposals</h3>
+                  <h3 className="text-sm font-bold text-slate-200 font-mono">
+                    Active Strategy: {activeVersion?.version}
+                  </h3>
                   <p className="text-xs text-slate-400 max-w-md font-mono">
-                    SBAgent is currently running on active baseline rules. As trades execute, the agent autonomously formulates concrete enhancements and queues them here for your approval.
+                    Rollout Policy:{' '}
+                    <button
+                      onClick={() =>
+                        strategyEvolutionManager.setRolloutMode(
+                          evolutionState.rolloutMode === 'MANUAL_APPROVAL'
+                            ? 'AUTO_PROMOTE_SAFE'
+                            : 'MANUAL_APPROVAL'
+                        )
+                      }
+                      className="text-purple-300 underline font-bold"
+                    >
+                      {evolutionState.rolloutMode}
+                    </button>
+                    . Generate bounded candidate parameters calibrated strictly from closed Deriv outcomes ({closedTrades.length} settled trades).
                   </p>
                   <button
-                    onClick={() => {
-                      sound.play('click');
-                      onApplyProposal({
-                        id: `prop_${Date.now()}`,
-                        ruleCategory: 'Volatility Squeeze & RSI Filter',
-                        proposedRule: `### 🛡️ Adaptive Oversold Throttle\n- [x] If RSI < 32 on 1m chart AND BB Width < 0.0018, require 2 consecutive green candle confirmations before Rise entry.\n- [x] Reduce stake to Quarter-Kelly ($0.25f*) during low tick frequency periods.`,
-                        rationale: 'Empirical backtest analysis identified 3 consecutive consolidation losses under ultra-low BB Width environments. Adding confirmation candles preserves capital.',
-                        expectedEdge: '+5.4% Win Rate on Mean-Reversion Entries',
-                        riskMitigation: 'Drawdown bound tightened by 1.2%',
-                        timestamp: Date.now(),
-                      });
-                    }}
+                    onClick={handleGenerateRealCandidate}
                     className="mt-2 px-4 py-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 rounded-xl text-xs font-mono font-bold transition-all"
                   >
-                    Generate Sample AI Strategy Mutation
+                    Evaluate & Propose Bounded Parameter Candidate
                   </button>
+
+                  {latestCandidateProposal && (
+                    <div className="w-full text-left p-4 mt-3 bg-slate-950/80 border border-slate-800 rounded-xl space-y-2 text-xs font-mono">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-200">
+                          Latest Candidate: {latestCandidateProposal.candidateVersion}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            latestCandidateProposal.riskCheckPassed
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : 'bg-rose-500/20 text-rose-300'
+                          }`}
+                        >
+                          {latestCandidateProposal.riskCheckPassed ? 'RISK VERIFIED' : 'REJECTED BY RISK FILTER'}
+                        </span>
+                      </div>
+                      <p className="text-slate-300 font-sans">{latestCandidateProposal.rationale}</p>
+                      {!latestCandidateProposal.riskCheckPassed ? (
+                        <div className="text-rose-300 text-[11px]">
+                          Blockers: {latestCandidateProposal.riskRejectionReasons.join(' | ')}
+                        </div>
+                      ) : (
+                        !latestCandidateProposal.approved && (
+                          <button
+                            onClick={() => handlePromoteCandidate(latestCandidateProposal.id)}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs"
+                          >
+                            Promote {latestCandidateProposal.candidateVersion} to Active
+                          </button>
+                        )
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -322,7 +368,7 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
           {activeTab === 'versions' && (
             <div className="space-y-4">
               <div className="text-xs text-slate-400 font-mono flex items-center justify-between">
-                <span>Registered strategy specification snapshots:</span>
+                <span>Registered versioned strategy snapshots ({versions.length}):</span>
                 <button
                   onClick={loadCurrentScript}
                   className="flex items-center gap-1 text-cyan-400 hover:underline"
@@ -333,84 +379,92 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
               </div>
 
               <div className="space-y-3">
-                {versions.map((ver) => (
-                  <div
-                    key={ver.id}
-                    className={`p-4 rounded-xl border transition-all ${
-                      ver.isActive
-                        ? 'bg-purple-950/20 border-purple-500/50 shadow-md shadow-purple-950/40'
-                        : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-sm text-slate-100 font-mono">{ver.versionName}</span>
-                        {ver.isActive && (
-                          <span className="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                            ACTIVE LIVE
+                {versions.map((ver) => {
+                  const isActive = ver.version === evolutionState.activeVersion;
+                  return (
+                    <div
+                      key={ver.version}
+                      className={`p-4 rounded-xl border transition-all ${
+                        isActive
+                          ? 'bg-purple-950/20 border-purple-500/50 shadow-md shadow-purple-950/40'
+                          : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm text-slate-100 font-mono">{ver.version}</span>
+                          <span className="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-slate-800 text-slate-300">
+                            {ver.status}
                           </span>
-                        )}
-                      </div>
-                      <span className="text-[11px] text-slate-500 font-mono">
-                        {new Date(ver.createdAt).toLocaleDateString()} by {ver.author}
-                      </span>
-                    </div>
-
-                    <p className="text-xs text-slate-300 mb-3">{ver.ruleChangesSummary}</p>
-
-                    <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 text-xs font-mono bg-slate-900/80 p-2.5 rounded-lg border border-slate-800/80 mb-3">
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">Sample Trades</span>
-                        <span className="font-bold text-slate-200">{ver.tradesCount}</span>
-                      </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">Win Rate</span>
-                        <span className={`font-bold ${ver.winRate >= 65 ? 'text-emerald-400' : 'text-amber-400'}`}>
-                          {ver.winRate}%
+                          {isActive && (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                              ACTIVE LIVE
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-slate-500 font-mono">
+                          {new Date(ver.createdAt).toLocaleDateString()}
                         </span>
                       </div>
-                      <div>
-                        <span className="text-[10px] text-slate-500 block">Profit Factor</span>
-                        <span className="font-bold text-cyan-400">{ver.profitFactor}</span>
-                      </div>
-                      <div className="hidden sm:block">
-                        <span className="text-[10px] text-slate-500 block">Traffic Share</span>
-                        <span className="font-bold text-purple-400">{ver.trafficAllocation}%</span>
-                      </div>
-                    </div>
 
-                    {!ver.isActive && (
-                      <button
-                        onClick={() => handleRollbackVersion(ver)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-semibold transition-colors"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
-                        <span>Rollback to this Version</span>
-                      </button>
-                    )}
-                  </div>
-                ))}
+                      <p className="text-xs text-slate-300 mb-3">{ver.rationale}</p>
+                      {ver.rollbackReason && (
+                        <p className="text-[11px] text-amber-300 font-mono mb-2">
+                          Rollback Note: {ver.rollbackReason}
+                        </p>
+                      )}
+
+                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 text-xs font-mono bg-slate-900/80 p-2.5 rounded-lg border border-slate-800/80 mb-3">
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">Settled Trades</span>
+                          <span className="font-bold text-slate-200">{ver.metrics.tradesCount}</span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">Win Rate</span>
+                          <span className={`font-bold ${ver.metrics.winRate >= 0.55 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                            {(ver.metrics.winRate * 100).toFixed(1)}%
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">Profit Factor</span>
+                          <span className="font-bold text-cyan-400">{ver.metrics.profitFactor.toFixed(2)}</span>
+                        </div>
+                        <div className="hidden sm:block">
+                          <span className="text-[10px] text-slate-500 block">Net P&L</span>
+                          <span className={`font-bold ${ver.metrics.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {ver.metrics.netProfit >= 0 ? '+' : ''}${ver.metrics.netProfit.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+
+                      {isActive && ver.parentVersion && (
+                        <button
+                          onClick={() => handleRollbackVersion(ver)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-semibold transition-colors"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Rollback to Parent ({ver.parentVersion})</span>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {/* TAB 3: A/B TESTING & TRAFFIC SPLIT */}
+          {/* TAB 3: BENCHMARK COMPARISON */}
           {activeTab === 'ab_test' && (
             <div className="space-y-5">
               <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-4">
                 <h4 className="text-xs font-bold text-purple-300 font-mono uppercase tracking-wide flex items-center gap-2">
                   <Sliders className="w-4 h-4 text-purple-400" />
-                  <span>Real-Time Autonomous Traffic Allocation</span>
+                  <span>Version Performance Comparison</span>
                 </h4>
-                <p className="text-xs text-slate-400 font-sans leading-relaxed">
-                  Route a percentage of high-frequency synthetic index contracts to Version A vs Version B to empirically evaluate edge under real market volatility.
-                </p>
-
-                {/* Slider */}
                 <div className="space-y-2">
                   <div className="flex justify-between text-xs font-mono">
-                    <span className="text-cyan-400 font-bold">Variant A (Baseline): {allocationA}%</span>
-                    <span className="text-purple-400 font-bold">Variant B (Mutated): {100 - allocationA}%</span>
+                    <span className="text-cyan-400 font-bold">Active Weight Share: {allocationA}%</span>
+                    <span className="text-purple-400 font-bold">Shadow Evaluation: {100 - allocationA}%</span>
                   </div>
                   <input
                     type="range"
@@ -424,57 +478,46 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
                 </div>
               </div>
 
-              {/* Head-to-Head Comparison Cards */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 rounded-xl bg-slate-950/80 border border-cyan-500/30 space-y-3 font-mono">
-                  <div className="flex justify-between items-center">
-                    <h5 className="font-bold text-sm text-cyan-300">Variant A: Baseline</h5>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300">v3.1.0-Kelly</span>
-                  </div>
-                  <div className="space-y-1.5 text-xs">
-                    <div className="flex justify-between text-slate-400">
-                      <span>Win Rate:</span>
-                      <span className="text-slate-100 font-bold">66.7%</span>
+                {[activeVersion, candidateOrParent].filter(Boolean).map((ver, idx) => (
+                  <div
+                    key={`${ver.version}_${idx}`}
+                    className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3 font-mono"
+                  >
+                    <div className="flex justify-between items-center">
+                      <h5 className="font-bold text-sm text-cyan-300">
+                        {idx === 0 ? 'Active Version' : 'Comparison Version'}
+                      </h5>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300">
+                        {ver.version}
+                      </span>
                     </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Profit Factor:</span>
-                      <span className="text-slate-100 font-bold">1.85</span>
-                    </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Max Drawdown:</span>
-                      <span className="text-emerald-400 font-bold">2.4%</span>
-                    </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Expectancy / Trade:</span>
-                      <span className="text-slate-100 font-bold">+$0.38</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-xl bg-slate-950/80 border border-purple-500/30 space-y-3 font-mono">
-                  <div className="flex justify-between items-center">
-                    <h5 className="font-bold text-sm text-purple-300">Variant B: Adaptive Squeeze</h5>
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-purple-500/20 text-purple-300">v3.2.0-Alpha</span>
-                  </div>
-                  <div className="space-y-1.5 text-xs">
-                    <div className="flex justify-between text-slate-400">
-                      <span>Win Rate:</span>
-                      <span className="text-emerald-400 font-bold">72.2% (+5.5%)</span>
-                    </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Profit Factor:</span>
-                      <span className="text-emerald-400 font-bold">2.15</span>
-                    </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Max Drawdown:</span>
-                      <span className="text-emerald-400 font-bold">1.8%</span>
-                    </div>
-                    <div className="flex justify-between text-slate-400">
-                      <span>Expectancy / Trade:</span>
-                      <span className="text-purple-300 font-bold">+$0.52 (+36%)</span>
+                    <div className="space-y-1.5 text-xs">
+                      <div className="flex justify-between text-slate-400">
+                        <span>Settled Trades:</span>
+                        <span className="text-slate-100 font-bold">{ver.metrics.tradesCount}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Win Rate:</span>
+                        <span className="text-slate-100 font-bold">{(ver.metrics.winRate * 100).toFixed(1)}%</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Profit Factor:</span>
+                        <span className="text-slate-100 font-bold">{ver.metrics.profitFactor.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Early Exits:</span>
+                        <span className="text-slate-100 font-bold">{ver.metrics.earlyExits}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Expectancy / Trade:</span>
+                        <span className="text-slate-100 font-bold">
+                          {ver.metrics.expectancy >= 0 ? '+' : ''}${ver.metrics.expectancy.toFixed(2)}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
+                ))}
               </div>
             </div>
           )}

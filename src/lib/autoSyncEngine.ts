@@ -3,6 +3,7 @@ import { TradingNote } from '../types/notes';
 import { loadLocalNotes, saveLocalNotes, persistNote, getGoogleKeepUrl } from './notesEngine';
 import { createTradingReportDoc, TradingReportData } from './googleDocs';
 import { BotState, MarketRegime, TradingAgent, AIPredictionResult, DecisionResult, TradeRecord, CoreRiskMetrics } from '../types/trading';
+import { sanitizeForPersistence } from './securitySanitizer';
 
 export interface AutoSyncDataPayload {
   uid?: string;
@@ -319,10 +320,12 @@ ${googleDocUrl ? `• Google Drive Export: ${googleDocUrl}` : '• Google Drive:
       keepNoteId,
     };
 
+    const safeSnapshot = sanitizeForPersistence(snapshotRecord);
+
     if (payload.uid) {
       try {
         await setDoc(doc(db, 'sync_snapshots', snapshotId), {
-          ...snapshotRecord,
+          ...safeSnapshot,
           uid: payload.uid,
         });
       } catch (snapErr) {
@@ -330,7 +333,7 @@ ${googleDocUrl ? `• Google Drive Export: ${googleDocUrl}` : '• Google Drive:
       }
     }
 
-    return snapshotRecord;
+    return safeSnapshot;
   }
 }
 

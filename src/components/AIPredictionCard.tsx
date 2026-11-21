@@ -113,8 +113,26 @@ export const AIPredictionCard: React.FC<AIPredictionCardProps> = ({
             <h3 className="text-xs font-bold font-mono tracking-wider text-slate-300">
               SBAGENT AI MARKET INTELLIGENCE
             </h3>
-            <span className="text-[10px] text-slate-400 font-mono">
-              Live quantitative forecast for {symbol}
+            <span className="text-[10px] text-slate-400 font-mono flex items-center gap-1.5 flex-wrap">
+              <span>Live quantitative forecast for {symbol}</span>
+              {prediction?.context && (() => {
+                const now = Date.now();
+                const isExpired = now > prediction.context.expiresAt || prediction.context.symbol !== symbol;
+                const remSec = Math.max(0, Math.round((prediction.context.expiresAt - now) / 1000));
+                return (
+                  <span
+                    className={`px-1.5 py-0.2 rounded text-[9px] border ${
+                      isExpired
+                        ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                        : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                    }`}
+                  >
+                    {isExpired
+                      ? 'STALE / INVALIDATED'
+                      : `FRESH ${remSec}s • ${prediction.context.granularity}s • ${prediction.context.strategyVersion}`}
+                  </span>
+                );
+              })()}
             </span>
           </div>
         </div>

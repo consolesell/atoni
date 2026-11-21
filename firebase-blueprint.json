@@ -2,7 +2,7 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "User profile with balance, deriv credentials and mode preferences",
+      "description": "User profile with balance, deriv metadata (no secrets) and mode preferences",
       "type": "object",
       "properties": {
         "uid": { "type": "string" },
@@ -11,6 +11,8 @@
         "accountMode": { "type": "string", "enum": ["DEMO", "REAL"] },
         "demoBalance": { "type": "number" },
         "realBalance": { "type": "number" },
+        "derivAppId": { "type": "string" },
+        "derivActiveAccount": { "type": "string" },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
@@ -31,9 +33,12 @@
         "exitPrice": { "type": "number" },
         "profit": { "type": "number" },
         "result": { "type": "string", "enum": ["WIN", "LOSS", "PENDING"] },
+        "executionSource": { "type": "string" },
+        "strategyVersion": { "type": "string" },
+        "earlyExited": { "type": "boolean" },
         "timestamp": { "type": "number" }
       },
-      "required": ["id", "symbol", "decision", "amount", "entryPrice"]
+      "required": ["id", "uid", "symbol", "decision", "amount", "entryPrice"]
     },
     "TradingNote": {
       "title": "TradingNote",
@@ -50,7 +55,7 @@
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
-      "required": ["id", "title"]
+      "required": ["id", "uid", "title"]
     },
     "SyncSnapshot": {
       "title": "SyncSnapshot",
@@ -73,13 +78,133 @@
         "syncedToDrive": { "type": "boolean" },
         "googleDocUrl": { "type": "string" }
       },
-      "required": ["id", "timestamp"]
+      "required": ["id", "uid", "timestamp"]
+    },
+    "EvolutionLog": {
+      "title": "EvolutionLog",
+      "description": "Reinforcement learning weight evolution log scoped to user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "reason": { "type": "string" },
+        "improvementMetric": { "type": "string" }
+      },
+      "required": ["id", "uid", "timestamp"]
+    },
+    "SessionSnapshot": {
+      "title": "SessionSnapshot",
+      "description": "Sanitized trading session state without API tokens or credentials",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "selectedSymbol": { "type": "string" },
+        "granularity": { "type": "number" },
+        "accountMode": { "type": "string", "enum": ["DEMO", "REAL"] },
+        "activeAccountId": { "type": "string" },
+        "activeStrategyVersion": { "type": "string" },
+        "autonomyDesired": { "type": "boolean" },
+        "version": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["uid", "selectedSymbol", "updatedAt"]
+    },
+    "StrategyVersionRecord": {
+      "title": "StrategyVersionRecord",
+      "description": "Versioned strategy parameters, performance metrics, and rollback lineage",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "version": { "type": "string" },
+        "status": { "type": "string" },
+        "parentVersion": { "type": "string" },
+        "parameters": { "type": "object" },
+        "metrics": { "type": "object" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["uid", "version", "status", "updatedAt"]
+    },
+    "AgentMemoryRecord": {
+      "title": "AgentMemoryRecord",
+      "description": "Trust-tiered persistent autonomous memory record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "category": { "type": "string", "enum": ["SESSION", "STRATEGY", "AGENT", "OPERATIONAL"] },
+        "trustSource": { "type": "string", "enum": ["VERIFIED_FACT", "USER_DECISION", "RECOMMENDATION", "AI_OBSERVATION", "HYPOTHESIS"] },
+        "key": { "type": "string" },
+        "title": { "type": "string" },
+        "summary": { "type": "string" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "uid", "category", "trustSource", "key", "summary", "updatedAt"]
+    },
+    "ExecutionEventRecord": {
+      "title": "ExecutionEventRecord",
+      "description": "Authoritative execution audit log entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "uid": { "type": "string" },
+        "action": { "type": "string" },
+        "source": { "type": "string" },
+        "status": { "type": "string" },
+        "symbol": { "type": "string" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["id", "uid", "status", "updatedAt"]
+    },
+    "TerminalSettingsSnapshot": {
+      "title": "TerminalSettingsSnapshot",
+      "description": "User-scoped unified terminal configuration snapshot",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "revision": { "type": "number" },
+        "version": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["uid", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "entity": "UserProfile",
       "description": "User profile document"
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "entity": "SessionSnapshot",
+      "description": "Token-free session snapshots for recovery"
+    },
+    "/users/{userId}/tradingHistory/{tradeId}": {
+      "entity": "Trade",
+      "description": "Synced per-user trading history"
+    },
+    "/users/{userId}/strategyVersions/{versionId}": {
+      "entity": "StrategyVersionRecord",
+      "description": "Strategy evolution versions and performance history"
+    },
+    "/users/{userId}/agentMemory/{memoryId}": {
+      "entity": "AgentMemoryRecord",
+      "description": "Trust-tiered persistent autonomous memory"
+    },
+    "/users/{userId}/agentTasks/{taskId}": {
+      "entity": "ExecutionEventRecord",
+      "description": "User-scoped autonomous agent task records"
+    },
+    "/users/{userId}/executionEvents/{eventId}": {
+      "entity": "ExecutionEventRecord",
+      "description": "Authoritative execution audit log"
+    },
+    "/users/{userId}/settings/{settingsId}": {
+      "entity": "TerminalSettingsSnapshot",
+      "description": "Unified configuration and sizing settings"
+    },
+    "/users/{userId}/chart_drawings/{symbol}": {
+      "entity": "UserProfile",
+      "description": "Persisted technical analysis drawings per symbol"
     },
     "/trades/{tradeId}": {
       "entity": "Trade",
@@ -92,6 +217,10 @@
     "/sync_snapshots/{snapshotId}": {
       "entity": "SyncSnapshot",
       "description": "Automated 10-minute sync snapshot records"
+    },
+    "/evolution_logs/{logId}": {
+      "entity": "EvolutionLog",
+      "description": "User-scoped agent evolution records"
     }
   }
 }

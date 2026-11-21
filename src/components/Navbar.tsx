@@ -33,6 +33,7 @@ import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS } from '../lib/voiceEngine';
 import { voiceInput } from '../lib/voiceInputEngine';
 import { autoSyncEngine } from '../lib/autoSyncEngine';
+import { firebaseSyncManager, FirebaseSyncStatusSnapshot } from '../lib/firebaseSyncManager';
 import { derivWS } from '../lib/derivWS';
 import { useAuth } from '../context/AuthContext';
 import { AccountModeSwitcher } from './AuthModal';
@@ -136,6 +137,10 @@ export const Navbar: React.FC<NavbarProps> = ({
     };
   }, []);
 
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<FirebaseSyncStatusSnapshot>(() =>
+    firebaseSyncManager.getStatus()
+  );
+
   useEffect(() => {
     const unsub = voice.subscribeState((st) => setVoiceState(st));
     const unsubVoiceInput = voiceInput.subscribe((listening) => setIsVoiceListening(listening));
@@ -146,10 +151,14 @@ export const Navbar: React.FC<NavbarProps> = ({
         lastSyncTime: st.lastSyncTime,
       });
     });
+    const unsubFbSync = firebaseSyncManager.subscribe((fbSnap) => {
+      setCloudSyncStatus(fbSnap);
+    });
     return () => {
       unsub();
       unsubVoiceInput();
       unsubSync();
+      unsubFbSync();
     };
   }, []);
 
@@ -693,10 +702,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                   ? 'bg-amber-500/25 text-amber-300 border-amber-500/60 animate-pulse'
                   : 'bg-amber-950/40 hover:bg-amber-900/50 text-amber-300 border-amber-600/40 hover:border-amber-400'
               }`}
-              title="10-Minute Intelligent Auto-Sync to Google Keep, Drive & Firestore (Click to Sync Now)"
+              title={`Firebase Sync: ${cloudSyncStatus.status} (${cloudSyncStatus.pendingCount} pending) • Click to Sync Now`}
             >
               <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${syncState.isSyncing ? 'animate-spin' : ''}`} />
-              <span className="hidden xl:inline text-[10px] text-amber-400/80">AUTO-SYNC:</span>
+              <span className="hidden xl:inline text-[10px] text-amber-400/80">
+                {cloudSyncStatus.status === 'SYNCED'
+                  ? 'CLOUD SYNCED'
+                  : cloudSyncStatus.status === 'PENDING_SYNC'
+                  ? `PENDING (${cloudSyncStatus.pendingCount})`
+                  : cloudSyncStatus.status === 'SYNC_FAILED'
+                  ? 'SYNC RETRY'
+                  : 'LOCAL-ONLY'}
+              </span>
               <span className="text-[11px] font-mono font-bold">
                 {syncState.isSyncing
                   ? 'SYNCING...'

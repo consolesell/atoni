@@ -29,6 +29,11 @@ import { sound } from '../lib/soundEngine';
 import { voice } from '../lib/voiceEngine';
 import { VoiceWaveform, VoiceTalkingRadar } from './VoiceWaveformIndicator';
 import { getAIRequestHeaders } from '../lib/aiClientConfig';
+import { consumeSSEStream } from '../lib/sseParser';
+import { aiActionRegistry } from '../lib/aiActionRegistry';
+import { memoryManager } from '../lib/memoryManager';
+import { strategyEvolutionManager } from '../lib/strategyEvolutionManager';
+import { autonomyManager } from '../lib/autonomyManager';
 
 interface AICopilotChatProps {
   symbol: string;
@@ -245,12 +250,24 @@ Select an action chip below or speak hands-free via the microphone:`,
     setIsLoading(true);
     setActiveActivities([]);
 
+    const activeStrategy = strategyEvolutionManager.getActiveVersion();
+    const autonomySnap = autonomyManager.getSnapshot();
+    const memorySummary = memoryManager.selectCompactContext({
+      symbol,
+      strategyVersion: activeStrategy.version,
+      regime: regime?.type,
+      maxItems: 5,
+    });
+
     const payloadContext = {
       symbol,
       currentPrice,
       price: currentPrice,
       regime: regime?.type,
       botActive: botEnabled,
+      autonomyLifecycle: autonomySnap.lifecycle,
+      strategyVersion: activeStrategy.version,
+      memorySummary,
       pnl: pnl.toFixed(2),
       balance,
       currentStake,
@@ -288,126 +305,185 @@ Select an action chip below or speak hands-free via the microphone:`,
       }
 
       const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
       let streamedAssistantText = '';
       let hasAddedAssistantPlaceholder = false;
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
+      const dispatchToolCall = async (name: string, args: Record<string, any> = {}) => {
+        const mappedName =
+          name === 'execute_trade'
+            ? 'execute_authorized_trade'
+            : name === 'export_journal'
+            ? 'export_trading_journal'
+            : name === 'propose_sbagent_update'
+            ? 'propose_strategy_updates'
+            : name;
 
-        const textChunk = decoder.decode(value, { stream: true });
-        const lines = textChunk.split('\n');
+        let result = await aiActionRegistry.dispatch({
+          action: mappedName,
+          args,
+          source: 'COPILOT',
+        });
 
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === 'activity') {
-                setActiveActivities((prev) => {
-                  const filtered = prev.filter((a) => a.step !== data.step);
-                  return [
-                    ...filtered,
-                    {
-                      step: data.step,
-                      tool: data.tool,
-                      label: data.label,
-                      detail: data.detail,
-                      status: data.status,
-                      timestamp: data.timestamp,
-                    },
-                  ];
-                });
-              } else if (data.type === 'chunk') {
-                streamedAssistantText += data.text;
-                if (!hasAddedAssistantPlaceholder) {
-                  hasAddedAssistantPlaceholder = true;
-                  setMessages((prev) => [
-                    ...prev,
-                    {
-                      role: 'assistant',
-                      content: streamedAssistantText,
-                      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                      isStreaming: true,
-                    },
-                  ]);
-                } else {
-                  setMessages((prev) => {
-                    const lastIdx = prev.length - 1;
-                    const updated = [...prev];
-                    updated[lastIdx] = {
-                      ...updated[lastIdx],
-                      content: streamedAssistantText,
-                    };
-                    return updated;
-                  });
-                }
-              } else if (data.type === 'tool_call') {
-                const { name, args } = data;
-                let toolBadge = '';
-                if (name === 'rotate_symbol' && args?.symbol) {
-                  toolBadge = `\n\n> 🔄 **Action Dispatched**: Rotated active symbol to **${args.symbol}** (${args.reason || 'Strategic Divergence'}).`;
-                  onRotateSymbol?.(args.symbol);
-                } else if (name === 'tighten_stop' && args?.distanceValue) {
-                  toolBadge = `\n\n> 🛡️ **Action Dispatched**: Tightened Trailing Stop-Loss to **${args.distanceValue} ATR**.`;
-                  onTightenStop?.(args.distanceValue);
-                } else if (name === 'adjust_stake_mode') {
-                  toolBadge = `\n\n> ⚙️ **Action Dispatched**: Adjusted stake to **$${args.stake}** (${args.sizingMode || 'Half-Kelly'}).`;
-                  onAdjustStake?.(args.stake, args.sizingMode);
-                } else if (name === 'execute_trade' && args?.direction) {
-                  toolBadge = `\n\n> ⚡ **Action Dispatched**: Executed **${args.direction}** trade contract (${args.rationale || 'Consensus Signal'}).`;
-                  onExecuteTrade?.(args.direction as any);
-                } else if (name === 'export_journal') {
-                  toolBadge = `\n\n> 📁 **Action Dispatched**: Exported trade journal to CSV.`;
-                  onExportJournal?.();
-                } else if (name === 'propose_sbagent_update') {
-                  toolBadge = `\n\n> 🧬 **Self-Improvement Mutation Proposed**: [${args.ruleCategory}]\n> "${args.proposedRule}"\n> *Opened Human Approval Modal.*`;
-                  onProposeSbagentUpdate?.({
-                    id: `prop_${Date.now()}`,
-                    ruleCategory: args.ruleCategory,
-                    proposedRule: args.proposedRule,
-                    rationale: args.rationale,
-                    expectedEdge: '+4.8% Win Rate',
-                    riskMitigation: 'Session drawdown shield verified',
-                    timestamp: Date.now(),
-                  });
-                }
-
-                if (toolBadge) {
-                  streamedAssistantText += toolBadge;
-                  setMessages((prev) => {
-                    const lastIdx = prev.length - 1;
-                    const updated = [...prev];
-                    if (updated[lastIdx]?.role === 'assistant') {
-                      updated[lastIdx] = {
-                        ...updated[lastIdx],
-                        content: streamedAssistantText,
-                      };
-                    }
-                    return updated;
-                  });
-                  sound.play('trade');
-                }
-              } else if (data.type === 'done') {
-                setMessages((prev) => {
-                  const lastIdx = prev.length - 1;
-                  const updated = [...prev];
-                  if (updated[lastIdx]?.role === 'assistant') {
-                    updated[lastIdx].isStreaming = false;
-                  }
-                  return updated;
-                });
-                sound.play('toggle');
-                if (autoSpeak && streamedAssistantText) {
-                  voice.speak(streamedAssistantText, { interrupt: true });
-                }
-              }
-            } catch (err) {
-              // Ignore non-json lines
-            }
+        // Legacy prop fallback only when registry had no handler bound AND explicit component callback exists
+        if (result.status === 'UNAVAILABLE') {
+          if (mappedName === 'rotate_symbol' && args?.symbol && onRotateSymbol) {
+            onRotateSymbol(args.symbol);
+            result = {
+              status: 'SUCCESS',
+              action: mappedName,
+              message: `Rotated active symbol to ${args.symbol} (${args.reason || 'Strategic Divergence'}).`,
+              timestamp: Date.now(),
+            };
+          } else if (mappedName === 'tighten_stop' && args?.distanceValue && onTightenStop) {
+            onTightenStop(args.distanceValue);
+            result = {
+              status: 'SUCCESS',
+              action: mappedName,
+              message: `Tightened Trailing Stop-Loss to ${args.distanceValue} ATR.`,
+              timestamp: Date.now(),
+            };
+          } else if (mappedName === 'adjust_stake_mode' && onAdjustStake) {
+            onAdjustStake(args.stake, args.sizingMode);
+            result = {
+              status: 'SUCCESS',
+              action: mappedName,
+              message: `Adjusted stake to $${args.stake} (${args.sizingMode || 'Half-Kelly'}).`,
+              timestamp: Date.now(),
+            };
+          } else if (mappedName === 'execute_authorized_trade' && args?.direction && onExecuteTrade) {
+            onExecuteTrade(args.direction);
+            result = {
+              status: 'REQUIRES_CONFIRMATION',
+              action: mappedName,
+              message: `Submitted ${args.direction} order through authorized terminal handler.`,
+              timestamp: Date.now(),
+            };
+          } else if (mappedName === 'export_trading_journal' && onExportJournal) {
+            onExportJournal();
+            result = {
+              status: 'SUCCESS',
+              action: mappedName,
+              message: 'Exported trading journal.',
+              timestamp: Date.now(),
+            };
+          } else if (mappedName === 'propose_strategy_updates' && onProposeSbagentUpdate) {
+            onProposeSbagentUpdate({
+              id: `prop_${Date.now()}`,
+              ruleCategory: args.ruleCategory,
+              proposedRule: args.proposedRule,
+              rationale: args.rationale,
+              expectedEdge: '+4.8% Win Rate',
+              riskMitigation: 'Session drawdown shield verified',
+              timestamp: Date.now(),
+            });
+            result = {
+              status: 'REQUIRES_CONFIRMATION',
+              action: mappedName,
+              message: `Proposed strategy mutation [${args.ruleCategory}] for human approval.`,
+              timestamp: Date.now(),
+            };
           }
         }
-      }
+
+        const badgePrefix =
+          result.status === 'SUCCESS'
+            ? '✅ **Action Executed**'
+            : result.status === 'REQUIRES_CONFIRMATION'
+            ? '🛡️ **Confirmation Required**'
+            : result.status === 'UNAUTHORIZED' || result.status === 'REJECTED'
+            ? `⛔ **Action ${result.status}**`
+            : `⚠️ **Action ${result.status}**`;
+
+        const toolBadge = `\n\n> ${badgePrefix} (\`${result.action}\`): ${result.message}`;
+        streamedAssistantText += toolBadge;
+        if (!hasAddedAssistantPlaceholder) {
+          hasAddedAssistantPlaceholder = true;
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: streamedAssistantText,
+              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              isStreaming: true,
+            },
+          ]);
+        } else {
+          setMessages((prev) => {
+            const lastIdx = prev.length - 1;
+            const updated = [...prev];
+            if (updated[lastIdx]?.role === 'assistant') {
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                content: streamedAssistantText,
+              };
+            }
+            return updated;
+          });
+        }
+        if (result.status === 'SUCCESS') {
+          sound.play('trade');
+        }
+      };
+
+      await consumeSSEStream(reader, async (evt) => {
+        if (!evt.json) return;
+        const data = evt.json;
+        if (data.type === 'activity') {
+          setActiveActivities((prev) => {
+            const filtered = prev.filter((a) => a.step !== data.step);
+            return [
+              ...filtered,
+              {
+                step: data.step,
+                tool: data.tool,
+                label: data.label,
+                detail: data.detail,
+                status: data.status,
+                timestamp: data.timestamp,
+              },
+            ];
+          });
+        } else if (data.type === 'chunk') {
+          streamedAssistantText += data.text || '';
+          if (!hasAddedAssistantPlaceholder) {
+            hasAddedAssistantPlaceholder = true;
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: streamedAssistantText,
+                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                isStreaming: true,
+              },
+            ]);
+          } else {
+            setMessages((prev) => {
+              const lastIdx = prev.length - 1;
+              const updated = [...prev];
+              updated[lastIdx] = {
+                ...updated[lastIdx],
+                content: streamedAssistantText,
+              };
+              return updated;
+            });
+          }
+        } else if (data.type === 'tool_call') {
+          await dispatchToolCall(data.name, data.args || {});
+        } else if (data.type === 'done') {
+          setMessages((prev) => {
+            const lastIdx = prev.length - 1;
+            const updated = [...prev];
+            if (updated[lastIdx]?.role === 'assistant') {
+              updated[lastIdx].isStreaming = false;
+            }
+            return updated;
+          });
+          sound.play('toggle');
+          if (autoSpeak && streamedAssistantText) {
+            voice.speak(streamedAssistantText, { interrupt: true });
+          }
+        }
+      });
     } catch (streamErr: any) {
       if (streamErr?.name === 'AbortError' || streamErr?.message?.includes('aborted')) {
         console.log('[AICopilotChat] Generation stream aborted cleanly by user.');

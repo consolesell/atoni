@@ -303,6 +303,22 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                               <span>🔒 LOCKED: +${trade.profitLockSecuredAmount.toFixed(2)}</span>
                             </span>
                           )}
+                          {trade.earlyExitDecision && (
+                            <span
+                              title={trade.earlyExitReason || ''}
+                              className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border ${
+                                trade.earlyExitDecision === 'SELL'
+                                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
+                                  : trade.earlyExitDecision === 'PROTECT'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                                  : trade.earlyExitDecision === 'MONITOR'
+                                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/35'
+                                  : 'bg-slate-800 text-slate-300 border-slate-700'
+                              }`}
+                            >
+                              EXIT: {trade.earlyExitDecision}
+                            </span>
+                          )}
                         </div>
                         <div className="text-[10px] text-slate-400 font-mono flex items-center gap-2 mt-0.5">
                           <span>Entry: {trade.entryPrice.toFixed(decimals)}</span>
@@ -399,6 +415,12 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                         </button>
                       </div>
 
+                      {/* Early Selling Evaluation Reason */}
+                      {trade.earlyExitReason && (
+                        <div className="pt-1.5 text-[10px] font-mono text-cyan-300/90 bg-slate-950/50 px-2 py-1.5 rounded border border-slate-800">
+                          Early-Exit Policy ({trade.earlyExitDecision || 'MONITOR'}): {trade.earlyExitReason}
+                        </div>
+                      )}
                       {/* Trailing Stop Deep Breakdown */}
                       {trade.trailingStopEnabled && (
                         <div className="pt-2 border-t border-slate-800/60 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] bg-slate-950/60 p-2 rounded-lg border border-amber-500/20">

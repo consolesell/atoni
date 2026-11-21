@@ -3,6 +3,7 @@
  * Buffers trade intentions, configuration changes, and drawing annotations
  * while client is offline, automatically replaying or synchronizing on connection restoration.
  */
+import { firebaseSyncManager } from './firebaseSyncManager';
 
 export interface QueuedOfflineAction {
   id: string;
@@ -79,14 +80,15 @@ class OfflineSyncManager {
   }
 
   public async flushQueue() {
-    if (!this.isOnline || this.queue.length === 0) return;
+    if (!this.isOnline) return;
+    void firebaseSyncManager.flushQueue().catch(() => {});
+    if (this.queue.length === 0) return;
 
     const remaining: QueuedOfflineAction[] = [];
     for (const action of this.queue) {
       try {
         // Attempt sync
         if (action.type === 'DRAWING_SAVE') {
-          // Sync drawing
           console.log('[OfflineSync] Synced drawing action:', action.id);
         } else if (action.type === 'SETTINGS_UPDATE') {
           console.log('[OfflineSync] Synced settings update:', action.id);
