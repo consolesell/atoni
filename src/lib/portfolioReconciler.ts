@@ -1,4 +1,4 @@
-import { PendingPurchaseIntent, PortfolioPnLSummary, TradeRecord } from '../types/trading';
+import { DurationUnit, PendingPurchaseIntent, PortfolioPnLSummary, TradeRecord } from '../types/trading';
 
 export interface ReconcileBrokerInput {
   openPortfolioContracts?: Array<{
@@ -37,7 +37,7 @@ export class PortfolioReconciler {
     contractType: 'CALL' | 'PUT';
     amount: number;
     duration: number;
-    durationUnit: 'ticks' | 'seconds' | 'minutes';
+    durationUnit: DurationUnit;
   }): string {
     return `${params.accountId}:${params.symbol}:${params.contractType}:${params.amount.toFixed(2)}:${params.duration}${params.durationUnit}`;
   }
@@ -78,7 +78,7 @@ export class PortfolioReconciler {
     contractType: 'CALL' | 'PUT';
     amount: number;
     duration: number;
-    durationUnit: 'ticks' | 'seconds' | 'minutes';
+    durationUnit: DurationUnit;
     proposalId?: string;
     now?: number;
   }): { ok: boolean; intent?: PendingPurchaseIntent; reason?: string } {

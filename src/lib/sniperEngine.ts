@@ -4,122 +4,59 @@ import {
   MarketRegime,
   DecisionResult,
   TradingAgent,
+  DurationGovernancePolicy,
 } from '../types/trading';
 import {
   EnhancedTradeDuration,
   SniperConfluenceResult,
   SniperFactor,
-  TradeDurationUnit,
 } from '../types/sniper';
+import {
+  acde,
+  PRESET_DURATIONS,
+  toEnhancedTradeDuration,
+} from './adaptiveDurationEngine';
 
-/* -------------------------------------------------------------------------- */
-/* 1. ENHANCED TRADE DURATION PRESETS & ADAPTIVE COMPUTATION                  */
-/* -------------------------------------------------------------------------- */
-
-export const PRESET_DURATIONS: EnhancedTradeDuration[] = [
-  // Ticks (Ultra-fast sniper scalps)
-  { value: 1, unit: 'ticks', seconds: 1, label: '1 Tick', category: 'ultra_fast', rationale: 'Micro tick impulse' },
-  { value: 2, unit: 'ticks', seconds: 2, label: '2 Ticks', category: 'ultra_fast', rationale: 'Sub-second velocity snap' },
-  { value: 3, unit: 'ticks', seconds: 3, label: '3 Ticks', category: 'ultra_fast', rationale: 'Micro-breakout confirmation' },
-  { value: 5, unit: 'ticks', seconds: 5, label: '5 Ticks', category: 'scalp', rationale: 'Institutional 5-tick sniper scalp' },
-  { value: 10, unit: 'ticks', seconds: 10, label: '10 Ticks', category: 'scalp', rationale: 'Extended tick wave resolution' },
-
-  // Seconds (High-frequency momentum contracts)
-  { value: 15, unit: 'seconds', seconds: 15, label: '15s', category: 'scalp', rationale: 'Fast volatility impulse capture' },
-  { value: 30, unit: 'seconds', seconds: 30, label: '30s', category: 'scalp', rationale: 'Half-minute order block reaction' },
-  { value: 45, unit: 'seconds', seconds: 45, label: '45s', category: 'scalp', rationale: 'Three-candle impulse resolution' },
-  { value: 60, unit: 'seconds', seconds: 60, label: '60s', category: 'standard', rationale: '1-minute candle close alignment' },
-
-  // Minutes (Standard & Regime swing horizons)
-  { value: 2, unit: 'minutes', seconds: 120, label: '2m', category: 'standard', rationale: 'Short trend expansion wave' },
-  { value: 5, unit: 'minutes', seconds: 300, label: '5m', category: 'standard', rationale: 'Equilibrium swing transition' },
-  { value: 15, unit: 'minutes', seconds: 900, label: '15m', category: 'swing', rationale: 'Macro trend continuation' },
-  { value: 30, unit: 'minutes', seconds: 1800, label: '30m', category: 'swing', rationale: 'Higher timeframe session position' },
-];
+export { PRESET_DURATIONS };
 
 /**
- * Calculates adaptive, intelligent sniper duration based on live market physics
+ * Calculates adaptive, intelligent sniper duration via the single authoritative ACDE
+ * using symbol-normalized historical volatility rather than a fixed global baseline.
  */
 export function calculateSniperOptimalDuration(
   regime: MarketRegime,
   volatility: number,
   confluenceScore: number,
-  patternName?: string
+  patternName?: string,
+  options?: {
+    symbol?: string;
+    candles?: Candle[];
+    indicators?: Partial<TechnicalIndicators> | null;
+    chartTimeframeSeconds?: number;
+    governance?: DurationGovernancePolicy | null;
+  }
 ): EnhancedTradeDuration {
-  // Base volatility ratio compared to standard synthetic baseline (0.004)
-  const volRatio = Math.max(0.2, volatility / 0.004);
+  const res = acde.computeMarketAwareDuration({
+    symbol: options?.symbol || '1HZ10V',
+    candles: options?.candles || [],
+    indicators: {
+      ...(options?.indicators || {}),
+      volatility,
+      pattern:
+        options?.indicators?.pattern ||
+        (patternName
+          ? { pattern: patternName, strength: 0.75, signal: 'NEUTRAL' }
+          : undefined),
+    },
+    regime,
+    confidence: Math.min(1, Math.max(0.35, confluenceScore / 100)),
+    chartTimeframeSeconds: options?.chartTimeframeSeconds,
+    strategyId: 'sniper_confluence',
+    governance: options?.governance,
+    source: 'SNIPER',
+  });
 
-  // 1. In high-volatility turbulence or explosive engulfing breakouts -> fast sniper ticks or short seconds
-  if (volRatio > 2.2 || regime.type === 'HIGH_VOLATILITY') {
-    if (confluenceScore >= 80) {
-      return {
-        value: 5,
-        unit: 'ticks',
-        seconds: 5,
-        label: '5 Ticks (Adaptive)',
-        category: 'scalp',
-        recommendedBy: 'Sniper Volatility Engine',
-        rationale: 'High ATR turbulence: immediate 5-tick sniper impulse capture',
-      };
-    }
-    return {
-      value: 15,
-      unit: 'seconds',
-      seconds: 15,
-      label: '15s (Adaptive)',
-      category: 'scalp',
-      recommendedBy: 'Impulse Scalper',
-      rationale: 'High velocity expansion: 15-second breakout horizon',
-    };
-  }
-
-  // 2. In strong trending regimes with high confluence -> 60s or 2m - 5m
-  if (regime.type === 'STRONG_UPTREND' || regime.type === 'STRONG_DOWNTREND') {
-    if (volRatio < 0.8) {
-      return {
-        value: 5,
-        unit: 'minutes',
-        seconds: 300,
-        label: '5m (Adaptive)',
-        category: 'standard',
-        recommendedBy: 'Trend Hunter Agent',
-        rationale: 'Smooth persistent trend: 5-minute directional expansion',
-      };
-    }
-    return {
-      value: 60,
-      unit: 'seconds',
-      seconds: 60,
-      label: '60s (Adaptive)',
-      category: 'standard',
-      recommendedBy: 'Trend Scalper',
-      rationale: 'Trend alignment with moderate volatility: 60s swing lock',
-    };
-  }
-
-  // 3. In consolidation / tight squeeze -> 30s or 2m
-  if (regime.type === 'CONSOLIDATION') {
-    return {
-      value: 30,
-      unit: 'seconds',
-      seconds: 30,
-      label: '30s (Adaptive)',
-      category: 'scalp',
-      recommendedBy: 'Mean Reversion Agent',
-      rationale: 'Range-bound market: fast 30-second ping-pong target',
-    };
-  }
-
-  // Default balanced sniper horizon
-  return {
-    value: 60,
-    unit: 'seconds',
-    seconds: 60,
-    label: '60s (Adaptive)',
-    category: 'standard',
-    recommendedBy: 'Balanced Multi-Factor',
-    rationale: 'Equilibrium conditions: standard 60-second execution window',
-  };
+  return toEnhancedTradeDuration(res, 'ACDE Sniper');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -132,7 +69,9 @@ export function evaluateSniperConfluence(
   indicators: TechnicalIndicators | null,
   regime: MarketRegime,
   decision: DecisionResult | null,
-  agents?: TradingAgent[]
+  agents?: TradingAgent[],
+  symbol?: string,
+  chartTimeframeSeconds?: number
 ): SniperConfluenceResult {
   if (!candles || candles.length < 5 || !indicators) {
     return {
@@ -488,12 +427,18 @@ export function evaluateSniperConfluence(
 
   const riskRewardRatio = Number((takeProfitDistance / (stopLossDistance || 1)).toFixed(2));
 
-  // Recommended Duration for this specific sniper setup
+  // Recommended Duration for this specific sniper setup via ACDE
   const recommendedDuration = calculateSniperOptimalDuration(
     regime,
     indicators.volatility || 0.003,
     totalConfluence,
-    pattern?.pattern
+    pattern?.pattern,
+    {
+      symbol: symbol || decision?.acdeResult?.recommendation?.symbol || '1HZ10V',
+      candles,
+      indicators,
+      chartTimeframeSeconds,
+    }
   );
 
   // Trigger Condition Text

@@ -5,7 +5,7 @@ import {
   AppliedAutonomySettings,
   DEFAULT_SBAGENT_PRESET,
 } from '../types/autonomy';
-import { validateDerivDuration } from './riskEngine';
+import { acde } from './adaptiveDurationEngine';
 import { auditLogger } from './auditLogger';
 
 const PRESET_STORAGE_KEY = 'sbagent_autonomy_preset_v1';
@@ -144,10 +144,48 @@ class SBAgentAutonomyController {
 
     const blockers: string[] = [];
 
-    // 2. Market microstructure & legal duration validation
-    const durationBound = validateDerivDuration(ctx.symbol, 15, 'minutes');
-    const legalDuration = durationBound.duration;
-    const legalUnit = durationBound.unit;
+    // 2. Market-aware contract duration calibration via ACDE
+    const extCtx = ctx as AutonomySessionContext & {
+      candles?: any[];
+      indicators?: any;
+      chartTimeframeSeconds?: number;
+      governance?: any;
+    };
+    const acdeResult = acde.computeMarketAwareDuration({
+      symbol: ctx.symbol,
+      candles: extCtx.candles || [],
+      indicators: extCtx.indicators || null,
+      regime: {
+        type: (ctx.regime as any) || 'NEUTRAL',
+        confidence: 0.65,
+      },
+      confidence: 0.65,
+      chartTimeframeSeconds: extCtx.chartTimeframeSeconds,
+      strategyId: ctx.strategyRef || 'sbagent.md-v4.1',
+      governance: extCtx.governance,
+      source: 'SUBAGENT_MD',
+    });
+
+    if (acdeResult.action === 'HOLD' && extCtx.governance?.fallbackBehavior === 'HOLD') {
+      blockers.push(acdeResult.holdReason || 'ACDE withheld contract duration allocation.');
+    }
+
+    const durRes = acde.resolveExecutionDuration({
+      source: 'SUBAGENT_MD',
+      symbol: ctx.symbol,
+      contractType: 'CALL',
+      requestedDuration: acdeResult.duration,
+      requestedUnit: acdeResult.unit,
+      governance: extCtx.governance,
+      recommendation: acdeResult.recommendation,
+      strategyId: ctx.strategyRef || 'sbagent.md-v4.1',
+    });
+
+    const legalDuration = durRes.duration;
+    const legalUnit = durRes.unit;
+    if (!durRes.approved) {
+      blockers.push(durRes.rejectionReason || 'Contract duration failed ACDE broker governance check.');
+    }
 
     // 3. Mathematical Half-Kelly stake calibration (respects balance <= 0, negative Kelly, and equity ceiling)
     if (!Number.isFinite(ctx.balance) || ctx.balance <= 0) {
@@ -187,6 +225,8 @@ class SBAgentAutonomyController {
       calibratedStake,
       calibratedDuration: legalDuration,
       calibratedDurationUnit: legalUnit,
+      appliedRecommendation: acdeResult.recommendation,
+      acdeSummary: acdeResult.recommendation?.rationale || acdeResult.holdReason,
       regime,
       agentWeights,
       consensusThreshold: ctx.risk.sizingMode === 'CONSERVATIVE_KELLY' ? 0.75 : 0.62,

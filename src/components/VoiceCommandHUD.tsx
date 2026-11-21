@@ -20,10 +20,11 @@ import {
 import { voiceInput, VoiceTradeCommand } from '../lib/voiceInputEngine';
 import { sound } from '../lib/soundEngine';
 import { AutonomyMode } from '../types/autonomy';
+import { TradeDurationUnit } from '../types/sniper';
 
 interface VoiceCommandHUDProps {
   onExecuteTrade: (direction: 'CALL' | 'PUT') => void;
-  onDurationChange: (duration: number, unit?: 'ticks' | 'seconds' | 'minutes') => void;
+  onDurationChange: (duration: number, unit?: TradeDurationUnit) => void;
   onStakeChange: (stake: number) => void;
   onToggleBot: () => void;
   onRunAutonomously?: () => void;
@@ -37,7 +38,7 @@ interface VoiceCommandHUDProps {
   onExportJournal?: () => void;
   currentStake: number;
   currentDuration: number;
-  currentDurationUnit: 'ticks' | 'seconds' | 'minutes';
+  currentDurationUnit: TradeDurationUnit;
   botEnabled: boolean;
   isSniperArmed: boolean;
   currency?: string;

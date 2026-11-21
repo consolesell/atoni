@@ -1,4 +1,6 @@
 import {
+  DurationPerformanceBucket,
+  DurationUnit,
   StrategyEvolutionProposal,
   StrategyParameters,
   StrategyPerformanceMetrics,
@@ -25,6 +27,7 @@ function createEmptyMetrics(): StrategyPerformanceMetrics {
     aiAlignmentWinRate: 0,
     regimeBreakdown: {},
     symbolBreakdown: {},
+    durationBreakdown: {},
   };
 }
 
@@ -59,11 +62,38 @@ const DEFAULT_POLICY: CandidateEvaluationPolicy = {
   postPromotionMaxConsecutiveLosses: 4,
 };
 
+interface DurationOutcomeEntry {
+  timestampMs: number;
+  symbol: string;
+  strategyId: string;
+  strategyVersion: string;
+  marketRegime: string;
+  direction: string;
+  duration: number;
+  durationUnit: DurationUnit;
+  chartTimeframeSeconds?: number;
+  earlyExited: boolean;
+  isWin: boolean;
+  profit: number;
+  amount: number;
+}
+
 interface PersistedEvolutionState {
   activeVersion: string;
   rolloutMode: StrategyRolloutMode;
   versions: StrategyVersionRecord[];
   proposals: StrategyEvolutionProposal[];
+  durationOutcomes?: DurationOutcomeEntry[];
+}
+
+export interface DurationHorizonEvaluation {
+  calibrated: boolean;
+  uncalibrated: boolean;
+  minSampleCount: number;
+  totalMatchingTrades: number;
+  bestBucket: DurationPerformanceBucket | null;
+  buckets: DurationPerformanceBucket[];
+  reason: string;
 }
 
 export class StrategyEvolutionManager {
@@ -94,6 +124,7 @@ export class StrategyEvolutionManager {
       rolloutMode: 'MANUAL_APPROVAL',
       versions: [baseline],
       proposals: [],
+      durationOutcomes: [],
     };
   }
 
@@ -109,6 +140,7 @@ export class StrategyEvolutionManager {
           rolloutMode: parsed.rolloutMode || 'MANUAL_APPROVAL',
           versions: parsed.versions,
           proposals: Array.isArray(parsed.proposals) ? parsed.proposals : [],
+          durationOutcomes: Array.isArray(parsed.durationOutcomes) ? parsed.durationOutcomes : [],
         };
       }
     } catch {
@@ -211,6 +243,81 @@ export class StrategyEvolutionManager {
       },
     };
 
+    const reqDur = Number(trade.requestedDuration ?? trade.duration ?? 0);
+    const reqUnit: DurationUnit = (trade.requestedDurationUnit ?? trade.durationUnit ?? 'minutes') as DurationUnit;
+    const strategyId = trade.durationRecommendation?.strategyId || trade.agent || 'acde_core';
+    const earlyExited = Boolean(trade.earlyExited || trade.result === 'SOLD');
+    const tfSec = trade.chartTimeframeSeconds;
+    const durKey = `${symKey}|${versionKey}|${regimeKey}|${trade.decision || 'UNK'}|${reqDur}${reqUnit}|tf:${tfSec ?? 'na'}|early:${earlyExited}`;
+
+    const existingMap = m.durationBreakdown || {};
+    const prevDur: DurationPerformanceBucket = existingMap[durKey] || {
+      bucketKey: durKey,
+      symbol: symKey,
+      strategyId,
+      strategyVersion: versionKey,
+      marketRegime: regimeKey,
+      direction: String(trade.decision || 'UNK'),
+      duration: reqDur,
+      durationUnit: reqUnit,
+      chartTimeframeSeconds: tfSec,
+      earlyExitCount: 0,
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      winRate: 0,
+      netProfit: 0,
+      avgPnL: 0,
+      maxDrawdownPercent: 0,
+      expectancy: 0,
+      uncalibrated: true,
+    };
+
+    const nextTrades = prevDur.trades + 1;
+    const nextWins = prevDur.wins + (isWin ? 1 : 0);
+    const nextLosses = prevDur.losses + (isWin ? 0 : 1);
+    const nextNet = Number((prevDur.netProfit + profit).toFixed(2));
+    const nextAvgPnL = Number((nextNet / nextTrades).toFixed(3));
+    const nextWinRate = Number((nextWins / nextTrades).toFixed(4));
+    const stakeBase = Math.max(0.35, Number(trade.amount || 1));
+    const tradeDdPct = profit < 0 ? Number(((Math.abs(profit) / stakeBase) * 100).toFixed(2)) : 0;
+
+    m.durationBreakdown = {
+      ...existingMap,
+      [durKey]: {
+        ...prevDur,
+        earlyExitCount: prevDur.earlyExitCount + (earlyExited ? 1 : 0),
+        trades: nextTrades,
+        wins: nextWins,
+        losses: nextLosses,
+        winRate: nextWinRate,
+        netProfit: nextNet,
+        avgPnL: nextAvgPnL,
+        expectancy: nextAvgPnL,
+        maxDrawdownPercent: Math.max(prevDur.maxDrawdownPercent, tradeDdPct),
+        uncalibrated: nextTrades < 8,
+      },
+    };
+
+    const tsMs = Date.parse(trade.timestamp || '') || Date.now();
+    const outcomes = this.state.durationOutcomes ? [...this.state.durationOutcomes] : [];
+    outcomes.push({
+      timestampMs: tsMs,
+      symbol: symKey,
+      strategyId,
+      strategyVersion: versionKey,
+      marketRegime: regimeKey,
+      direction: String(trade.decision || 'UNK'),
+      duration: reqDur,
+      durationUnit: reqUnit,
+      chartTimeframeSeconds: tfSec,
+      earlyExited,
+      isWin,
+      profit,
+      amount: stakeBase,
+    });
+    this.state.durationOutcomes = outcomes.slice(-400);
+
     target.metrics = m;
 
     // Automatic rollback check if newly promoted strategy degrades materially
@@ -238,20 +345,176 @@ export class StrategyEvolutionManager {
   }
 
   /**
+   * Evaluates candidate durations chronologically with an out-of-sample split.
+   * Explicitly labels small-sample buckets `uncalibrated: true` and never lengthens duration to chase losses.
+   */
+  public evaluateDurationHorizons(params: {
+    symbol?: string;
+    strategyVersion?: string;
+    strategyId?: string;
+    regime?: string;
+    direction?: string;
+    minSamples?: number;
+    outOfSampleRatio?: number;
+    closedTrades?: TradeRecord[];
+  }): DurationHorizonEvaluation {
+    const minSamples = Math.max(3, params.minSamples ?? 8);
+    const oosRatio = Math.min(0.45, Math.max(0.15, params.outOfSampleRatio ?? 0.3));
+
+    const sourceEntries: DurationOutcomeEntry[] =
+      params.closedTrades && params.closedTrades.length > 0
+        ? params.closedTrades
+            .filter((t) => t.result === 'WIN' || t.result === 'LOSS' || t.result === 'SOLD')
+            .map((t) => ({
+              timestampMs: Date.parse(t.timestamp || '') || Date.now(),
+              symbol: t.symbol || 'UNKNOWN',
+              strategyId: t.durationRecommendation?.strategyId || t.agent || 'acde_core',
+              strategyVersion: t.strategyVersion || this.state.activeVersion,
+              marketRegime: t.regime || 'NEUTRAL',
+              direction: String(t.decision || 'UNK'),
+              duration: Number(t.requestedDuration ?? t.duration ?? 0),
+              durationUnit: (t.requestedDurationUnit ?? t.durationUnit ?? 'minutes') as DurationUnit,
+              chartTimeframeSeconds: t.chartTimeframeSeconds,
+              earlyExited: Boolean(t.earlyExited || t.result === 'SOLD'),
+              isWin: Number(t.profit || 0) > 0 || t.result === 'WIN',
+              profit: Number(t.profit || 0),
+              amount: Math.max(0.35, Number(t.amount || 1)),
+            }))
+        : [...(this.state.durationOutcomes || [])];
+
+    const filtered = sourceEntries
+      .filter((e) => e.duration > 0)
+      .filter((e) => !params.symbol || e.symbol === params.symbol)
+      .filter((e) => !params.strategyVersion || e.strategyVersion === params.strategyVersion)
+      .filter((e) => !params.regime || e.marketRegime === params.regime)
+      .filter((e) => !params.direction || e.direction === params.direction)
+      .sort((a, b) => a.timestampMs - b.timestampMs);
+
+    if (filtered.length === 0) {
+      return {
+        calibrated: false,
+        uncalibrated: true,
+        minSampleCount: minSamples,
+        totalMatchingTrades: 0,
+        bestBucket: null,
+        buckets: [],
+        reason: 'No settled duration observations available; using explicit baseline rules (uncalibrated).',
+      };
+    }
+
+    const groups = new Map<string, DurationOutcomeEntry[]>();
+    for (const item of filtered) {
+      const key = `${item.symbol}|${item.duration}|${item.durationUnit}|${item.marketRegime}`;
+      const list = groups.get(key) || [];
+      list.push(item);
+      groups.set(key, list);
+    }
+
+    const buckets: DurationPerformanceBucket[] = [];
+    for (const [bucketKey, entries] of groups.entries()) {
+      entries.sort((a, b) => a.timestampMs - b.timestampMs);
+      const n = entries.length;
+      const splitIdx = n >= 4 ? Math.max(1, Math.min(n - 1, Math.floor(n * (1 - oosRatio)))) : n;
+      const oosEntries = n >= 4 ? entries.slice(splitIdx) : entries;
+
+      const wins = entries.filter((e) => e.isWin).length;
+      const netProfit = Number(entries.reduce((s, e) => s + e.profit, 0).toFixed(2));
+      const avgPnL = Number((netProfit / n).toFixed(3));
+
+      // Equity drawdown over chronological trade curve
+      let running = 0;
+      let peak = 0;
+      let maxDrop = 0;
+      const totalRiskBase = entries.reduce((s, e) => s + e.amount, 0) / n;
+      for (const e of entries) {
+        running += e.profit;
+        if (running > peak) peak = running;
+        const drop = peak - running;
+        if (drop > maxDrop) maxDrop = drop;
+      }
+      const maxDdPct = Number(
+        Math.min(100, (maxDrop / Math.max(1, totalRiskBase * Math.sqrt(n))) * 100).toFixed(2)
+      );
+
+      const oosWins = oosEntries.filter((e) => e.isWin).length;
+      const oosNet = oosEntries.reduce((s, e) => s + e.profit, 0);
+      const oosExp = Number((oosNet / Math.max(1, oosEntries.length)).toFixed(3));
+      const oosWr = Number((oosWins / Math.max(1, oosEntries.length)).toFixed(4));
+      const sampleUncalibrated = n < minSamples;
+
+      const first = entries[0];
+      buckets.push({
+        bucketKey,
+        symbol: first.symbol,
+        strategyId: params.strategyId || first.strategyId,
+        strategyVersion: params.strategyVersion || first.strategyVersion,
+        marketRegime: first.marketRegime,
+        direction: params.direction || first.direction,
+        duration: first.duration,
+        durationUnit: first.durationUnit,
+        chartTimeframeSeconds: first.chartTimeframeSeconds,
+        earlyExitCount: entries.filter((e) => e.earlyExited).length,
+        trades: n,
+        wins,
+        losses: n - wins,
+        winRate: Number((wins / n).toFixed(4)),
+        netProfit,
+        avgPnL,
+        expectancy: avgPnL,
+        maxDrawdownPercent: maxDdPct,
+        uncalibrated: sampleUncalibrated,
+        outOfSampleTrades: oosEntries.length,
+        outOfSampleWinRate: oosWr,
+        outOfSampleExpectancy: oosExp,
+      });
+    }
+
+    buckets.sort((a, b) => {
+      if (a.uncalibrated !== b.uncalibrated) return a.uncalibrated ? 1 : -1;
+      const oosDiff = (b.outOfSampleExpectancy ?? b.expectancy) - (a.outOfSampleExpectancy ?? a.expectancy);
+      if (Math.abs(oosDiff) > 0.001) return oosDiff;
+      return b.winRate - a.winRate;
+    });
+
+    const calibratedBuckets = buckets.filter(
+      (b) => !b.uncalibrated && (b.outOfSampleExpectancy ?? b.expectancy) > 0 && b.winRate >= 0.5
+    );
+    const bestBucket = calibratedBuckets[0] || null;
+    const uncalibrated = bestBucket === null;
+
+    return {
+      calibrated: !uncalibrated,
+      uncalibrated,
+      minSampleCount: minSamples,
+      totalMatchingTrades: filtered.length,
+      bestBucket,
+      buckets,
+      reason: uncalibrated
+        ? `Sample count below minimum calibration threshold (${filtered.length} matching / min ${minSamples} per bucket) or no positive OOS edge; labeled uncalibrated and falling back to baseline.`
+        : `Calibrated best horizon ${bestBucket.duration} ${bestBucket.durationUnit} (${bestBucket.trades} trades, ${(bestBucket.winRate * 100).toFixed(1)}% WR, OOS exp ${bestBucket.outOfSampleExpectancy?.toFixed(2)}).`,
+    };
+  }
+
+  /**
    * Evaluates and validates a candidate parameter set against strict bounded safety rules
-   * and historical closed trade outcomes. Explicitly rejects loss-recovery / Martingale escalation.
+   * and historical closed trade outcomes. Explicitly rejects loss-recovery / Martingale escalation
+   * and post-loss duration lengthening.
    */
   public validateCandidateProposal(params: {
     proposedParameters: StrategyParameters;
     rationale: string;
     closedTrades: TradeRecord[];
     lossRecoveryEscalationRequested?: boolean;
+    postLossDurationLengtheningRequested?: boolean;
   }): StrategyEvolutionProposal {
     const active = this.getActiveVersion();
     const rejections: string[] = [];
 
     if (params.lossRecoveryEscalationRequested) {
       rejections.push('Loss-recovery stake escalation (Martingale doubling) is strictly forbidden.');
+    }
+    if (params.postLossDurationLengtheningRequested) {
+      rejections.push('Lengthening contract duration to chase or recover losses is strictly forbidden.');
     }
 
     const p = params.proposedParameters;

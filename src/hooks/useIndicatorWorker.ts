@@ -99,7 +99,8 @@ export function useIndicatorWorker({
             computedIndicators,
             payload.agents,
             payload.minConfidence ?? 0.38,
-            payload.consecutiveLosses ?? 0
+            payload.consecutiveLosses ?? 0,
+            { symbol: payload.symbol || '1HZ10V' }
           );
           if (computedDecision.regime) {
             computedRegime = computedDecision.regime;

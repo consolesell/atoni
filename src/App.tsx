@@ -14,6 +14,8 @@ import {
   TrailingStopConfig,
   BalanceSnapshot,
   ExecutionSource,
+  ACDEResult,
+  DurationRecommendation,
 } from './types/trading';
 import { derivWS, DEFAULT_DERIV_APP_ID } from './lib/derivWS';
 import { balanceManager } from './lib/balanceManager';
@@ -43,7 +45,8 @@ import { useIndicatorWorker } from './hooks/useIndicatorWorker';
 import { sound } from './lib/soundEngine';
 import { voice } from './lib/voiceEngine';
 import { notifyHostReady, hostHaptic, hostKeepScreenOn, hostToast, hostSpeak } from './lib/nativeHost';
-import { calculateCoreRiskMetrics, calculateDynamicStake, validateDerivDuration } from './lib/riskEngine';
+import { calculateCoreRiskMetrics, calculateDynamicStake } from './lib/riskEngine';
+import { acde, formatDurationLabel, normalizeDurationUnit } from './lib/adaptiveDurationEngine';
 import { detectPattern, recordPatternOutcome } from './lib/adaptivePatternEngine';
 import {
   calculateTrailingDistance,
@@ -788,6 +791,15 @@ export default function App() {
       derivWS.refreshBalance();
     }
 
+    const settledNow = Date.now();
+    const entryMs = new Date(trade.timestamp).getTime();
+    const actualHoldingMs = Math.max(500, Number.isFinite(entryMs) ? settledNow - entryMs : 1000);
+    const isSoldEarly = poc.status === 'sold' || Boolean(trade.earlyExited);
+    const displayDur = formatDurationLabel(
+      trade.requestedDuration ?? trade.duration,
+      (trade.requestedDurationUnit ?? trade.durationUnit ?? 'minutes') as TradeDurationUnit
+    );
+
     const settled: TradeRecord = {
       ...trade,
       contract_id: contractId,
@@ -801,7 +813,16 @@ export default function App() {
         poc.exit_reason ||
         (poc.status === 'sold' ? 'Sold at Deriv Market Bid' : won ? 'Deriv Expiry Win' : 'Deriv Expiry Loss'),
       result: won ? 'WIN' : 'LOSS',
-      holdMs: Math.max(1000, Date.now() - new Date(trade.timestamp).getTime()),
+      holdMs: Math.max(1000, actualHoldingMs),
+      actualSaleTime: settledNow,
+      actualHoldingMs,
+      earlyExited: isSoldEarly,
+      // Explicitly preserve requested duration, broker-confirmed expiry, and chart timeframe independently
+      requestedDuration: trade.requestedDuration ?? trade.duration,
+      requestedDurationUnit: trade.requestedDurationUnit ?? trade.durationUnit,
+      brokerConfirmedStartMs: trade.brokerConfirmedStartMs,
+      brokerConfirmedExpiryMs: trade.brokerConfirmedExpiryMs,
+      chartTimeframeSeconds: trade.chartTimeframeSeconds,
       status: poc.status || (won ? 'won' : 'lost'),
       isDerivRealTime: true,
     };
@@ -836,11 +857,19 @@ export default function App() {
       trustSource: 'VERIFIED_FACT',
       key: `trade_${contractId}`,
       title: `${settled.symbol} ${settled.decision} ${settled.result}`,
-      summary: `Contract #${contractId} settled ${settled.result} (${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}) under ${settled.strategyVersion || 'v4.1.0-baseline'}.`,
+      summary: `Contract #${contractId} settled ${settled.result} (${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}, dur ${displayDur}, held ${(actualHoldingMs / 1000).toFixed(1)}s${isSoldEarly ? ' early-exit' : ''}) under ${settled.strategyVersion || 'v4.1.0-baseline'}.`,
       symbol: settled.symbol,
       strategyVersion: settled.strategyVersion || strategyEvolutionManager.getActiveVersion().version,
       regime: settled.regime,
       relevanceScore: 90,
+      metadata: {
+        requestedDuration: settled.requestedDuration,
+        requestedDurationUnit: settled.requestedDurationUnit,
+        brokerConfirmedExpiryMs: settled.brokerConfirmedExpiryMs,
+        chartTimeframeSeconds: settled.chartTimeframeSeconds,
+        actualHoldingMs: settled.actualHoldingMs,
+        earlyExited: settled.earlyExited,
+      },
     });
     if (currentUser && memRes.stored) {
       void firebaseSyncManager
@@ -862,15 +891,18 @@ export default function App() {
       type: 'AUTONOMOUS_TRADE',
       symbol: trade.symbol,
       action: won ? 'DERIV_CONTRACT_WIN' : 'DERIV_CONTRACT_LOSS',
-      reason: `Deriv contract #${contractId} settled (${trade.duration}${
-        trade.durationUnit === 'ticks' ? 't' : trade.durationUnit === 'seconds' ? 's' : 'm'
-      }) at ${exitPrice}`,
+      reason: `Deriv contract #${contractId} settled (${displayDur}, held ${(actualHoldingMs / 1000).toFixed(1)}s) at ${exitPrice}`,
       pnlImpact: profit,
       metadata: {
         contractId,
         stake: trade.amount,
         exitPrice,
         mode: trade.mode,
+        requestedDuration: settled.requestedDuration,
+        requestedDurationUnit: settled.requestedDurationUnit,
+        chartTimeframeSeconds: settled.chartTimeframeSeconds,
+        actualHoldingMs: settled.actualHoldingMs,
+        earlyExited: settled.earlyExited,
       },
     });
 
@@ -940,6 +972,9 @@ export default function App() {
     derivWS.connect();
     derivWS.fetchCandles(selectedSymbol, granularity, 120);
     derivWS.subscribeTicks(selectedSymbol);
+    if (derivWS.isConnected()) {
+      void derivWS.fetchContractsForSymbol(selectedSymbol).catch(() => {});
+    }
 
     const unsubscribe = derivWS.subscribe((data: any) => {
       if (data.msg_type === 'tick' && data.tick) {
@@ -1053,6 +1088,7 @@ export default function App() {
         if (data.authorize.currency) {
           setCurrency(data.authorize.currency);
         }
+        void derivWS.fetchContractsForSymbol(selectedSymbol, data.authorize.currency).catch(() => {});
       } else if (data.msg_type === 'connection_state') {
         if (data.state === 'ONLINE' && portfolioReconciler.hasPendingReconciliation()) {
           derivWS.requestReconciliationSnapshot().then(({ openContracts, settledTransactions, portfolioVerified, statementVerified }) => {
@@ -1357,9 +1393,58 @@ export default function App() {
       indicators,
       regime,
       algorithmicDecision,
-      agents
+      agents,
+      selectedSymbol,
+      granularity
     );
-  }, [currentPrice, candles, indicators, regime, algorithmicDecision, agents]);
+  }, [currentPrice, candles, indicators, regime, algorithmicDecision, agents, selectedSymbol, granularity]);
+
+  // 2b-ii. Single Authoritative Adaptive Contract Duration Engine (ACDE) Evaluation
+  const acdeEvaluation = useMemo<ACDEResult | null>(() => {
+    if (!candles || candles.length < 5) return null;
+    const lastLoss = closedTrades.find((t) => t.symbol === selectedSymbol && t.result === 'LOSS');
+    return acde.computeMarketAwareDuration({
+      symbol: selectedSymbol,
+      contractType: direction,
+      candles,
+      indicators,
+      regime,
+      confidence: algorithmicDecision?.confidence ?? 0.6,
+      chartTimeframeSeconds: granularity,
+      strategyId: strategyState.activeVersion,
+      strategyVersion: strategyState.activeVersion,
+      consecutiveLosses: botState.consecutiveLosses ?? 0,
+      lastLossDuration: lastLoss
+        ? {
+            value: lastLoss.requestedDuration ?? lastLoss.duration,
+            unit: (lastLoss.requestedDurationUnit ?? lastLoss.durationUnit ?? 'minutes') as TradeDurationUnit,
+          }
+        : null,
+      earlyExitPolicy: settings.earlyExit ?? DEFAULT_EARLY_EXIT_POLICY,
+      governance: settings.durationGovernance,
+      aiRecommendation: aiPrediction?.duration_recommendation ?? null,
+      source: 'ACDE',
+    });
+  }, [
+    selectedSymbol,
+    direction,
+    candles,
+    indicators,
+    regime,
+    algorithmicDecision?.confidence,
+    granularity,
+    strategyState.activeVersion,
+    botState.consecutiveLosses,
+    closedTrades,
+    settings.earlyExit,
+    settings.durationGovernance,
+    aiPrediction?.duration_recommendation,
+  ]);
+
+  const handleDurationChange = useCallback((nextDuration: number, nextUnit?: TradeDurationUnit) => {
+    setDuration(nextDuration);
+    if (nextUnit) setDurationUnit(nextUnit);
+  }, []);
 
   // 2c. Highest-Win Prioritization Gatekeeper (Filters out low-probability gamble setups)
   const highestWinGate = useMemo(() => {
@@ -1458,7 +1543,12 @@ export default function App() {
 
     // B) Build live session context for SBAgent
     const openExposure = openTrades.reduce((sum, t) => sum + (t.amount || 0), 0);
-    const sessionContext: AutonomySessionContext = {
+    const sessionContext: AutonomySessionContext & {
+      candles?: Candle[];
+      indicators?: TechnicalIndicators | null;
+      chartTimeframeSeconds?: number;
+      governance?: typeof settings.durationGovernance;
+    } = {
       symbol: selectedSymbol,
       balance,
       accountMode: isLiveMode ? 'REAL' : 'DEMO',
@@ -1467,6 +1557,10 @@ export default function App() {
       risk: autonomyPreset.risk,
       allowedSymbols: autonomyPreset.allowedSymbols,
       strategyRef: strategyState.activeVersion || autonomyPreset.strategyProfile || 'sbagent.md-v4.1',
+      candles,
+      indicators,
+      chartTimeframeSeconds: granularity,
+      governance: settings.durationGovernance,
     };
 
     // C) GRANT unified autonomy through AutonomyManager before SBAgent self-configures
@@ -1642,11 +1736,13 @@ export default function App() {
           entryTarget: sniperSetup.optimalEntryPrice,
           takeProfitTarget: sniperSetup.takeProfitPrice,
           stopLossTarget: sniperSetup.stopLossPrice,
-        }
+        },
+        trailingStopConfig,
+        { recommendation: acdeEvaluation?.recommendation ?? null }
       );
       setIsSniperTriggerArmed(false);
     }
-  }, [currentPrice, isSniperTriggerArmed, sniperSetup, isExecuting, stake, selectedSymbol]);
+  }, [currentPrice, isSniperTriggerArmed, sniperSetup, isExecuting, stake, selectedSymbol, acdeEvaluation, trailingStopConfig]);
 
   // 3. Gemini AI Scan (context-bound & cancellation-safe via IntelligenceManager)
   const triggerAIScan = useCallback(async () => {
@@ -1796,7 +1892,10 @@ export default function App() {
         takeProfitTarget?: number;
         stopLossTarget?: number;
       },
-      trailingStopOptions?: TrailingStopConfig
+      trailingStopOptions?: TrailingStopConfig,
+      durationMeta?: {
+        recommendation?: DurationRecommendation | null;
+      }
     ) => {
       if (isExecuting || isExecutingRef.current) return;
 
@@ -1808,9 +1907,45 @@ export default function App() {
         return;
       }
 
-      const validated = validateDerivDuration(selectedSymbol, tradeDuration, tradeDurationUnit);
-      if (validated.isAdjusted) {
-        addLog(`⏱️ Duration calibrated to legal Deriv bound: ${tradeDuration} → ${validated.exactLegalString}`, 'info');
+      const gov = settings.durationGovernance;
+      if (
+        source !== 'MANUAL' &&
+        gov?.mode === 'ADAPTIVE_AUTO' &&
+        gov?.fallbackBehavior === 'HOLD' &&
+        acdeEvaluation?.action === 'HOLD'
+      ) {
+        const reason = acdeEvaluation.holdReason || 'ACDE returned HOLD due to insufficient duration edge.';
+        hostToast(reason);
+        addLog(`🛑 [ACDE HOLD] ${reason}`, 'warn');
+        return;
+      }
+
+      const preDur = acde.resolveExecutionDuration({
+        source,
+        symbol: selectedSymbol,
+        contractType: tradeDirection,
+        requestedDuration: tradeDuration,
+        requestedUnit: tradeDurationUnit,
+        governance: gov,
+        recommendation:
+          durationMeta?.recommendation ??
+          (source === 'GEMINI_AI' || source === 'LOCAL_AI' ? aiPrediction?.duration_recommendation : undefined),
+        strategyId: strategyState.activeVersion,
+      });
+
+      if (!preDur.approved) {
+        const msg = preDur.rejectionReason || 'Contract duration rejected by ACDE safety rules.';
+        hostHaptic('error');
+        hostToast(msg);
+        addLog(`🛑 [DURATION REJECTED] ${msg}`, 'warn');
+        return;
+      }
+
+      if (preDur.wasAdjusted && preDur.adjustmentReason) {
+        addLog(
+          `⏱️ [ACDE] ${formatDurationLabel(preDur.originalDuration, preDur.originalUnit)} → ${formatDurationLabel(preDur.duration, preDur.unit)}: ${preDur.adjustmentReason}`,
+          'info'
+        );
       }
 
       isExecutingRef.current = true;
@@ -1823,8 +1958,19 @@ export default function App() {
           symbol: selectedSymbol,
           contractType: tradeDirection,
           stake: tradeStake,
-          duration: validated.duration,
-          durationUnit: validated.unit,
+          duration: preDur.duration,
+          durationUnit: preDur.unit,
+          originalDuration: preDur.originalDuration,
+          originalDurationUnit: preDur.originalUnit,
+          durationAdjustmentReason: preDur.adjustmentReason,
+          chartTimeframeSeconds: granularity,
+          durationGovernanceMode: gov?.mode,
+          durationRecommendation:
+            preDur.validatedRecommendation ??
+            durationMeta?.recommendation ??
+            acdeEvaluation?.recommendation ??
+            null,
+          aiPrediction,
           confidence: sniperData?.confluenceScore
             ? sniperData.confluenceScore / 100
             : algorithmicDecision?.confidence || 0.62,
@@ -1926,7 +2072,10 @@ export default function App() {
           );
         }
 
-        const unitSuffix = validated.unit === 'ticks' ? 't' : validated.unit === 'seconds' ? 's' : 'm';
+        const formattedDuration = formatDurationLabel(
+          enrichedTrade.requestedDuration ?? preDur.duration,
+          (enrichedTrade.requestedDurationUnit ?? preDur.unit) as TradeDurationUnit
+        );
         const sniperTag = sniperData?.isSniperTrade ? ` [SNIPER ${sniperData.confluenceScore}%]` : '';
         const tslTag = trailingStopOptions?.enabled && tslProps.currentTrailingStopPrice
           ? ` [TSL Stop: ${tslProps.currentTrailingStopPrice.toFixed(decimals)}]`
@@ -1935,7 +2084,7 @@ export default function App() {
         addLog(
           `[${source}${sniperTag}${tslTag}] Purchased ${isLiveMode ? 'REAL' : 'DEMO'} Deriv ${
             tradeDirection === 'CALL' ? 'RISE' : 'FALL'
-          } contract #${enrichedTrade.contract_id} on ${selectedSymbol} via proposal ${enrichedTrade.proposalId} ($${enrichedTrade.amount.toFixed(2)}, ${validated.duration}${unitSuffix})`,
+          } contract #${enrichedTrade.contract_id} on ${selectedSymbol} via proposal ${enrichedTrade.proposalId} ($${enrichedTrade.amount.toFixed(2)}, ${formattedDuration})`,
           'success'
         );
       } finally {
@@ -1947,10 +2096,13 @@ export default function App() {
       isExecuting,
       isLiveMode,
       selectedSymbol,
+      granularity,
       algorithmicDecision,
       regime.type,
       strategyState.activeVersion,
-      aiPrediction?.context,
+      aiPrediction,
+      acdeEvaluation,
+      settings.durationGovernance,
       user?.uid,
       candles,
       indicators,
@@ -2045,9 +2197,46 @@ export default function App() {
           }
 
           const dir = evalData.action === 'BUY' ? 'CALL' : 'PUT';
-          const dur = evalData.suggested_duration_mins || 15;
-          addLog(`🤖 Subagent (sbagent.md) triggered: ${dir} (${evalData.rule_matched})`, 'success');
-          void executeTrade(dir, stake, dur, 'SUBAGENT_MD');
+          const recCheck = acde.validateStructuredRecommendation(
+            evalData.duration_recommendation,
+            { symbol: selectedSymbol },
+            'SUBAGENT_MD'
+          );
+
+          let chosenDur: number | undefined;
+          let chosenUnit: TradeDurationUnit | undefined;
+          let chosenRec: DurationRecommendation | null = null;
+
+          if (recCheck.valid && recCheck.recommendation) {
+            chosenDur = recCheck.recommendation.value;
+            chosenUnit = recCheck.recommendation.unit;
+            chosenRec = recCheck.recommendation;
+          } else {
+            if (evalData.duration_recommendation || evalData.suggested_duration_mins !== undefined) {
+              addLog(
+                `⏱️ [ACDE] Rejected unstructured/stale Subagent duration (${recCheck.reason || 'missing explicit unit'}). Falling back to ACDE.`,
+                'info'
+              );
+            }
+            if (!acdeEvaluation || acdeEvaluation.action === 'HOLD') {
+              addLog(
+                `🛑 [ACDE HOLD] Subagent blocked: ${acdeEvaluation?.holdReason || 'Market conditions unsuitable for duration assignment.'}`,
+                'warn'
+              );
+              return;
+            }
+            chosenDur = acdeEvaluation.duration;
+            chosenUnit = acdeEvaluation.unit;
+            chosenRec = acdeEvaluation.recommendation;
+          }
+
+          addLog(
+            `🤖 Subagent (sbagent.md) triggered: ${dir} (${evalData.rule_matched}, ${formatDurationLabel(chosenDur, chosenUnit)})`,
+            'success'
+          );
+          void executeTrade(dir, stake, chosenDur, 'SUBAGENT_MD', chosenUnit, undefined, trailingStopConfig, {
+            recommendation: chosenRec,
+          });
         }
       }
     } catch (err: any) {
@@ -2065,6 +2254,8 @@ export default function App() {
     stake,
     granularity,
     algorithmicDecision?.consensus,
+    acdeEvaluation,
+    trailingStopConfig,
     botState.allowedRotationSymbols,
     botState.autonomousSymbolChange,
     botState.rotationCooldownSeconds,
@@ -2218,21 +2409,60 @@ export default function App() {
       }
     }
 
+    if (
+      settings.durationGovernance?.mode === 'ADAPTIVE_AUTO' &&
+      settings.durationGovernance?.fallbackBehavior === 'HOLD' &&
+      acdeEvaluation?.action === 'HOLD'
+    ) {
+      addLog(`🛑 [ACDE HOLD] Auto-Bot withheld: ${acdeEvaluation.holdReason || 'Market edge below threshold'}`, 'info');
+      return;
+    }
+
     lastBotTradeTimeRef.current = now;
     const effectiveStake = appliedAutonomySettings?.calibratedStake
       ?? (martingaleState.enabled ? martingaleState.currentStake : (botState.stake || stake || 1.0));
-    const effectiveDuration = appliedAutonomySettings?.calibratedDuration
-      ?? (aiPrediction?.suggested_duration || algorithmicDecision.duration || 15);
-    const effectiveDurationUnit = appliedAutonomySettings?.calibratedDurationUnit || 'minutes';
+
+    const aiRecValid = aiPrediction?.duration_recommendation
+      ? acde.validateStructuredRecommendation(aiPrediction.duration_recommendation, { symbol: selectedSymbol }, 'GEMINI_AI')
+      : null;
+
+    let effectiveDuration = 3;
+    let effectiveDurationUnit: TradeDurationUnit = 'minutes';
+    let botDurationRec: DurationRecommendation | null = acdeEvaluation?.recommendation ?? null;
+
+    if (sniperSetup?.isPrimed && sniperSetup.direction === tradeDir) {
+      effectiveDuration = sniperSetup.recommendedDuration.value;
+      effectiveDurationUnit = sniperSetup.recommendedDuration.unit;
+    } else if (appliedAutonomySettings?.calibratedDuration && appliedAutonomySettings?.calibratedDurationUnit) {
+      effectiveDuration = appliedAutonomySettings.calibratedDuration;
+      effectiveDurationUnit = appliedAutonomySettings.calibratedDurationUnit;
+    } else if (acdeEvaluation && acdeEvaluation.action === 'SELECT') {
+      effectiveDuration = acdeEvaluation.duration;
+      effectiveDurationUnit = acdeEvaluation.unit;
+      botDurationRec = acdeEvaluation.recommendation;
+    } else if (aiRecValid?.valid && aiRecValid.recommendation) {
+      effectiveDuration = aiRecValid.recommendation.value;
+      effectiveDurationUnit = aiRecValid.recommendation.unit;
+      botDurationRec = aiRecValid.recommendation;
+    } else if (algorithmicDecision.durationRecommendation) {
+      effectiveDuration = algorithmicDecision.durationRecommendation.value;
+      effectiveDurationUnit = algorithmicDecision.durationRecommendation.unit;
+      botDurationRec = algorithmicDecision.durationRecommendation;
+    } else if (algorithmicDecision.duration && algorithmicDecision.durationUnit) {
+      effectiveDuration = algorithmicDecision.duration;
+      effectiveDurationUnit = algorithmicDecision.durationUnit;
+    }
 
     auditLogger.record({
       type: 'AUTONOMOUS_TRADE',
       symbol: selectedSymbol,
       action: tradeDir,
-      reason: `Autonomous trade executed: ${tradeDir} (Confidence: ${Math.round(confidence * 100)}%, Stake: $${effectiveStake.toFixed(2)})`,
+      reason: `Autonomous trade executed: ${tradeDir} (Confidence: ${Math.round(confidence * 100)}%, Stake: $${effectiveStake.toFixed(2)}, ${formatDurationLabel(effectiveDuration, effectiveDurationUnit)})`,
       metadata: {
         stake: effectiveStake,
         duration: effectiveDuration,
+        durationUnit: effectiveDurationUnit,
+        chartTimeframeSeconds: granularity,
         confidence,
         regime: regime.type,
       },
@@ -2253,22 +2483,37 @@ export default function App() {
           takeProfitTarget: sniperSetup.takeProfitPrice,
           stopLossTarget: sniperSetup.stopLossPrice,
         },
-        trailingStopConfig
+        trailingStopConfig,
+        { recommendation: botDurationRec }
       );
     } else {
-      addLog(`Auto-Bot signal triggered: ${tradeDir} (Confidence: ${Math.round(confidence * 100)}%, Stake $${effectiveStake.toFixed(2)})`, 'info');
-      executeTrade(tradeDir, effectiveStake, effectiveDuration, 'AUTO_BOT', effectiveDurationUnit, undefined, trailingStopConfig);
+      addLog(`Auto-Bot signal triggered: ${tradeDir} (${formatDurationLabel(effectiveDuration, effectiveDurationUnit)}, Confidence: ${Math.round(confidence * 100)}%, Stake $${effectiveStake.toFixed(2)})`, 'info');
+      executeTrade(
+        tradeDir,
+        effectiveStake,
+        effectiveDuration,
+        'AUTO_BOT',
+        effectiveDurationUnit,
+        undefined,
+        trailingStopConfig,
+        { recommendation: botDurationRec }
+      );
     }
   }, [
     botState,
     algorithmicDecision,
     aiPrediction,
     sniperSetup,
+    acdeEvaluation,
+    appliedAutonomySettings,
+    settings.durationGovernance,
+    granularity,
     martingaleState,
     trailingStopConfig,
     openTrades.length,
     executeTrade,
     stake,
+    selectedSymbol,
     addLog,
     currentPrice,
     candles,
@@ -2675,11 +2920,59 @@ export default function App() {
           };
         }
 
-        await executeTrade(dir, tradeStakeVal, duration, execSource, durationUnit, undefined, trailingStopConfig);
+        let targetDur = acdeEvaluation?.action === 'SELECT' ? acdeEvaluation.duration : duration;
+        let targetUnit: TradeDurationUnit = acdeEvaluation?.action === 'SELECT' ? acdeEvaluation.unit : durationUnit;
+        let targetRec: DurationRecommendation | null = acdeEvaluation?.recommendation ?? null;
+
+        if (args.duration_recommendation && typeof args.duration_recommendation === 'object') {
+          const check = acde.validateStructuredRecommendation(
+            args.duration_recommendation,
+            { symbol: selectedSymbol },
+            execSource
+          );
+          if (!check.valid || !check.recommendation) {
+            return {
+              status: 'REJECTED',
+              action: 'execute_authorized_trade',
+              message: check.reason || 'Structured duration_recommendation rejected by ACDE.',
+              timestamp: Date.now(),
+            };
+          }
+          targetDur = check.recommendation.value;
+          targetUnit = check.recommendation.unit;
+          targetRec = check.recommendation;
+        } else if (args.duration !== undefined) {
+          const parsedUnit = normalizeDurationUnit(args.durationUnit ?? args.unit);
+          if (!parsedUnit) {
+            return {
+              status: 'REJECTED',
+              action: 'execute_authorized_trade',
+              message: 'Unitless duration rejected by ACDE; specify explicit durationUnit (ticks|seconds|minutes|hours|days).',
+              timestamp: Date.now(),
+            };
+          }
+          targetDur = Number(args.duration);
+          targetUnit = parsedUnit;
+        } else if (
+          settings.durationGovernance?.mode === 'ADAPTIVE_AUTO' &&
+          settings.durationGovernance?.fallbackBehavior === 'HOLD' &&
+          acdeEvaluation?.action === 'HOLD'
+        ) {
+          return {
+            status: 'REJECTED',
+            action: 'execute_authorized_trade',
+            message: acdeEvaluation.holdReason || 'ACDE advised HOLD on contract duration.',
+            timestamp: Date.now(),
+          };
+        }
+
+        await executeTrade(dir, tradeStakeVal, targetDur, execSource, targetUnit, undefined, trailingStopConfig, {
+          recommendation: targetRec,
+        });
         return {
           status: 'SUCCESS',
           action: 'execute_authorized_trade',
-          message: `Authorized ${dir} execution submitted via ExecutionController (${execSource}).`,
+          message: `Authorized ${dir} (${formatDurationLabel(targetDur, targetUnit)}) submitted via ExecutionController (${execSource}).`,
           timestamp: Date.now(),
         };
       },
@@ -2696,6 +2989,8 @@ export default function App() {
     strategyState.activeVersion,
     trailingStopConfig,
     settings.earlyExit,
+    settings.durationGovernance,
+    acdeEvaluation,
     candles,
     indicators,
     aiPrediction,
@@ -2889,10 +3184,9 @@ export default function App() {
             onStakeChange={setStake}
             duration={duration}
             durationUnit={durationUnit}
-            onDurationChange={(dur, unit) => {
-              setDuration(dur);
-              if (unit) setDurationUnit(unit);
-            }}
+            onDurationChange={handleDurationChange}
+            acdeEvaluation={acdeEvaluation}
+            durationGovernanceMode={settings.durationGovernance?.mode || 'ADAPTIVE_AUTO'}
             direction={direction}
             onDirectionChange={setDirection}
             isExecuting={isExecuting}
@@ -3187,10 +3481,7 @@ export default function App() {
         onStakeChange={setStake}
         duration={duration}
         durationUnit={durationUnit}
-        onDurationChange={(dur, unit) => {
-          setDuration(dur);
-          if (unit) setDurationUnit(unit);
-        }}
+        onDurationChange={handleDurationChange}
         botState={botState}
         onUpdateBotState={(updates) => setBotState((prev) => ({ ...prev, ...updates }))}
         isLiveMode={isLiveMode}
@@ -3271,7 +3562,7 @@ export default function App() {
         onStakeChange={setStake}
         duration={duration}
         durationUnit={durationUnit}
-        onDurationChange={setDuration}
+        onDurationChange={handleDurationChange}
         onExecute={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
         isExecuting={isExecuting}
         botActive={botState.enabled}
@@ -3312,7 +3603,8 @@ export default function App() {
         stake={stake}
         onStakeChange={setStake}
         duration={duration}
-        onDurationChange={setDuration}
+        durationUnit={durationUnit}
+        onDurationChange={handleDurationChange}
         isLiveMode={isLiveMode}
         onToggleLiveMode={() => handleToggleLiveMode(!isLiveMode)}
         botState={botState}
@@ -3386,10 +3678,7 @@ export default function App() {
         onExecuteTrade={(dir) => {
           executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig);
         }}
-        onDurationChange={(dur, unit) => {
-          setDuration(dur);
-          if (unit) setDurationUnit(unit);
-        }}
+        onDurationChange={handleDurationChange}
         onStakeChange={(newStake) => {
           setStake(newStake);
         }}

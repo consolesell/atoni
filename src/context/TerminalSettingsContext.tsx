@@ -3,6 +3,7 @@ import {
   TerminalSettings,
   DEFAULT_TERMINAL_SETTINGS,
 } from '../types/settings';
+import { DurationGovernancePolicy } from '../types/trading';
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS, AgentVoicePersonaId } from '../lib/voiceEngine';
 import { derivWS } from '../lib/derivWS';
@@ -23,12 +24,36 @@ interface TerminalSettingsContextType {
   updateAudio: (updates: Partial<TerminalSettings['audio']>) => void;
   updateConnection: (updates: Partial<TerminalSettings['connection']>) => void;
   updateInterface: (updates: Partial<TerminalSettings['interface']>) => void;
+  updateDurationGovernance: (updates: Partial<DurationGovernancePolicy>) => void;
   resetToDefaults: () => void;
   exportSettingsJSON: () => string;
   importSettingsJSON: (jsonStr: string) => { success: boolean; error?: string };
 }
 
 const TerminalSettingsContext = createContext<TerminalSettingsContextType | null>(null);
+
+function mergeDurationGovernance(
+  base: DurationGovernancePolicy,
+  incoming?: Partial<DurationGovernancePolicy> | null
+): DurationGovernancePolicy {
+  if (!incoming) return { ...base };
+  return {
+    ...base,
+    ...incoming,
+    recalibrationPolicy: {
+      ...base.recalibrationPolicy,
+      ...(incoming.recalibrationPolicy || {}),
+    },
+    perSymbolBounds: {
+      ...(base.perSymbolBounds || {}),
+      ...(incoming.perSymbolBounds || {}),
+    },
+    perStrategyBounds: {
+      ...(base.perStrategyBounds || {}),
+      ...(incoming.perStrategyBounds || {}),
+    },
+  };
+}
 
 function loadStoredSettings(): TerminalSettings {
   if (typeof window === 'undefined') return DEFAULT_TERMINAL_SETTINGS;
@@ -49,6 +74,10 @@ function loadStoredSettings(): TerminalSettings {
         connection: { ...DEFAULT_TERMINAL_SETTINGS.connection, ...(parsed.connection || {}) },
         interface: { ...DEFAULT_TERMINAL_SETTINGS.interface, ...(parsed.interface || {}) },
         earlyExit: { ...DEFAULT_EARLY_EXIT_POLICY, ...(parsed.earlyExit || {}) },
+        durationGovernance: mergeDurationGovernance(
+          DEFAULT_TERMINAL_SETTINGS.durationGovernance!,
+          parsed.durationGovernance
+        ),
       };
     }
   } catch (e) {
@@ -105,6 +134,7 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
           risk: unified.risk,
           earlyExit: unified.earlyExit,
           trailingStop: unified.trailingStop,
+          durationGovernance: unified.durationGovernance,
         },
         version: unified.revision,
         updatedAt: unified.updatedAt,
@@ -184,6 +214,17 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
     }));
   }, []);
 
+  const updateDurationGovernance = useCallback((updates: Partial<DurationGovernancePolicy>) => {
+    setSettings((prev) => ({
+      ...prev,
+      durationGovernance: mergeDurationGovernance(
+        prev.durationGovernance || DEFAULT_TERMINAL_SETTINGS.durationGovernance!,
+        updates
+      ),
+      updatedAt: new Date().toISOString(),
+    }));
+  }, []);
+
   const resetToDefaults = useCallback(() => {
     setSettings({
       ...DEFAULT_TERMINAL_SETTINGS,
@@ -213,6 +254,10 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
         audio: { ...prev.audio, ...(parsed.audio || {}) },
         connection: { ...prev.connection, ...(parsed.connection || {}) },
         interface: { ...prev.interface, ...(parsed.interface || {}) },
+        durationGovernance: mergeDurationGovernance(
+          prev.durationGovernance || DEFAULT_TERMINAL_SETTINGS.durationGovernance!,
+          parsed.durationGovernance
+        ),
         updatedAt: new Date().toISOString(),
       }));
       sound.play('win');
@@ -235,6 +280,7 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
         updateAudio,
         updateConnection,
         updateInterface,
+        updateDurationGovernance,
         resetToDefaults,
         exportSettingsJSON,
         importSettingsJSON,

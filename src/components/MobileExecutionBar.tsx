@@ -15,13 +15,19 @@ import {
 import { sound } from '../lib/soundEngine';
 import { voiceInput } from '../lib/voiceInputEngine';
 import { AutonomyMode } from '../types/autonomy';
+import { TradeDurationUnit } from '../types/sniper';
+import { PRESET_DURATIONS, formatDurationLabel } from '../lib/adaptiveDurationEngine';
+
+const MOBILE_CYCLE_PRESETS = PRESET_DURATIONS.filter((p) =>
+  ['5 Ticks', '15s', '30s', '2m', '5m', '15m', '1h', '1d'].includes(p.label)
+);
 
 interface MobileExecutionBarProps {
   stake: number;
   onStakeChange: (s: number) => void;
   duration: number;
-  durationUnit?: 'ticks' | 'seconds' | 'minutes';
-  onDurationChange: (d: number) => void;
+  durationUnit?: TradeDurationUnit;
+  onDurationChange: (d: number, unit?: TradeDurationUnit) => void;
   onExecute: (direction: 'CALL' | 'PUT') => void;
   isExecuting: boolean;
   botActive?: boolean;
@@ -56,7 +62,6 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
   onStopAutonomy,
 }) => {
   const [isVoiceListening, setIsVoiceListening] = useState(voiceInput.getIsListening());
-  const durations = [5, 10, 15, 30];
   const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -80,8 +85,14 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
   }, []);
 
   const handleCycleDuration = () => {
-    const nextIndex = (durations.indexOf(duration) + 1) % durations.length;
-    onDurationChange(durations[nextIndex]);
+    const currentIdx = MOBILE_CYCLE_PRESETS.findIndex(
+      (p) => p.value === duration && p.unit === durationUnit
+    );
+    const nextPreset =
+      MOBILE_CYCLE_PRESETS[(currentIdx + 1) % MOBILE_CYCLE_PRESETS.length] || MOBILE_CYCLE_PRESETS[0];
+    if (nextPreset) {
+      onDurationChange(nextPreset.value, nextPreset.unit);
+    }
     sound.play('click');
   };
 
@@ -145,13 +156,10 @@ export const MobileExecutionBar: React.FC<MobileExecutionBarProps> = ({
           <button
             onClick={handleCycleDuration}
             className="h-9 px-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white flex items-center gap-1 font-mono text-xs font-bold active:scale-95 transition-all"
-            title="Cycle Duration"
+            title="Cycle Unit-Aware Contract Duration"
           >
             <Clock className="w-3 h-3 text-cyan-400" />
-            <span>
-              {duration}
-              {durationUnit === 'ticks' ? 't' : durationUnit === 'seconds' ? 's' : 'm'}
-            </span>
+            <span>{formatDurationLabel(duration, durationUnit)}</span>
           </button>
         </div>
 

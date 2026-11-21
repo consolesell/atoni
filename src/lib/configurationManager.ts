@@ -12,12 +12,14 @@ import {
   DEFAULT_SBAGENT_PRESET,
 } from '../types/autonomy';
 import {
+  DurationGovernancePolicy,
   EarlyExitPolicyConfig,
   ExecutionModeSetting,
   PositionSizingMode,
 } from '../types/trading';
 import { sanitizeForPersistence } from './securitySanitizer';
 import { calculateDynamicStake } from './riskEngine';
+import { DEFAULT_DURATION_GOVERNANCE } from './adaptiveDurationEngine';
 
 const UNIFIED_CONFIG_STORAGE_KEY = 'sbatomic_unified_config_v1';
 const LEGACY_SETTINGS_KEY = 'terminal_settings_v4';
@@ -79,6 +81,7 @@ export interface UnifiedConfigurationSnapshot {
     autoPromoteSafeEvolution: boolean;
   };
   earlyExit: EarlyExitPolicyConfig;
+  durationGovernance: DurationGovernancePolicy;
   trailingStop: TerminalSettings['trailingStop'];
   updatedAt: number;
 }
@@ -158,6 +161,7 @@ export class ConfigurationManager {
         autoPromoteSafeEvolution: false,
       },
       earlyExit: { ...DEFAULT_EARLY_EXIT_POLICY },
+      durationGovernance: structuredClone(DEFAULT_DURATION_GOVERNANCE),
       trailingStop: { ...DEFAULT_TERMINAL_SETTINGS.trailingStop },
       updatedAt: Date.now(),
     };
@@ -260,6 +264,10 @@ export class ConfigurationManager {
         ...base.earlyExit,
         ...(legacySettings?.earlyExit || {}),
       },
+      durationGovernance: {
+        ...base.durationGovernance,
+        ...(legacySettings?.durationGovernance || {}),
+      },
       trailingStop: {
         ...base.trailingStop,
         ...(legacySettings?.trailingStop || {}),
@@ -308,6 +316,15 @@ export class ConfigurationManager {
         maxLossPercent: clamp(raw.earlyExit?.maxLossPercent ?? 50, 10, 95),
         minRemainingSeconds: Math.round(clamp(raw.earlyExit?.minRemainingSeconds ?? 20, 0, 300)),
       },
+      durationGovernance: {
+        ...DEFAULT_DURATION_GOVERNANCE,
+        ...(raw.durationGovernance || {}),
+        globalMinSeconds: Math.round(clamp(raw.durationGovernance?.globalMinSeconds ?? 15, 15, 3600)),
+        globalMaxSeconds: Math.round(clamp(raw.durationGovernance?.globalMaxSeconds ?? 86400, 60, 365 * 86400)),
+        globalMinTicks: Math.round(clamp(raw.durationGovernance?.globalMinTicks ?? 1, 1, 10)),
+        globalMaxTicks: Math.round(clamp(raw.durationGovernance?.globalMaxTicks ?? 10, 1, 10)),
+        confidenceThreshold: Math.round(clamp(raw.durationGovernance?.confidenceThreshold ?? 50, 20, 95)),
+      },
     };
   }
 
@@ -340,6 +357,10 @@ export class ConfigurationManager {
       },
       autonomy: { ...this.snapshot.autonomy, ...(patch.autonomy || {}) },
       earlyExit: { ...this.snapshot.earlyExit, ...(patch.earlyExit || {}) },
+      durationGovernance: {
+        ...this.snapshot.durationGovernance,
+        ...(patch.durationGovernance || {}),
+      },
       trailingStop: { ...this.snapshot.trailingStop, ...(patch.trailingStop || {}) },
       revision: bumpRevision ? this.snapshot.revision + 1 : this.snapshot.revision,
       updatedAt: Date.now(),
@@ -387,6 +408,10 @@ export class ConfigurationManager {
       earlyExit: {
         ...prev.earlyExit,
         ...(settings.earlyExit || {}),
+      },
+      durationGovernance: {
+        ...prev.durationGovernance,
+        ...(settings.durationGovernance || {}),
       },
       trailingStop: { ...settings.trailingStop },
     }));

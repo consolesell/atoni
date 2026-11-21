@@ -12,6 +12,8 @@ import {
   TrailingStopConfig,
   AutonomyLifecycleState,
   ExecutionModeSetting,
+  ACDEResult,
+  DurationGovernanceMode,
 } from '../types/trading';
 import { TradeDurationUnit, SniperConfluenceResult } from '../types/sniper';
 import { AutonomyMode, AutonomyPreset, AppliedAutonomySettings } from '../types/autonomy';
@@ -95,6 +97,8 @@ export interface TerminalViewProps {
   balance: number;
   hasDerivToken?: boolean;
   setIsQuickSettingsOpen: (open: boolean) => void;
+  acdeEvaluation?: ACDEResult | null;
+  durationGovernanceMode?: DurationGovernanceMode;
 }
 
 export const TerminalView: React.FC<TerminalViewProps> = ({
@@ -155,6 +159,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
   balance,
   hasDerivToken = false,
   setIsQuickSettingsOpen,
+  acdeEvaluation = null,
+  durationGovernanceMode = 'ADAPTIVE_AUTO',
 }) => {
   return (
     <div className="flex flex-col gap-4 sm:gap-6 tab-crossfade-enter">
@@ -292,6 +298,8 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
               onToggleSniperTrigger();
               sound.play('toggle');
             }}
+            acdeEvaluation={acdeEvaluation}
+            durationGovernanceMode={durationGovernanceMode}
           />
 
           <AIPredictionCard

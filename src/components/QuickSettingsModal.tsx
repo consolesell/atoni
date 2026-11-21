@@ -22,6 +22,7 @@ import { TradeDurationUnit } from '../types/sniper';
 import { sound } from '../lib/soundEngine';
 import { voice } from '../lib/voiceEngine';
 import { autoSyncEngine } from '../lib/autoSyncEngine';
+import { PRESET_DURATIONS, formatDurationLabel } from '../lib/adaptiveDurationEngine';
 
 interface QuickSettingsModalProps {
   isOpen: boolean;
@@ -41,14 +42,9 @@ interface QuickSettingsModalProps {
 }
 
 const PRESET_STAKES = [1, 2, 5, 10, 25, 50];
-const PRESET_DURATIONS: { label: string; value: number; unit: TradeDurationUnit }[] = [
-  { label: '5 Ticks', value: 5, unit: 'ticks' },
-  { label: '10 Ticks', value: 10, unit: 'ticks' },
-  { label: '15s', value: 15, unit: 'seconds' },
-  { label: '30s', value: 30, unit: 'seconds' },
-  { label: '1m', value: 60, unit: 'seconds' },
-  { label: '5m', value: 5, unit: 'minutes' },
-];
+const QUICK_PRESET_DURATIONS = PRESET_DURATIONS.filter((p) =>
+  ['5 Ticks', '10 Ticks', '15s', '30s', '60s', '5m', '15m', '1h', '4h', '1d'].includes(p.label)
+);
 
 export const QuickSettingsModal: React.FC<QuickSettingsModalProps> = ({
   isOpen,
@@ -169,18 +165,18 @@ export const QuickSettingsModal: React.FC<QuickSettingsModalProps> = ({
               <Clock className="w-3.5 h-3.5 text-cyan-400" />
               <span>DURATION:</span>
               <span className="text-cyan-300 font-extrabold">
-                {duration} {durationUnit === 'ticks' ? 'Ticks' : durationUnit === 'minutes' ? 'Min' : 'Sec'}
+                {formatDurationLabel(duration, durationUnit)}
               </span>
             </span>
             <span className="text-[10px] text-slate-500">Expiry Horizon</span>
           </div>
 
-          <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
-            {PRESET_DURATIONS.map((preset) => {
+          <div className="grid grid-cols-5 gap-1.5">
+            {QUICK_PRESET_DURATIONS.map((preset) => {
               const isSelected = duration === preset.value && durationUnit === preset.unit;
               return (
                 <button
-                  key={preset.label}
+                  key={`${preset.unit}-${preset.value}`}
                   onClick={() => {
                     onDurationChange(preset.value, preset.unit);
                     sound.play('click');

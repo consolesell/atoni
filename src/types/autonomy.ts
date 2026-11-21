@@ -1,4 +1,4 @@
-import { MarketRegimeType } from './trading';
+import { DurationRecommendation, DurationUnit, MarketRegimeType } from './trading';
 
 export type AutonomyMode = 'OFF' | 'ARMED' | 'RUNNING';
 
@@ -36,7 +36,9 @@ export interface AppliedAutonomySettings {
   symbol: string;
   calibratedStake: number;
   calibratedDuration: number;
-  calibratedDurationUnit: 'ticks' | 'seconds' | 'minutes';
+  calibratedDurationUnit: DurationUnit;
+  appliedRecommendation?: DurationRecommendation | null;
+  acdeSummary?: string;
   regime: MarketRegimeType | string;
   agentWeights: Record<string, number>;
   consensusThreshold: number;

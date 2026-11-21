@@ -36,6 +36,17 @@
         "executionSource": { "type": "string" },
         "strategyVersion": { "type": "string" },
         "earlyExited": { "type": "boolean" },
+        "requestedDuration": { "type": "number" },
+        "requestedDurationUnit": { "type": "string" },
+        "originalRequestedDuration": { "type": "number" },
+        "originalRequestedDurationUnit": { "type": "string" },
+        "durationAdjustmentReason": { "type": "string" },
+        "chartTimeframeSeconds": { "type": "number" },
+        "brokerConfirmedStartMs": { "type": "number" },
+        "brokerConfirmedExpiryMs": { "type": "number" },
+        "brokerDurationVerified": { "type": "boolean" },
+        "actualHoldingMs": { "type": "number" },
+        "actualSaleTime": { "type": "number" },
         "timestamp": { "type": "number" }
       },
       "required": ["id", "uid", "symbol", "decision", "amount", "entryPrice"]
@@ -164,6 +175,7 @@
         "uid": { "type": "string" },
         "revision": { "type": "number" },
         "version": { "type": "number" },
+        "durationGovernance": { "type": "object" },
         "updatedAt": { "type": "number" }
       },
       "required": ["uid", "updatedAt"]

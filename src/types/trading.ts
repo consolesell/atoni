@@ -122,6 +122,149 @@ export interface AgentConsensusResult {
   rationale: string;
 }
 
+export type DurationUnit = 'ticks' | 'seconds' | 'minutes' | 'hours' | 'days';
+export type DerivDurationUnitCode = 't' | 's' | 'm' | 'h' | 'd';
+
+export type DurationRecommendationSource =
+  | 'ACDE'
+  | 'MANUAL'
+  | 'GEMINI_AI'
+  | 'LOCAL_AI'
+  | 'SUBAGENT_MD'
+  | 'COPILOT'
+  | 'SNIPER'
+  | 'STRATEGY_AUTOMATION'
+  | 'FALLBACK';
+
+export interface DurationRecommendation {
+  value: number;
+  unit: DurationUnit;
+  confidence: number; // 0..100 or 0..1 normalized cleanly
+  strategyId: string;
+  strategyVersion: string;
+  symbol: string;
+  marketRegime: string;
+  signalTimestamp: number;
+  timeframeContext: string;
+  expectedHoldingWindow: string;
+  validUntil: number;
+  rationale: string;
+  source: DurationRecommendationSource;
+}
+
+export type DurationGovernanceMode = 'MANUAL_OVERRIDE' | 'ADAPTIVE_AUTO';
+
+export interface DurationBounds {
+  minSeconds?: number;
+  maxSeconds?: number;
+  minTicks?: number;
+  maxTicks?: number;
+  allowedUnits?: DurationUnit[];
+}
+
+export interface DurationGovernancePolicy {
+  mode: DurationGovernanceMode;
+  globalMinSeconds: number;
+  globalMaxSeconds: number;
+  globalMinTicks: number;
+  globalMaxTicks: number;
+  allowedUnits: DurationUnit[];
+  confidenceThreshold: number; // 0..100 (e.g. 55)
+  fallbackBehavior: 'HOLD' | 'SAFE_BASELINE';
+  recalibrationPolicy: {
+    minSampleCount: number;
+    outOfSampleRatio: number; // e.g. 0.30
+    neverLengthenAfterLoss: boolean;
+  };
+  perSymbolBounds?: Record<string, DurationBounds>;
+  perStrategyBounds?: Record<string, DurationBounds>;
+}
+
+export interface BrokerContractDurationBounds {
+  symbol: string;
+  contractType: 'CALL' | 'PUT';
+  supportedUnits: DurationUnit[];
+  minTickDuration?: number;
+  maxTickDuration?: number;
+  minTimeSeconds?: number;
+  maxTimeSeconds?: number;
+  rawMinContractDuration?: string;
+  rawMaxContractDuration?: string;
+  source: 'DERIV_CONTRACTS_FOR' | 'SYMBOL_DEFAULT';
+  fetchedAt: number;
+}
+
+export interface BrokerDurationVerification {
+  verified: boolean;
+  requestedDuration: number;
+  requestedDurationUnit: DurationUnit;
+  brokerDurationUnit?: DerivDurationUnitCode;
+  brokerConfirmedStartMs?: number;
+  brokerConfirmedExpiryMs?: number;
+  observedHorizonSeconds?: number;
+  expectedHorizonSeconds?: number;
+  toleranceSeconds?: number;
+  note: string;
+}
+
+export interface SymbolVolatilityProfile {
+  symbol: string;
+  currentAtr: number | null;
+  medianHistoricalAtr: number | null;
+  relativeAtrRatio: number; // currentAtr / medianHistoricalAtr
+  realizedVolatility: number;
+  baselineRealizedVolatility: number;
+  volatilityAcceleration: number; // >1 accelerating, <1 calming
+  sampleCount: number;
+}
+
+export interface DurationPerformanceBucket {
+  bucketKey: string;
+  symbol: string;
+  strategyId: string;
+  strategyVersion: string;
+  marketRegime: string;
+  direction: string;
+  duration: number;
+  durationUnit: DurationUnit;
+  chartTimeframeSeconds?: number;
+  earlyExitCount: number;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  netProfit: number;
+  avgPnL: number;
+  maxDrawdownPercent: number;
+  expectancy: number;
+  uncalibrated: boolean;
+  outOfSampleTrades?: number;
+  outOfSampleWinRate?: number;
+  outOfSampleExpectancy?: number;
+}
+
+export interface ACDEResult {
+  action: 'SELECT' | 'HOLD';
+  duration: number;
+  unit: DurationUnit;
+  originalDuration: number;
+  originalUnit: DurationUnit;
+  wasAdjusted: boolean;
+  adjustmentReason?: string;
+  holdReason?: string;
+  recommendation: DurationRecommendation | null;
+  volatilityProfile: SymbolVolatilityProfile;
+  calibration: {
+    uncalibrated: boolean;
+    sampleCount: number;
+    bestBucketKey?: string;
+    reason: string;
+  };
+  chartTimeframeSeconds?: number;
+  signalDecaySeconds?: number;
+  evaluatedAt: number;
+}
+
 export interface DecisionResult {
   action: 'BUY' | 'SELL' | 'HOLD' | 'STRONG BUY' | 'STRONG SELL';
   reason: string;
@@ -132,6 +275,9 @@ export interface DecisionResult {
   mood?: MarketMoodResult;
   agent: string;
   duration: number;
+  durationUnit?: DurationUnit;
+  durationRecommendation?: DurationRecommendation | null;
+  acdeResult?: ACDEResult | null;
   takeProfitAmount?: number;
   takeProfitEnabled?: boolean;
   targetPrice?: number;
@@ -146,7 +292,9 @@ export interface AIPredictionResult {
   recommendation: 'BUY' | 'SELL' | 'HOLD';
   confidence_score: number;
   ai_predicted_win_probability: number;
-  suggested_duration: number;
+  suggested_duration?: number;
+  suggested_duration_unit?: DurationUnit;
+  duration_recommendation?: Partial<DurationRecommendation> | null;
   regime_verdict: string;
   primary_catalyst: string;
   risk_factors: string[];
@@ -184,7 +332,21 @@ export interface TradeRecord {
   agent: string;
   regime: string;
   duration: number;
-  durationUnit?: 'ticks' | 'seconds' | 'minutes';
+  durationUnit?: DurationUnit;
+  requestedDuration?: number;
+  requestedDurationUnit?: DurationUnit;
+  originalRequestedDuration?: number;
+  originalRequestedDurationUnit?: DurationUnit;
+  durationAdjustmentReason?: string;
+  chartTimeframeSeconds?: number;
+  brokerConfirmedStartMs?: number;
+  brokerConfirmedExpiryMs?: number;
+  brokerDurationVerified?: boolean;
+  brokerVerificationNote?: string;
+  actualHoldingMs?: number;
+  actualSaleTime?: number;
+  earlyExited?: boolean;
+  durationRecommendation?: DurationRecommendation | null;
   isSniperTrade?: boolean;
   confluenceScore?: number;
   entryPrice: number;
@@ -351,7 +513,7 @@ export interface PendingPurchaseIntent {
   contractType: 'CALL' | 'PUT';
   amount: number;
   duration: number;
-  durationUnit: 'ticks' | 'seconds' | 'minutes';
+  durationUnit: DurationUnit;
   accountId: string;
   status: 'SUBMITTED' | 'CONFIRMED' | 'RECONCILIATION_PENDING' | 'FAILED';
   createdAt: number;
@@ -570,7 +732,13 @@ export interface ExecutionRequest {
   contractType: 'CALL' | 'PUT';
   stake: number;
   duration: number;
-  durationUnit: 'ticks' | 'seconds' | 'minutes';
+  durationUnit: DurationUnit;
+  originalDuration?: number;
+  originalDurationUnit?: DurationUnit;
+  durationAdjustmentReason?: string;
+  chartTimeframeSeconds?: number;
+  durationRecommendation?: DurationRecommendation | null;
+  durationGovernanceMode?: DurationGovernanceMode;
   confidence?: number;
   compositeSignal?: number;
   agent?: string;
@@ -674,6 +842,7 @@ export interface StrategyPerformanceMetrics {
   aiAlignmentWinRate: number;
   regimeBreakdown: Record<string, { trades: number; wins: number; netProfit: number }>;
   symbolBreakdown: Record<string, { trades: number; wins: number; netProfit: number }>;
+  durationBreakdown?: Record<string, DurationPerformanceBucket>;
 }
 
 export interface StrategyParameters {
@@ -775,6 +944,10 @@ export interface SessionStateSnapshot {
     dateStart?: number;
     dateExpiry?: number;
     strategyVersion?: string;
+    requestedDuration?: number;
+    requestedDurationUnit?: DurationUnit;
+    chartTimeframeSeconds?: number;
+    brokerConfirmedExpiryMs?: number;
   }>;
   pendingIntentIds: string[];
   interruptedCleanly: boolean;

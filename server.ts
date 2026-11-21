@@ -519,11 +519,64 @@ app.get("/api/deriv/oauth-url", (req, res) => {
 });
 
 
+function normalizeServerDurationRecommendation(
+  raw: any,
+  ctx: {
+    symbol: string;
+    regimeType?: string;
+    granularity?: number;
+    strategyId?: string;
+    strategyVersion?: string;
+    confidence?: number;
+    source: string;
+    now?: number;
+  }
+) {
+  const now = ctx.now ?? Date.now();
+  const validUnits = new Set(["ticks", "seconds", "minutes", "hours", "days"]);
+  const unit = validUnits.has(String(raw?.unit || "").toLowerCase())
+    ? String(raw.unit).toLowerCase()
+    : "minutes";
+  const value = Number(raw?.value);
+  const safeVal = Number.isFinite(value) && value > 0 ? Math.round(value) : 3;
+  const conf = Number(raw?.confidence);
+  const safeConf = Number.isFinite(conf)
+    ? Math.max(20, Math.min(100, conf <= 1 ? Math.round(conf * 100) : Math.round(conf)))
+    : Math.round(ctx.confidence ?? 62);
+  const label = unit === "ticks" ? `${safeVal} Ticks` : `${safeVal}${unit[0]}`;
+
+  return {
+    value: safeVal,
+    unit,
+    confidence: safeConf,
+    strategyId: ctx.strategyId || "gemini_quant_advisor",
+    strategyVersion: ctx.strategyVersion || "v4.1.0-baseline",
+    symbol: ctx.symbol,
+    marketRegime: ctx.regimeType || "NEUTRAL",
+    signalTimestamp: now,
+    timeframeContext: ctx.granularity ? `Chart ${ctx.granularity}s (decoupled)` : "Market structure",
+    expectedHoldingWindow: String(raw?.expected_holding_window || label),
+    validUntil: now + 120_000,
+    rationale: String(raw?.rationale || `Regime-aligned ${label} duration recommendation`),
+    source: ctx.source,
+  };
+}
+
 // Helper for deterministic algorithmic prediction when AI is temporarily unavailable
 function calculateAlgorithmicFallbackPrediction(body: any) {
-  const { symbol = "1HZ10V", currentPrice = 1000, indicators, regime, decision } = body;
+  const {
+    symbol = "1HZ10V",
+    granularity = 60,
+    strategyVersion = "v4.1.0-baseline",
+    currentPrice = 1000,
+    indicators,
+    regime,
+    decision,
+  } = body;
+  const now = Date.now();
   const rsi = indicators?.rsiNow ?? 50;
-  
+  const vol = Number(indicators?.volatility ?? 0.002);
+
   // Guard against stale moving averages from previous symbol
   let ma14 = indicators?.ma14Now ?? currentPrice;
   let ma50 = indicators?.ma50Now ?? currentPrice;
@@ -561,6 +614,24 @@ function calculateAlgorithmicFallbackPrediction(body: any) {
   const support = indicators?.bbNow?.lower ?? currentPrice * 0.995;
   const resistance = indicators?.bbNow?.upper ?? currentPrice * 1.005;
 
+  // Dynamic structured horizon based on regime/volatility instead of flat 15m preset
+  const recHorizon =
+    regime?.type === "HIGH_VOLATILITY" || vol > 0.005
+      ? { value: 45, unit: "seconds", rationale: "High turbulence favors tight 45s exposure" }
+      : regime?.type === "STRONG_UPTREND" || regime?.type === "STRONG_DOWNTREND"
+      ? { value: 5, unit: "minutes", rationale: "Persistent directional trend favors 5m continuation window" }
+      : { value: 3, unit: "minutes", rationale: "Balanced mean-reverting cadence supports 3m horizon" };
+
+  const duration_recommendation = normalizeServerDurationRecommendation(recHorizon, {
+    symbol,
+    regimeType: regime?.type,
+    granularity,
+    strategyVersion,
+    confidence,
+    source: "LOCAL_AI",
+    now,
+  });
+
   return {
     success: true,
     parsed_ok: true,
@@ -568,14 +639,16 @@ function calculateAlgorithmicFallbackPrediction(body: any) {
     recommendation,
     confidence_score: confidence,
     ai_predicted_win_probability: winProb,
-    suggested_duration: 15,
+    suggested_duration: duration_recommendation.value,
+    suggested_duration_unit: duration_recommendation.unit,
+    duration_recommendation,
     regime_verdict: regime?.type ? `${regime.type.replace(/_/g, " ")} Structure` : "Trend Equilibrium",
     primary_catalyst: catalyst,
     risk_factors: riskFactors.slice(0, 3),
     reason,
     support_level: Number(support.toFixed(3)),
     resistance_level: Number(resistance.toFixed(3)),
-    timestamp: new Date().toISOString(),
+    timestamp: new Date(now).toISOString(),
   };
 }
 
@@ -620,11 +693,12 @@ app.post("/api/ai/predict", async (req, res) => {
   }
 
   try {
-    const prompt = `You are the Chief Quantitative Market Strategist for Deriv Rise/Fall synthetic volatility index trading.
-Analyze the following live technical dataset for asset "${symbol}" and provide a high-precision market direction forecast, win probability, suggested contract expiry duration (minutes), and comprehensive tactical reasoning.
+    const prompt = `You are the Chief Quantitative Market Strategist for Deriv Rise/Fall trading.
+Analyze the following live technical dataset for asset "${symbol}" (chart context ${granularity}s — note chart timeframe is NOT equal to contract expiry; select an explicit expiry value and unit in ticks, seconds, minutes, hours, or days independently).
 
 Market State:
 - Asset: ${symbol}
+- Chart Context Granularity: ${granularity}s
 - Current Spot Price: ${currentPrice ?? "N/A"}
 - Algorithmic Signal: ${decision || "NEUTRAL"} (Composite Score: ${compositeSignal ?? 0})
 - Active Trading Agent: ${activeAgent || "Balanced Multi-Factor"}
@@ -632,13 +706,13 @@ Market State:
 - Technical Indicators: ${JSON.stringify(cleanIndicators)}
 - Recent 5 Candles (OHLC): ${JSON.stringify(recentCandles?.slice(-5) || [])}
 
-Provide your response strictly complying with the specified JSON schema. Determine if this setup justifies an active Rise (BUY) or Fall (SELL) contract or if market noise dictates HOLD.`;
+Provide your response strictly complying with the specified JSON schema, including structured duration_recommendation with explicit unit (ticks, seconds, minutes, hours, or days). Determine if this setup justifies BUY (CALL), SELL (PUT), or HOLD.`;
 
     const response = await generateWithModelFallback({
       req,
       contents: prompt,
       config: {
-        systemInstruction: "You are an elite quantitative trading AI specializing in high-frequency synthetic index analysis, candlestick geometry, momentum divergence, and volatility regimes. Always produce rigorous, risk-adjusted analysis.",
+        systemInstruction: "You are an elite quantitative trading AI specializing in synthetic indices and forex micro-structure, candlestick geometry, momentum divergence, and volatility regimes. Always output explicit duration units (ticks|seconds|minutes|hours|days).",
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -655,9 +729,21 @@ Provide your response strictly complying with the specified JSON schema. Determi
               type: Type.NUMBER,
               description: "Predicted win probability between 0.00 and 1.00",
             },
-            suggested_duration: {
-              type: Type.INTEGER,
-              description: "Recommended contract duration in minutes (e.g., 5, 10, 15, 20, 30, 45, 60)",
+            duration_recommendation: {
+              type: Type.OBJECT,
+              description: "Structured contract duration recommendation with explicit unit",
+              properties: {
+                value: { type: Type.INTEGER, description: "Positive integer duration value" },
+                unit: {
+                  type: Type.STRING,
+                  enum: ["ticks", "seconds", "minutes", "hours", "days"],
+                  description: "Explicit duration unit",
+                },
+                confidence: { type: Type.NUMBER, description: "Duration confidence 0-100" },
+                expected_holding_window: { type: Type.STRING },
+                rationale: { type: Type.STRING },
+              },
+              required: ["value", "unit", "confidence", "rationale"],
             },
             regime_verdict: {
               type: Type.STRING,
@@ -689,7 +775,7 @@ Provide your response strictly complying with the specified JSON schema. Determi
             "recommendation",
             "confidence_score",
             "ai_predicted_win_probability",
-            "suggested_duration",
+            "duration_recommendation",
             "regime_verdict",
             "primary_catalyst",
             "risk_factors",
@@ -700,10 +786,26 @@ Provide your response strictly complying with the specified JSON schema. Determi
     });
 
     const parsed = JSON.parse(response.text || "{}");
+    const duration_recommendation = normalizeServerDurationRecommendation(
+      parsed.duration_recommendation,
+      {
+        symbol,
+        regimeType: regime?.type,
+        granularity,
+        strategyVersion,
+        confidence: parsed.confidence_score,
+        source: "GEMINI_AI",
+        now: Date.now(),
+      }
+    );
+
     const result = {
       success: true,
       parsed_ok: true,
       ...parsed,
+      suggested_duration: duration_recommendation.value,
+      suggested_duration_unit: duration_recommendation.unit,
+      duration_recommendation,
       context: predictionContext
         ? { ...predictionContext, responseTimestamp: Date.now() }
         : undefined,
@@ -875,7 +977,8 @@ const tradingFunctionDeclarations = [
         },
         durationUnit: {
           type: Type.STRING,
-          description: "'ticks', 'seconds', or 'minutes'.",
+          enum: ["ticks", "seconds", "minutes", "hours", "days"],
+          description: "Explicit duration unit: 'ticks', 'seconds', 'minutes', 'hours', or 'days'. Required when duration is supplied.",
         },
         stake: {
           type: Type.NUMBER,
@@ -883,7 +986,7 @@ const tradingFunctionDeclarations = [
         },
         rationale: {
           type: Type.STRING,
-          description: "Reasoning for the trade.",
+          description: "Reasoning for the trade and horizon.",
         },
       },
       required: ["direction"],
@@ -1393,7 +1496,18 @@ Evaluate:
           properties: {
             action: { type: Type.STRING, enum: ["BUY", "SELL", "HOLD"] },
             confidence: { type: Type.NUMBER, description: "Confidence between 0 and 100" },
-            suggested_duration_mins: { type: Type.INTEGER },
+            duration_recommendation: {
+              type: Type.OBJECT,
+              description: "Structured contract duration recommendation with explicit unit",
+              properties: {
+                value: { type: Type.INTEGER },
+                unit: { type: Type.STRING, enum: ["ticks", "seconds", "minutes", "hours", "days"] },
+                confidence: { type: Type.NUMBER },
+                expected_holding_window: { type: Type.STRING },
+                rationale: { type: Type.STRING },
+              },
+              required: ["value", "unit", "confidence", "rationale"],
+            },
             rule_matched: { type: Type.STRING },
             reasoning: { type: Type.STRING },
             risk_assessment: { type: Type.STRING },
@@ -1415,7 +1529,7 @@ Evaluate:
           required: [
             "action",
             "confidence",
-            "suggested_duration_mins",
+            "duration_recommendation",
             "rule_matched",
             "reasoning",
             "symbol_action",
@@ -1426,7 +1540,19 @@ Evaluate:
     });
 
     const parsed = JSON.parse(response.text || "{}");
-    res.json({ success: true, ...parsed });
+    const duration_recommendation = normalizeServerDurationRecommendation(
+      parsed.duration_recommendation,
+      {
+        symbol: marketContext?.symbol || "1HZ10V",
+        regimeType: marketContext?.regime?.type,
+        granularity: marketContext?.granularity,
+        strategyId: "subagent_md",
+        confidence: parsed.confidence,
+        source: "SUBAGENT_MD",
+        now: Date.now(),
+      }
+    );
+    res.json({ success: true, ...parsed, duration_recommendation });
   } catch (err: any) {
     console.warn("Subagent step fallback:", err?.message);
     const rsi = req.body?.marketContext?.indicators?.rsiNow ?? 50;
@@ -1465,12 +1591,27 @@ Evaluate:
       }
     }
 
+    const duration_recommendation = normalizeServerDurationRecommendation(
+      action === "HOLD"
+        ? { value: 3, unit: "minutes", rationale: "Consolidation baseline watch window" }
+        : { value: 2, unit: "minutes", rationale: "Mean-reversion RSI snap horizon" },
+      {
+        symbol: recommended_symbol,
+        regimeType: req.body?.marketContext?.regime?.type,
+        granularity: req.body?.marketContext?.granularity,
+        strategyId: "subagent_md",
+        confidence: action === "HOLD" ? 52 : 78,
+        source: "SUBAGENT_MD",
+        now: Date.now(),
+      }
+    );
+
     res.json({
       success: true,
       is_fallback: true,
       action,
       confidence: action === "HOLD" ? 52 : 78,
-      suggested_duration_mins: 15,
+      duration_recommendation,
       rule_matched,
       reasoning,
       risk_assessment: "Standard volatility buffer applied.",

@@ -1,4 +1,13 @@
-import { TradeRecord, CoreRiskMetrics, PositionSizingMode, MarketRegime } from '../types/trading';
+import {
+  TradeRecord,
+  CoreRiskMetrics,
+  PositionSizingMode,
+  MarketRegime,
+  DurationUnit,
+  DerivDurationUnitCode,
+  DurationGovernancePolicy,
+} from '../types/trading';
+import { acde } from './adaptiveDurationEngine';
 
 export interface KellyStakeResult {
   recommendedStake: number;
@@ -25,6 +34,12 @@ export interface TradeProposalQuote {
   dateStartMs?: number;
   dateExpiryMs?: number;
   brokerQuoteExpiresAtMs?: number;
+  requestedDuration?: number;
+  requestedDurationUnit?: DurationUnit;
+  brokerDurationUnit?: DerivDurationUnitCode;
+  brokerConfirmedDuration?: number;
+  brokerDurationVerified?: boolean;
+  brokerVerificationNote?: string;
   symbol?: string;
   currency?: string;
   accountId?: string;
@@ -364,6 +379,11 @@ export function validateTradeRiskGate(params: TradeRiskValidationParams): TradeR
     if (params.expectedAccountId && p.accountId && p.accountId !== params.expectedAccountId) {
       blockers.push('Proposal belongs to a different Deriv account.');
     }
+    if (p.brokerDurationVerified === false) {
+      blockers.push(
+        p.brokerVerificationNote || 'Broker proposal duration/expiry verification failed.'
+      );
+    }
   }
 
   return {
@@ -441,62 +461,52 @@ export function getCalibratedWinProbability(params: CalibratedProbabilityParams)
 }
 
 /**
- * Validates and maps Deriv contract duration to the nearest legal discrete duration
- * for that symbol and contract type.
+ * Validates and maps Deriv contract duration via the single authoritative ACDE normalizer.
+ * Never silently discards original requested values when adjusted.
  */
 export interface ValidatedDuration {
   duration: number;
-  unit: 'ticks' | 'seconds' | 'minutes';
+  unit: DurationUnit;
+  originalDuration: number;
+  originalUnit: DurationUnit;
   exactLegalString: string;
   isAdjusted: boolean;
+  adjustmentReason?: string;
+  valid: boolean;
+  rejectionReason?: string;
 }
 
 export function validateDerivDuration(
   symbol: string,
   requestedDuration: number,
-  unit: 'ticks' | 'seconds' | 'minutes' = 'minutes'
-): ValidatedDuration {
-  let finalDur = requestedDuration;
-  let finalUnit = unit;
-  let isAdjusted = false;
-
-  if (unit === 'ticks') {
-    // Deriv synthetics tick contracts: exactly 1 to 10 ticks (discrete integers)
-    const legalTicks = [1, 2, 3, 5, 8, 10];
-    const rounded = Math.round(requestedDuration);
-    const nearest = legalTicks.reduce((prev, curr) =>
-      Math.abs(curr - rounded) < Math.abs(prev - rounded) ? curr : prev
-    );
-    finalDur = Math.max(1, Math.min(10, nearest));
-    isAdjusted = finalDur !== requestedDuration;
-  } else if (unit === 'seconds') {
-    // Deriv synthetics 1HZ seconds: minimum 15 seconds, max 86400
-    const clamped = Math.max(15, Math.min(86400, Math.round(requestedDuration)));
-    if (clamped <= 60) {
-      const nearest = [15, 30, 45, 60].reduce((prev, curr) =>
-        Math.abs(curr - clamped) < Math.abs(prev - clamped) ? curr : prev
-      );
-      finalDur = nearest;
-    } else {
-      finalDur = clamped;
-    }
-    isAdjusted = finalDur !== requestedDuration;
-  } else {
-    // Deriv synthetics minutes: minimum 1m, legal discrete steps: 1, 2, 3, 5, 10, 15, 20, 30, 45, 60
-    const legalMinutes = [1, 2, 3, 5, 10, 15, 20, 30, 45, 60];
-    const rounded = Math.round(requestedDuration);
-    const nearest = legalMinutes.reduce((prev, curr) =>
-      Math.abs(curr - rounded) < Math.abs(prev - rounded) ? curr : prev
-    );
-    finalDur = Math.max(1, Math.min(60, nearest));
-    isAdjusted = finalDur !== requestedDuration;
+  unit: DurationUnit = 'minutes',
+  options?: {
+    contractType?: 'CALL' | 'PUT';
+    strategyId?: string;
+    governance?: DurationGovernancePolicy | null;
+    allowAdjustment?: boolean;
   }
+): ValidatedDuration {
+  const res = acde.normalizeToLegalDuration({
+    symbol,
+    requestedDuration,
+    requestedUnit: unit,
+    contractType: options?.contractType,
+    strategyId: options?.strategyId,
+    governance: options?.governance,
+    allowAdjustment: options?.allowAdjustment,
+  });
 
   return {
-    duration: finalDur,
-    unit: finalUnit,
-    exactLegalString: `${finalDur} ${finalUnit}`,
-    isAdjusted,
+    duration: res.duration,
+    unit: res.unit,
+    originalDuration: res.originalDuration,
+    originalUnit: res.originalUnit,
+    exactLegalString: res.exactLegalString,
+    isAdjusted: res.adjusted,
+    adjustmentReason: res.adjustmentReason,
+    valid: res.valid,
+    rejectionReason: res.rejectionReason,
   };
 }
 

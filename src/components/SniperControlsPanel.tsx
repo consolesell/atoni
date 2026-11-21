@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { EnhancedTradeDuration, SniperConfluenceResult, TradeDurationUnit } from '../types/sniper';
 import { PRESET_DURATIONS } from '../lib/sniperEngine';
+import { formatDurationLabel } from '../lib/adaptiveDurationEngine';
 import { sound } from '../lib/soundEngine';
 import { voice } from '../lib/voiceEngine';
 import { VoiceWaveform } from './VoiceWaveformIndicator';
@@ -54,6 +55,10 @@ export const SniperControlsPanel: React.FC<SniperControlsPanelProps> = ({
   const [showFactors, setShowFactors] = useState(false);
   const [selectedUnit, setSelectedUnit] = useState<TradeDurationUnit>(durationUnit);
   const [isSpeaking, setIsSpeaking] = useState<boolean>(voice.getIsSpeaking());
+
+  useEffect(() => {
+    setSelectedUnit(durationUnit);
+  }, [durationUnit]);
 
   useEffect(() => {
     const unsub = voice.subscribeSpeaking((speaking) => {
@@ -256,59 +261,65 @@ export const SniperControlsPanel: React.FC<SniperControlsPanelProps> = ({
       {/* TRADE DURATION ENHANCEMENT: TICKS / SECONDS / MINUTES + ADAPTIVE    */}
       {/* ------------------------------------------------------------------ */}
       <div className="flex flex-col gap-2 p-3 bg-slate-950/70 border border-slate-800 rounded-xl">
-        <div className="flex items-center justify-between text-xs font-mono">
+        <div className="flex items-center justify-between text-xs font-mono flex-wrap gap-1.5">
           <span className="text-slate-300 font-bold flex items-center gap-1.5">
             <Clock className="w-3.5 h-3.5 text-cyan-400" />
-            Trade Duration Engine
+            ACDE Duration Engine
           </span>
 
           {/* Adaptive AI Recommendation Quick Button */}
-          <button
-            type="button"
-            onClick={handleApplyAdaptiveDuration}
-            className="flex items-center gap-1 text-[10px] text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 px-2 py-0.5 rounded-full border border-cyan-500/30 transition-all font-bold active:scale-95"
-            title={sniperSetup.recommendedDuration.rationale}
-          >
-            <Sparkles className="w-3 h-3 text-cyan-400" />
-            <span>Opt: {sniperSetup.recommendedDuration.label}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            {sniperSetup.recommendedDuration.uncalibrated && (
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 font-bold">
+                Uncalibrated
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleApplyAdaptiveDuration}
+              className={`flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border transition-all font-bold active:scale-95 ${
+                sniperSetup.recommendedDuration.action === 'HOLD'
+                  ? 'text-amber-300 bg-amber-500/10 border-amber-500/40'
+                  : 'text-cyan-300 bg-cyan-500/10 hover:bg-cyan-500/20 border-cyan-500/30'
+              }`}
+              title={sniperSetup.recommendedDuration.holdReason || sniperSetup.recommendedDuration.rationale}
+            >
+              <Sparkles className="w-3 h-3 text-cyan-400" />
+              <span>
+                {sniperSetup.recommendedDuration.action === 'HOLD'
+                  ? 'HOLD Advis.'
+                  : `Opt: ${sniperSetup.recommendedDuration.label}${
+                      typeof sniperSetup.recommendedDuration.confidence === 'number'
+                        ? ` • ${sniperSetup.recommendedDuration.confidence}%`
+                        : ''
+                    }`}
+              </span>
+            </button>
+          </div>
         </div>
 
-        {/* Unit Selector Tabs: Ticks | Seconds | Minutes */}
-        <div className="grid grid-cols-3 gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 text-xs font-mono">
-          <button
-            type="button"
-            onClick={() => handleUnitTab('ticks')}
-            className={`py-1 rounded text-center font-bold transition-all ${
-              selectedUnit === 'ticks'
-                ? 'bg-cyan-500 text-slate-950 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Ticks (Sniper Scalp)
-          </button>
-          <button
-            type="button"
-            onClick={() => handleUnitTab('seconds')}
-            className={`py-1 rounded text-center font-bold transition-all ${
-              selectedUnit === 'seconds'
-                ? 'bg-cyan-500 text-slate-950 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Seconds (Impulse)
-          </button>
-          <button
-            type="button"
-            onClick={() => handleUnitTab('minutes')}
-            className={`py-1 rounded text-center font-bold transition-all ${
-              selectedUnit === 'minutes'
-                ? 'bg-cyan-500 text-slate-950 shadow-sm'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Minutes (Trend)
-          </button>
+        {/* Unit Selector Tabs: Ticks | Seconds | Minutes | Hours | Days */}
+        <div className="grid grid-cols-5 gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800 text-[11px] font-mono">
+          {([
+            { id: 'ticks', label: 'Ticks' },
+            { id: 'seconds', label: 'Sec' },
+            { id: 'minutes', label: 'Min' },
+            { id: 'hours', label: 'Hours' },
+            { id: 'days', label: 'Days' },
+          ] as const).map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => handleUnitTab(tab.id)}
+              className={`py-1 rounded text-center font-bold transition-all ${
+                selectedUnit === tab.id
+                  ? 'bg-cyan-500 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Duration Value Pills */}
@@ -406,7 +417,7 @@ export const SniperControlsPanel: React.FC<SniperControlsPanelProps> = ({
           <Zap className="w-4 h-4" />
           <span>
             FIRE SNIPER {sniperSetup.direction === 'CALL' ? 'CALL' : sniperSetup.direction === 'PUT' ? 'PUT' : 'ORDER'}{' '}
-            (${stake} • {duration}{durationUnit === 'ticks' ? 'T' : durationUnit === 'seconds' ? 's' : 'm'})
+            (${stake} • {formatDurationLabel(duration, durationUnit)})
           </span>
         </button>
 

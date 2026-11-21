@@ -47,7 +47,8 @@ self.onmessage = (event: MessageEvent<IndicatorWorkerPayload>) => {
         indicators,
         agents,
         minConfidence ?? 0.38,
-        consecutiveLosses ?? 0
+        consecutiveLosses ?? 0,
+        { symbol: payload.symbol || '1HZ10V' }
       );
       if (decision.regime) {
         regime = decision.regime;

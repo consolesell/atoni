@@ -14,6 +14,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { AIPredictionResult } from '../types/trading';
+import { acde, formatDurationLabel } from '../lib/adaptiveDurationEngine';
 import { voice } from '../lib/voiceEngine';
 import { sound } from '../lib/soundEngine';
 import { VoiceWaveform } from './VoiceWaveformIndicator';
@@ -62,6 +63,15 @@ export const AIPredictionCard: React.FC<AIPredictionCardProps> = ({
 
   const winProb = prediction?.ai_predicted_win_probability ?? 0.5;
   const winProbPercent = Math.round(winProb * 100);
+
+  const recValidation = React.useMemo(() => {
+    if (!prediction?.duration_recommendation) return null;
+    return acde.validateStructuredRecommendation(
+      prediction.duration_recommendation,
+      { symbol },
+      prediction.duration_recommendation.source || 'GEMINI_AI'
+    );
+  }, [prediction?.duration_recommendation, symbol]);
 
   const getStatusTheme = () => {
     if (isBuy) {
@@ -180,11 +190,37 @@ export const AIPredictionCard: React.FC<AIPredictionCardProps> = ({
             <div className={`text-base sm:text-lg font-black font-mono tracking-tight ${theme.text}`}>
               {theme.label}
             </div>
-            <div className="text-[11px] text-slate-400 font-mono flex items-center gap-2">
-              <span>Duration: <strong className="text-slate-200">{prediction?.suggested_duration || 15}m</strong></span>
+            <div className="text-[11px] text-slate-400 font-mono flex flex-wrap items-center gap-2">
+              {recValidation?.valid && recValidation.recommendation ? (
+                <>
+                  <span>
+                    Horizon:{' '}
+                    <strong className="text-cyan-300">
+                      {formatDurationLabel(recValidation.recommendation.value, recValidation.recommendation.unit)}
+                    </strong>
+                  </span>
+                  <span>•</span>
+                  <span>
+                    Horizon Conf: <strong className="text-slate-200">{recValidation.recommendation.confidence}%</strong>
+                  </span>
+                </>
+              ) : prediction?.duration_recommendation ? (
+                <span className="text-amber-300">
+                  Horizon Rejected ({recValidation?.reason || 'Invalid/Expired'})
+                </span>
+              ) : (
+                <span className="text-slate-400">
+                  Horizon: <strong className="text-slate-300">ACDE Pending Scan</strong>
+                </span>
+              )}
               <span>•</span>
-              <span>Confidence: <strong className="text-slate-200">{prediction?.confidence_score ?? 60}%</strong></span>
+              <span>Signal Conf: <strong className="text-slate-200">{prediction?.confidence_score ?? 60}%</strong></span>
             </div>
+            {recValidation?.valid && recValidation.recommendation && (
+              <div className="text-[10px] text-slate-400 font-mono mt-0.5 truncate max-w-xs" title={recValidation.recommendation.rationale}>
+                {recValidation.recommendation.source} • {recValidation.recommendation.rationale}
+              </div>
+            )}
           </div>
         </div>
 

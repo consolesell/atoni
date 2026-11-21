@@ -1,12 +1,18 @@
 import {
+  ACDEResult,
   AIPredictionResult,
   Candle,
   DecisionResult,
+  DurationGovernancePolicy,
+  DurationRecommendation,
+  DurationUnit,
+  EarlyExitPolicyConfig,
   MarketRegime,
   TechnicalIndicators,
   TradingAgent,
 } from '../types/trading';
 import { getAIRequestHeaders } from './aiClientConfig';
+import { acde } from './adaptiveDurationEngine';
 
 export const DEFAULT_AGENTS: TradingAgent[] = [
   {
@@ -47,7 +53,7 @@ export const DEFAULT_AGENTS: TradingAgent[] = [
   },
 ];
 
-/* ---------- Duration Optimizer ---------- */
+/* ---------- Duration Optimizer (Delegated to Authoritative ACDE) ---------- */
 
 export function optimizeTradeDuration(
   decisionAction: string,
@@ -55,69 +61,61 @@ export function optimizeTradeDuration(
   volatility: number,
   confidence: number,
   pattern: { pattern: string; strength: number },
-  indicators: Partial<TechnicalIndicators>
-): { duration: number; riskScore: number; rationale: string } {
-  let multiplier = 1.0;
-  let riskScore = 0.5;
-  const factors: string[] = [];
-
-  // Volatility base move speed
-  const normalVol = 0.005;
-  const volRatio = normalVol > 0 ? volatility / normalVol : 1;
-
-  if (volRatio > 2.0) {
-    multiplier *= 0.65;
-    riskScore = 0.75;
-    factors.push(`High volatility (${(volatility * 100).toFixed(2)}%) → Fast target resolution`);
-  } else if (volRatio < 0.6) {
-    multiplier *= 1.35;
-    riskScore = 0.35;
-    factors.push(`Low volatility → Extended move formation`);
+  indicators: Partial<TechnicalIndicators>,
+  options?: {
+    symbol?: string;
+    candles?: Candle[];
+    chartTimeframeSeconds?: number;
+    strategyId?: string;
+    strategyVersion?: string;
+    consecutiveLosses?: number;
+    earlyExitPolicy?: EarlyExitPolicyConfig | null;
+    governance?: DurationGovernancePolicy | null;
   }
+): {
+  duration: number;
+  unit: DurationUnit;
+  riskScore: number;
+  rationale: string;
+  recommendation: DurationRecommendation | null;
+  acdeResult: ACDEResult;
+} {
+  const contractType: 'CALL' | 'PUT' = decisionAction.includes('SELL') ? 'PUT' : 'CALL';
+  const acdeResult = acde.computeMarketAwareDuration({
+    symbol: options?.symbol || '1HZ10V',
+    contractType,
+    candles: options?.candles || [],
+    indicators: {
+      ...indicators,
+      volatility,
+      pattern: indicators.pattern || (pattern as any),
+    },
+    regime,
+    confidence,
+    chartTimeframeSeconds: options?.chartTimeframeSeconds,
+    strategyId: options?.strategyId || 'decision_engine',
+    strategyVersion: options?.strategyVersion,
+    consecutiveLosses: options?.consecutiveLosses,
+    earlyExitPolicy: options?.earlyExitPolicy,
+    governance: options?.governance,
+    source: 'ACDE',
+  });
 
-  // Market Regime bias
-  if (regime.type === 'STRONG_UPTREND' || regime.type === 'STRONG_DOWNTREND') {
-    multiplier *= 1.3;
-    riskScore = 0.3;
-    factors.push('Persistent strong trend');
-  } else if (regime.type === 'HIGH_VOLATILITY') {
-    multiplier *= 0.7;
-    riskScore = 0.8;
-    factors.push('Volatile turbulence buffer');
-  } else if (regime.type === 'CONSOLIDATION') {
-    multiplier *= 0.9;
-    riskScore = 0.6;
-    factors.push('Range-bound contraction');
-  }
+  const relAtr = acdeResult.volatilityProfile.relativeAtrRatio || 1.0;
+  const riskScore = Number(Math.min(0.95, Math.max(0.2, 0.4 * relAtr)).toFixed(2));
+  const rationale =
+    acdeResult.holdReason ||
+    acdeResult.recommendation?.rationale ||
+    'ACDE market-normalized horizon';
 
-  // Pattern-specific timing
-  if (pattern.pattern === 'BULLISH_ENGULFING' || pattern.pattern === 'BEARISH_ENGULFING') {
-    multiplier *= 0.75;
-    factors.push('Engulfing impulse breakout');
-  } else if (pattern.pattern === 'THREE_WHITE_SOLDIERS' || pattern.pattern === 'THREE_BLACK_CROWS') {
-    multiplier *= 0.85;
-    factors.push('3-candle momentum continuation');
-  }
-
-  // Confidence scaling
-  if (confidence > 0.75) {
-    multiplier *= 1.2;
-    factors.push('High conviction bonus');
-  } else if (confidence < 0.45) {
-    multiplier *= 0.8;
-    factors.push('Low conviction quick-exit');
-  }
-
-  // Calculate final minutes (base 15m)
-  let minutes = 15 * multiplier;
-  if (minutes <= 8) minutes = Math.round(minutes);
-  else if (minutes <= 20) minutes = Math.round(minutes / 2) * 2;
-  else minutes = Math.round(minutes / 5) * 5;
-
-  const finalDuration = Math.max(5, Math.min(60, minutes));
-  const rationale = factors.slice(0, 3).join(' • ') || 'Standard equilibrium duration';
-
-  return { duration: finalDuration, riskScore, rationale };
+  return {
+    duration: acdeResult.duration,
+    unit: acdeResult.unit,
+    riskScore,
+    rationale,
+    recommendation: acdeResult.recommendation,
+    acdeResult,
+  };
 }
 
 /* ---------- Multi-Agent Algorithmic Deliberation ---------- */
@@ -127,7 +125,14 @@ export function runAlgorithmicDecisionEngine(
   indicators: TechnicalIndicators,
   agents: TradingAgent[] = DEFAULT_AGENTS,
   minConfidenceThreshold = 0.38,
-  consecutiveLosses = 0
+  consecutiveLosses = 0,
+  options?: {
+    symbol?: string;
+    chartTimeframeSeconds?: number;
+    strategyVersion?: string;
+    earlyExitPolicy?: EarlyExitPolicyConfig | null;
+    governance?: DurationGovernancePolicy | null;
+  }
 ): DecisionResult {
   const currentPrice = indicators.currentPrice;
   const ma14 = indicators.ma14Now ?? currentPrice;
@@ -300,15 +305,32 @@ export function runAlgorithmicDecisionEngine(
     reason = `Bearish Setup (${compositeSignal.toFixed(2)}) supported by ${indicators.regime.type} (${agreeingCount}/4 Consensus)`;
   }
 
-  // Duration optimization
+  // Duration optimization via authoritative ACDE (chart timeframe strictly decoupled)
   const durationOpt = optimizeTradeDuration(
     action,
     indicators.regime,
     indicators.volatility,
     confidence,
     pattern,
-    indicators
+    indicators,
+    {
+      symbol: options?.symbol,
+      candles,
+      chartTimeframeSeconds: options?.chartTimeframeSeconds,
+      strategyId: bestAgent.name,
+      strategyVersion: options?.strategyVersion,
+      consecutiveLosses,
+      earlyExitPolicy: options?.earlyExitPolicy,
+      governance: options?.governance,
+    }
   );
+
+  // If ACDE explicitly returns HOLD under strict governance, honor it cleanly
+  if (durationOpt.acdeResult.action === 'HOLD' && action !== 'HOLD') {
+    action = 'HOLD';
+    reason = `⏸️ [ACDE HOLD] ${durationOpt.acdeResult.holdReason || 'Market duration confidence gate withheld entry.'}`;
+    adjustments.push('ACDE duration gate HOLD active');
+  }
 
   // Targets
   const direction = action.includes('BUY') ? 1 : action.includes('SELL') ? -1 : 0;
@@ -326,6 +348,9 @@ export function runAlgorithmicDecisionEngine(
     mood,
     agent: bestAgent.name,
     duration: durationOpt.duration,
+    durationUnit: durationOpt.unit,
+    durationRecommendation: durationOpt.recommendation,
+    acdeResult: durationOpt.acdeResult,
     takeProfitEnabled: true,
     takeProfitAmount: 0.4,
     targetPrice,

@@ -1,9 +1,9 @@
-import { EarlyExitPolicyConfig, ExecutionModeSetting } from './trading';
+import { DurationGovernancePolicy, DurationUnit, EarlyExitPolicyConfig, ExecutionModeSetting } from './trading';
 
 export interface GeneralSettings {
   defaultStake: number; // default: 1.00
   defaultDuration: number; // default: 15
-  defaultDurationUnit: 'ticks' | 'seconds' | 'minutes'; // default: 'minutes'
+  defaultDurationUnit: DurationUnit; // default: 'minutes'
   defaultDirection: 'CALL' | 'PUT'; // default: 'CALL'
   defaultSymbol: string; // default: '1HZ10V'
   autoRefreshIntervalSeconds: number; // default: 30
@@ -95,6 +95,7 @@ export interface TerminalSettings {
   trailingStop: TrailingStopSettings;
   earlyExit?: EarlyExitPolicyConfig;
   executionMode?: ExecutionModeSetting;
+  durationGovernance?: DurationGovernancePolicy;
   indicators: IndicatorSettings;
   ai: AISettings;
   audio: AudioSettings;
@@ -152,6 +153,23 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
     maxLossPercent: 50,
     timeDecayExitEnabled: false,
     minRemainingSeconds: 20,
+  },
+  durationGovernance: {
+    mode: 'ADAPTIVE_AUTO',
+    globalMinSeconds: 15,
+    globalMaxSeconds: 86400,
+    globalMinTicks: 1,
+    globalMaxTicks: 10,
+    allowedUnits: ['ticks', 'seconds', 'minutes', 'hours', 'days'],
+    confidenceThreshold: 50,
+    fallbackBehavior: 'SAFE_BASELINE',
+    recalibrationPolicy: {
+      minSampleCount: 8,
+      outOfSampleRatio: 0.3,
+      neverLengthenAfterLoss: true,
+    },
+    perSymbolBounds: {},
+    perStrategyBounds: {},
   },
   indicators: {
     rsiPeriod: 14,

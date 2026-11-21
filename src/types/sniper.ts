@@ -1,4 +1,4 @@
-export type TradeDurationUnit = 'ticks' | 'seconds' | 'minutes';
+export type TradeDurationUnit = 'ticks' | 'seconds' | 'minutes' | 'hours' | 'days';
 
 export interface EnhancedTradeDuration {
   value: number;
@@ -8,6 +8,12 @@ export interface EnhancedTradeDuration {
   category: 'ultra_fast' | 'scalp' | 'standard' | 'swing';
   recommendedBy?: string;
   rationale?: string;
+  confidence?: number;
+  strategyId?: string;
+  strategyVersion?: string;
+  uncalibrated?: boolean;
+  action?: 'SELECT' | 'HOLD';
+  holdReason?: string;
 }
 
 export interface SniperFactor {

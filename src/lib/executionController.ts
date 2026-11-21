@@ -1,6 +1,7 @@
 import {
   BalanceSnapshot,
   ConnectionState,
+  DurationUnit,
   ExecutionRequest,
   ExecutionResult,
   PredictionContext,
@@ -15,7 +16,8 @@ import {
 import { derivWS as defaultDerivWS } from './derivWS';
 import { portfolioReconciler as defaultPortfolioReconciler, PortfolioReconciler } from './portfolioReconciler';
 import { tradeReadinessGuard as defaultReadinessGuard, TradeReadinessGuard } from './readinessGuard';
-import { TradeProposalQuote, validateDerivDuration } from './riskEngine';
+import { TradeProposalQuote } from './riskEngine';
+import { acde, toDerivDurationUnit } from './adaptiveDurationEngine';
 import { sanitizeForPersistence } from './securitySanitizer';
 import { balanceManager as defaultBalanceManager } from './balanceManager';
 import { intelligenceManager as defaultIntelligenceManager } from './intelligenceManager';
@@ -33,12 +35,13 @@ export interface ExecutionBrokerAdapter {
   getSelectedAccountId: () => string | null;
   getBalanceSnapshot: () => BalanceSnapshot;
   areRequiredSubscriptionsActive: () => boolean;
+  fetchContractsForSymbol?: (symbol: string, currency?: string) => Promise<boolean>;
   requestProposalQuote: (params: {
     symbol: string;
     amount: number;
     contract_type: 'CALL' | 'PUT';
     duration: number;
-    duration_unit: 'ticks' | 'seconds' | 'minutes';
+    duration_unit: DurationUnit;
     currency?: string;
   }) => Promise<TradeProposalQuote>;
   buyProposal: (
@@ -48,7 +51,7 @@ export interface ExecutionBrokerAdapter {
       symbol?: string;
       contractType?: 'CALL' | 'PUT';
       duration?: number;
-      durationUnit?: 'ticks' | 'seconds' | 'minutes';
+      durationUnit?: DurationUnit;
       currency?: string;
     }
   ) => Promise<{
@@ -109,6 +112,8 @@ export interface SellExecutionResult {
   soldFor?: number;
   profit?: number;
   transactionId?: string | number;
+  actualSaleTime?: number;
+  actualHoldingMs?: number;
   reason: string;
   status: 'SOLD' | 'REJECTED' | 'IN_FLIGHT' | 'FAILED';
 }
@@ -133,11 +138,12 @@ function createDefaultBrokerAdapter(): ExecutionBrokerAdapter {
     getSelectedAccountId: () => defaultDerivWS.getSelectedAccountId(),
     getBalanceSnapshot: () => defaultBalanceManager.getSnapshot(),
     areRequiredSubscriptionsActive: () => defaultDerivWS.areRequiredSubscriptionsActive(),
+    fetchContractsForSymbol: (symbol, currency) =>
+      defaultDerivWS.fetchContractsForSymbol(symbol, currency),
     requestProposalQuote: (p) =>
       defaultDerivWS.requestProposalQuote({
         ...p,
-        duration_unit:
-          p.duration_unit === 'minutes' ? 'm' : p.duration_unit === 'seconds' ? 's' : 't',
+        duration_unit: toDerivDurationUnit(p.duration_unit),
       }),
     buyProposal: async (proposalId, maxPrice) => {
       const res = await defaultDerivWS.buyProposal({
@@ -301,12 +307,65 @@ export class ExecutionController {
       };
     }
 
-    // 4. Normalize legal duration & balance context
-    const validatedDuration = validateDerivDuration(
-      request.symbol,
-      request.duration,
-      request.durationUnit
-    );
+    // 4. Authoritative ACDE duration validation & metadata check
+    if (this.broker.fetchContractsForSymbol) {
+      await this.broker.fetchContractsForSymbol(request.symbol).catch(() => false);
+    }
+
+    const effectiveGovernance = request.durationGovernanceMode
+      ? { ...cfg.durationGovernance, mode: request.durationGovernanceMode }
+      : cfg.durationGovernance;
+
+    const attachedRecommendation =
+      request.durationRecommendation ?? request.aiPrediction?.duration_recommendation ?? null;
+
+    if (
+      (request.source === 'GEMINI_AI' || request.source === 'LOCAL_AI') &&
+      !attachedRecommendation
+    ) {
+      const reason =
+        'AI-initiated trade rejected: structured DurationRecommendation with explicit unit and validUntil is required (bare numeric durations are never inferred as minutes).';
+      this.recordEvent('PURCHASE', request.source, request.symbol, 'BLOCKED', reason, undefined, undefined, request.stake);
+      return {
+        executed: false,
+        status: 'BLOCKED',
+        blockers: [reason],
+        reason,
+        timestamp: now,
+      };
+    }
+
+    const durationResolution = acde.resolveExecutionDuration({
+      source: request.source,
+      symbol: request.symbol,
+      contractType: request.contractType,
+      requestedDuration: request.duration,
+      requestedUnit: request.durationUnit,
+      governance: effectiveGovernance,
+      recommendation: attachedRecommendation,
+      strategyId: request.agent || request.source,
+      now,
+    });
+
+    if (!durationResolution.approved) {
+      const reason = durationResolution.rejectionReason || 'Contract duration rejected by ACDE governance.';
+      this.recordEvent('PURCHASE', request.source, request.symbol, 'BLOCKED', reason, undefined, undefined, request.stake);
+      return {
+        executed: false,
+        status: 'BLOCKED',
+        blockers: [reason],
+        reason,
+        timestamp: now,
+      };
+    }
+
+    const resolvedOrigDur = request.originalDuration ?? durationResolution.originalDuration;
+    const resolvedOrigUnit = request.originalDurationUnit ?? durationResolution.originalUnit;
+    const resolvedAdjustReason =
+      [request.durationAdjustmentReason, durationResolution.adjustmentReason]
+        .filter(Boolean)
+        .join('; ') || undefined;
+
     const openTrades = this.portfolioProvider.getOpenTrades();
     const openExposure = openTrades.reduce((acc, t) => acc + (t.amount || 0), 0);
     const balanceSnapshot = this.broker.getBalanceSnapshot();
@@ -322,8 +381,8 @@ export class ExecutionController {
       symbol: request.symbol,
       contractType: request.contractType,
       amount: request.stake,
-      duration: validatedDuration.duration,
-      durationUnit: validatedDuration.unit,
+      duration: durationResolution.duration,
+      durationUnit: durationResolution.unit,
       now,
     });
 
@@ -404,10 +463,31 @@ export class ExecutionController {
         symbol: request.symbol,
         amount: request.stake,
         contract_type: request.contractType,
-        duration: validatedDuration.duration,
-        duration_unit: validatedDuration.unit,
+        duration: durationResolution.duration,
+        duration_unit: durationResolution.unit,
         currency: balanceSnapshot.currency,
       });
+
+      // Verify broker quote expiry consistency independently even on custom broker adapters
+      const expiryCheck = acde.verifyBrokerProposalExpiry({
+        symbol: request.symbol,
+        requestedDuration: durationResolution.duration,
+        requestedUnit: durationResolution.unit,
+        dateStartMs: quote.dateStartMs,
+        dateExpiryMs: quote.dateExpiryMs,
+        spotTimeMs: quote.spotTimeMs,
+        brokerQuoteExpiresAtMs: quote.brokerQuoteExpiresAtMs,
+        fetchedAt: quote.fetchedAt,
+        now: Date.now(),
+        governance: effectiveGovernance,
+      });
+      if (quote.brokerDurationVerified === undefined) {
+        // Enforce strict verification when quote provides dateExpiryMs, or tick-check when unit is ticks
+        if (quote.dateExpiryMs !== undefined || durationResolution.unit === 'ticks') {
+          quote.brokerDurationVerified = expiryCheck.verified;
+          quote.brokerVerificationNote = expiryCheck.note;
+        }
+      }
 
       this.reconciler.attachProposalId(intentId, quote.proposalId);
 
@@ -488,8 +568,8 @@ export class ExecutionController {
       const buyResult = await this.broker.buyProposal(quote.proposalId, maxPurchasePrice, {
         symbol: request.symbol,
         contractType: request.contractType,
-        duration: validatedDuration.duration,
-        durationUnit: validatedDuration.unit,
+        duration: durationResolution.duration,
+        durationUnit: durationResolution.unit,
         currency: balanceSnapshot.currency,
       });
 
@@ -500,6 +580,11 @@ export class ExecutionController {
 
       const mode: TradeRecord['mode'] =
         authSession.accountType === 'real' ? 'REAL' : 'DEMO';
+
+      const brokerConfirmedStartMs =
+        quote.dateStartMs ??
+        (buyResult.start_time ? buyResult.start_time * 1000 : Date.now());
+      const brokerConfirmedExpiryMs = quote.dateExpiryMs;
 
       const tradeRecord: TradeRecord = {
         id: String(buyResult.contract_id),
@@ -517,13 +602,26 @@ export class ExecutionController {
         compositeSignal: request.compositeSignal,
         agent: request.agent || request.source,
         regime: request.regime || 'NEUTRAL',
-        duration: validatedDuration.duration,
-        durationUnit: validatedDuration.unit,
+        duration: durationResolution.duration,
+        durationUnit: durationResolution.unit,
+        requestedDuration: durationResolution.duration,
+        requestedDurationUnit: durationResolution.unit,
+        originalRequestedDuration: resolvedOrigDur,
+        originalRequestedDurationUnit: resolvedOrigUnit,
+        durationAdjustmentReason: resolvedAdjustReason,
+        chartTimeframeSeconds: request.chartTimeframeSeconds,
+        brokerConfirmedStartMs,
+        brokerConfirmedExpiryMs,
+        brokerDurationVerified: quote.brokerDurationVerified ?? expiryCheck.verified,
+        brokerVerificationNote: quote.brokerVerificationNote ?? expiryCheck.note,
+        durationRecommendation:
+          durationResolution.validatedRecommendation ?? request.durationRecommendation ?? null,
+        earlyExited: false,
         isSniperTrade: request.isSniperTrade,
         confluenceScore: request.confluenceScore,
         entryPrice: quote.spot ?? 0,
         dateStart: buyResult.start_time,
-        dateExpiry: quote.dateExpiryMs ? Math.round(quote.dateExpiryMs / 1000) : undefined,
+        dateExpiry: brokerConfirmedExpiryMs ? Math.round(brokerConfirmedExpiryMs / 1000) : undefined,
         isDerivRealTime: true,
         status: 'open',
         strategyVersion: request.strategyVersion || cfg.activeStrategyVersion,
@@ -694,6 +792,13 @@ export class ExecutionController {
       const res = await this.broker.sellContract(contractId, request.minPrice ?? 0);
       const soldFor = Number(res.sold_for);
       const profit = Number((soldFor - (trade.amount || 0)).toFixed(2));
+      const actualSaleTime = now;
+      const startRef =
+        trade.brokerConfirmedStartMs ??
+        (trade.dateStart ? trade.dateStart * 1000 : Date.parse(trade.timestamp || '')) ??
+        actualSaleTime;
+      const actualHoldingMs = Math.max(0, actualSaleTime - (Number.isFinite(startRef) ? startRef : actualSaleTime));
+
       this.recordEvent(
         'SELL',
         request.source,
@@ -718,6 +823,8 @@ export class ExecutionController {
         soldFor,
         profit,
         transactionId: res.transaction_id,
+        actualSaleTime,
+        actualHoldingMs,
         reason: request.reason,
         status: 'SOLD',
       };

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
 import { strategyEvolutionManager } from '../lib/strategyEvolutionManager';
+import { formatDurationLabel } from '../lib/adaptiveDurationEngine';
 import { StrategyVersionRecord, StrategyEvolutionProposal, TradeRecord } from '../types/trading';
 
 export interface StrategyMutationProposal {
@@ -519,6 +520,60 @@ export const StrategyEvolutionModal: React.FC<StrategyEvolutionModalProps> = ({
                   </div>
                 ))}
               </div>
+
+              {/* ACDE Duration Horizon Attribution */}
+              {activeVersion?.metrics?.durationBreakdown &&
+                Object.keys(activeVersion.metrics.durationBreakdown).length > 0 && (
+                  <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5 font-mono">
+                    <div className="flex items-center justify-between">
+                      <h5 className="text-xs font-bold text-cyan-300 uppercase tracking-wide">
+                        ACDE Duration Attribution ({activeVersion.version})
+                      </h5>
+                      <span className="text-[10px] text-slate-400">
+                        Out-of-sample chronological buckets
+                      </span>
+                    </div>
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                      {Object.values(activeVersion.metrics.durationBreakdown)
+                        .slice(0, 10)
+                        .map((b) => (
+                          <div
+                            key={b.bucketKey}
+                            className="flex flex-wrap items-center justify-between gap-2 text-[11px] bg-slate-900/90 border border-slate-800 rounded-lg px-2.5 py-1.5"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-slate-200 font-bold">{b.symbol}</span>
+                              <span className="text-cyan-300">
+                                {formatDurationLabel(b.duration, b.durationUnit)}
+                              </span>
+                              <span className="text-slate-400">{b.marketRegime}</span>
+                              {b.chartTimeframeSeconds !== undefined && (
+                                <span className="text-slate-500">TF:{b.chartTimeframeSeconds}s</span>
+                              )}
+                              {b.earlyExitCount > 0 && (
+                                <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-500/15 text-cyan-300">
+                                  EARLY ({b.earlyExitCount})
+                                </span>
+                              )}
+                              {b.uncalibrated && (
+                                <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                  Uncalibrated ({b.trades})
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <span className={b.winRate >= 0.55 ? 'text-emerald-400 font-bold' : 'text-slate-300'}>
+                                WR {(b.winRate * 100).toFixed(0)}%
+                              </span>
+                              <span className={b.netProfit >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                                {b.netProfit >= 0 ? '+' : ''}${b.netProfit.toFixed(2)}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
             </div>
           )}
         </div>

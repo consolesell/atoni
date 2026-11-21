@@ -13,9 +13,18 @@ import {
   Sliders,
   AlertTriangle,
 } from 'lucide-react';
-import { AIPredictionResult, DecisionResult, PositionSizingMode, CoreRiskMetrics, TrailingStopConfig } from '../types/trading';
+import {
+  ACDEResult,
+  AIPredictionResult,
+  DecisionResult,
+  DurationGovernanceMode,
+  PositionSizingMode,
+  CoreRiskMetrics,
+  TrailingStopConfig,
+} from '../types/trading';
 import { TradeDurationUnit, SniperConfluenceResult } from '../types/sniper';
 import { PRESET_DURATIONS } from '../lib/sniperEngine';
+import { formatDurationLabel } from '../lib/adaptiveDurationEngine';
 import { TRAILING_STOP_PRESETS, DEFAULT_TRAILING_STOP_CONFIG } from '../lib/trailingStopEngine';
 import { sound } from '../lib/soundEngine';
 import { SniperControlsPanel } from './SniperControlsPanel';
@@ -46,6 +55,8 @@ interface TradeControlsProps {
   trailingStopConfig?: TrailingStopConfig;
   onTrailingStopConfigChange?: (config: TrailingStopConfig) => void;
   onOpenQuickSettings?: () => void;
+  acdeEvaluation?: ACDEResult | null;
+  durationGovernanceMode?: DurationGovernanceMode;
 }
 
 export const TradeControls: React.FC<TradeControlsProps> = ({
@@ -74,6 +85,8 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
   trailingStopConfig = DEFAULT_TRAILING_STOP_CONFIG,
   onTrailingStopConfigChange,
   onOpenQuickSettings,
+  acdeEvaluation = null,
+  durationGovernanceMode = 'ADAPTIVE_AUTO',
 }) => {
   const [activeDeckTab, setActiveDeckTab] = useState<'standard' | 'sniper'>(
     sniperSetup?.isPrimed ? 'sniper' : 'standard'
@@ -123,9 +136,23 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
     sound.play('click');
   };
 
-  const aiRecommendedDuration =
-    sniperSetup?.recommendedDuration?.label ||
-    (aiPrediction?.suggested_duration ? `${aiPrediction.suggested_duration}m` : `${algorithmicDecision?.duration || 15}m`);
+  const acdeRec = acdeEvaluation?.recommendation || null;
+  const aiRecommendedDuration = acdeEvaluation
+    ? acdeEvaluation.action === 'HOLD'
+      ? 'HOLD'
+      : `${formatDurationLabel(acdeEvaluation.duration, acdeEvaluation.unit)} (${acdeRec?.confidence ?? 60}%)`
+    : sniperSetup?.recommendedDuration?.label ||
+      (aiPrediction?.duration_recommendation
+        ? formatDurationLabel(
+            aiPrediction.duration_recommendation.value,
+            aiPrediction.duration_recommendation.unit
+          )
+        : algorithmicDecision?.durationUnit
+        ? formatDurationLabel(
+            algorithmicDecision.duration,
+            algorithmicDecision.durationUnit
+          )
+        : null);
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -433,55 +460,74 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
             </div>
           </div>
 
-          {/* Enhanced Duration Selector: Units & Values */}
+          {/* Enhanced Duration Selector: Units & Values (ACDE Governed) */}
           <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between text-xs font-mono">
+            <div className="flex items-center justify-between text-xs font-mono flex-wrap gap-1.5">
               <span className="text-slate-400 flex items-center gap-1">
                 <Clock className="w-3.5 h-3.5 text-cyan-400" />
-                Contract Expiry Duration
+                Contract Expiry ({durationGovernanceMode === 'MANUAL_OVERRIDE' ? 'Manual Override' : 'ACDE Auto'})
               </span>
-              {aiRecommendedDuration && (
-                <span className="text-[10px] text-cyan-400 flex items-center gap-1 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/60 font-semibold">
-                  <Sparkles className="w-3 h-3" /> Adaptive: {aiRecommendedDuration}
-                </span>
-              )}
+              <div className="flex items-center gap-1.5">
+                {acdeEvaluation?.calibration?.uncalibrated && (
+                  <span
+                    className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700"
+                    title={acdeEvaluation.calibration.reason}
+                  >
+                    Uncalibrated
+                  </span>
+                )}
+                {aiRecommendedDuration && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (acdeEvaluation && acdeEvaluation.action === 'SELECT') {
+                        onDurationChange(acdeEvaluation.duration, acdeEvaluation.unit as TradeDurationUnit);
+                        sound.play('click');
+                      }
+                    }}
+                    title={acdeEvaluation?.holdReason || acdeRec?.rationale || 'Apply ACDE recommended duration'}
+                    className={`text-[10px] flex items-center gap-1 px-2 py-0.5 rounded border font-semibold transition-all ${
+                      acdeEvaluation?.action === 'HOLD'
+                        ? 'text-amber-300 bg-amber-950/60 border-amber-700/60'
+                        : 'text-cyan-300 bg-cyan-950/60 hover:bg-cyan-900/60 border-cyan-800/60 cursor-pointer'
+                    }`}
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>ACDE: {aiRecommendedDuration}</span>
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* Duration Unit Selector Tabs */}
-            <div className="grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs font-mono">
-              <button
-                type="button"
-                onClick={() => handleUnitTabChange('ticks')}
-                className={`py-1 rounded text-center font-bold transition-all ${
-                  selectedDurationUnit === 'ticks'
-                    ? 'bg-cyan-500 text-slate-950 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Ticks (Scalp)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleUnitTabChange('seconds')}
-                className={`py-1 rounded text-center font-bold transition-all ${
-                  selectedDurationUnit === 'seconds'
-                    ? 'bg-cyan-500 text-slate-950 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Seconds
-              </button>
-              <button
-                type="button"
-                onClick={() => handleUnitTabChange('minutes')}
-                className={`py-1 rounded text-center font-bold transition-all ${
-                  selectedDurationUnit === 'minutes'
-                    ? 'bg-cyan-500 text-slate-950 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Minutes
-              </button>
+            {acdeEvaluation?.wasAdjusted && acdeEvaluation.adjustmentReason && (
+              <div className="text-[10px] font-mono text-amber-300 bg-amber-950/30 border border-amber-500/30 px-2.5 py-1 rounded-lg">
+                Adjusted {formatDurationLabel(acdeEvaluation.originalDuration, acdeEvaluation.originalUnit)} →{' '}
+                {formatDurationLabel(acdeEvaluation.duration, acdeEvaluation.unit)}: {acdeEvaluation.adjustmentReason}
+              </div>
+            )}
+
+            {/* Duration Unit Selector Tabs (All 5 Units) */}
+            <div className="grid grid-cols-5 gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px] font-mono">
+              {([
+                { id: 'ticks', label: 'Ticks' },
+                { id: 'seconds', label: 'Sec' },
+                { id: 'minutes', label: 'Min' },
+                { id: 'hours', label: 'Hours' },
+                { id: 'days', label: 'Days' },
+              ] as const).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => handleUnitTabChange(tab.id)}
+                  className={`py-1 rounded text-center font-bold transition-all ${
+                    selectedDurationUnit === tab.id
+                      ? 'bg-cyan-500 text-slate-950 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </div>
 
             {/* Value Pills */}
@@ -709,8 +755,7 @@ export const TradeControls: React.FC<TradeControlsProps> = ({
               <>
                 {direction === 'CALL' ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
                 <span>
-                  OPEN {direction === 'CALL' ? 'RISE' : 'FALL'} POSITION (${stake} • {duration}
-                  {durationUnit === 'ticks' ? 'T' : durationUnit === 'seconds' ? 's' : 'm'})
+                  OPEN {direction === 'CALL' ? 'RISE' : 'FALL'} POSITION (${stake} • {formatDurationLabel(duration, durationUnit)})
                 </span>
               </>
             )}

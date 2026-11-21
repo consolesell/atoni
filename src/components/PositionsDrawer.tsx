@@ -14,6 +14,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { sound } from '../lib/soundEngine';
+import { formatDurationLabel } from '../lib/adaptiveDurationEngine';
 import {
   calculateDerivRealtimePnL,
   aggregateOpenTradesPnL,
@@ -375,11 +376,30 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                     <div className="px-3.5 py-2.5 bg-slate-900/90 border-t border-slate-800/80 flex flex-col gap-2 text-xs font-mono">
                       <div className="flex flex-wrap items-center justify-between gap-3 text-slate-400 text-[11px]">
                         <div className="flex flex-wrap items-center gap-3">
-                          <span>Duration: {trade.duration}{trade.durationUnit === 'ticks' ? 't' : trade.durationUnit === 'seconds' ? 's' : 'm'}</span>
+                          <span>
+                            Requested:{' '}
+                            <strong className="text-slate-200">
+                              {formatDurationLabel(
+                                trade.requestedDuration ?? trade.duration,
+                                trade.requestedDurationUnit ?? trade.durationUnit ?? 'minutes'
+                              )}
+                            </strong>
+                          </span>
+                          {trade.brokerConfirmedExpiryMs && (
+                            <span>
+                              Broker Expiry:{' '}
+                              <strong className="text-cyan-300">
+                                {new Date(trade.brokerConfirmedExpiryMs).toLocaleTimeString()}
+                              </strong>
+                            </span>
+                          )}
+                          {trade.chartTimeframeSeconds && (
+                            <span>Chart TF: {trade.chartTimeframeSeconds}s</span>
+                          )}
                           <span>
                             Resale Cashout: <strong className="text-cyan-300 font-mono">${livePnL.resaleValue.toFixed(2)}</strong>
                           </span>
-                          <span>Time: {new Date(trade.timestamp).toLocaleTimeString()}</span>
+                          <span>Entry Time: {new Date(trade.timestamp).toLocaleTimeString()}</span>
                         </div>
 
                         <button
@@ -415,7 +435,17 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                         </button>
                       </div>
 
-                      {/* Early Selling Evaluation Reason */}
+                      {/* Duration Adjustment & Early Selling Evaluation Reason */}
+                      {trade.durationAdjustmentReason && (
+                        <div className="pt-1 text-[10px] font-mono text-amber-300 bg-amber-950/30 px-2 py-1 rounded border border-amber-500/30">
+                          Adjusted from{' '}
+                          {formatDurationLabel(
+                            trade.originalRequestedDuration ?? trade.duration,
+                            trade.originalRequestedDurationUnit ?? trade.durationUnit ?? 'minutes'
+                          )}
+                          : {trade.durationAdjustmentReason}
+                        </div>
+                      )}
                       {trade.earlyExitReason && (
                         <div className="pt-1.5 text-[10px] font-mono text-cyan-300/90 bg-slate-950/50 px-2 py-1.5 rounded border border-slate-800">
                           Early-Exit Policy ({trade.earlyExitDecision || 'MONITOR'}): {trade.earlyExitReason}
@@ -524,6 +554,11 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                               </span>
                             </span>
                           )}
+                          {trade.earlyExited && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded border bg-cyan-500/15 text-cyan-300 border-cyan-500/30">
+                              EARLY EXIT
+                            </span>
+                          )}
                           {trade.trailingStopEnabled && (
                             <span className="text-[9px] px-1.5 py-0.2 rounded border bg-amber-500/10 text-amber-300 border-amber-500/30 flex items-center gap-1">
                               <ShieldCheck className="w-2.5 h-2.5 text-amber-400" />
@@ -581,14 +616,45 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                     <div className="px-3.5 py-2.5 bg-slate-900/90 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2.5">
                       <div className="text-[11px] text-slate-400 space-y-0.5">
                         <div>
-                          Stake: ${trade.amount} | Duration: {trade.duration}
-                          {trade.durationUnit === 'ticks'
-                            ? 't'
-                            : trade.durationUnit === 'seconds'
-                            ? 's'
-                            : 'm'}
+                          Stake: ${trade.amount} | Requested:{' '}
+                          <strong className="text-slate-200">
+                            {formatDurationLabel(
+                              trade.requestedDuration ?? trade.duration,
+                              trade.requestedDurationUnit ?? trade.durationUnit ?? 'minutes'
+                            )}
+                          </strong>
+                          {typeof trade.actualHoldingMs === 'number' && (
+                            <span>
+                              {' '}
+                              | Held:{' '}
+                              <strong className="text-cyan-300">
+                                {(trade.actualHoldingMs / 1000).toFixed(1)}s
+                              </strong>
+                            </span>
+                          )}
+                          {trade.chartTimeframeSeconds && (
+                            <span> | Chart: {trade.chartTimeframeSeconds}s</span>
+                          )}
                         </div>
-                        <div>Contract Mode: {trade.mode}</div>
+                        <div>
+                          Contract Mode: {trade.mode}
+                          {trade.brokerConfirmedExpiryMs && (
+                            <span>
+                              {' '}
+                              | Broker Expiry: {new Date(trade.brokerConfirmedExpiryMs).toLocaleTimeString()}
+                            </span>
+                          )}
+                        </div>
+                        {trade.durationAdjustmentReason && (
+                          <div className="text-[10px] text-amber-300">
+                            Adjusted from{' '}
+                            {formatDurationLabel(
+                              trade.originalRequestedDuration ?? trade.duration,
+                              trade.originalRequestedDurationUnit ?? trade.durationUnit ?? 'minutes'
+                            )}
+                            : {trade.durationAdjustmentReason}
+                          </div>
+                        )}
                       </div>
 
                       <button

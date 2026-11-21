@@ -2,12 +2,14 @@ import {
   BalanceSnapshot,
   ConnectionState,
   DerivAuthMethod,
+  DerivDurationUnitCode,
   DerivLinkedAccount,
 } from '../types/trading';
 import { balanceManager as globalBalanceManager, BalanceManager } from './balanceManager';
 import { isDemoAccount, selectDerivAccount } from './derivAccounts';
 import { portfolioReconciler as globalReconciler, PortfolioReconciler } from './portfolioReconciler';
 import { TradeProposalQuote } from './riskEngine';
+import { acde, fromDerivDurationUnit } from './adaptiveDurationEngine';
 
 export type DerivMessageCallback = (data: any) => void;
 
@@ -1526,7 +1528,7 @@ export class DerivWebSocketClient {
       amount: number;
       contract_type: 'CALL' | 'PUT';
       duration: number;
-      duration_unit: 'm' | 's' | 't';
+      duration_unit: DerivDurationUnitCode;
       currency?: string;
     },
     symbolKeyOverride?: 'underlying_symbol' | 'symbol'
@@ -1552,12 +1554,37 @@ export class DerivWebSocketClient {
     return num < 1_000_000_000_000 ? num * 1000 : num;
   }
 
+  public async fetchContractsForSymbol(symbol: string, currency?: string): Promise<boolean> {
+    if (!symbol) return false;
+    if (acde.getCachedMetadata(symbol, 'CALL')) return true;
+    if (!this.isAuthorized() || this.connectionState !== 'ONLINE') return false;
+
+    try {
+      const res = await this.request<any>(
+        {
+          contracts_for: symbol,
+          currency: currency || this.selectedAccount?.currency || 'USD',
+          product_type: 'basic',
+        },
+        { category: 'portfolio_profit', timeoutMs: 8000 }
+      );
+      const available = res?.contracts_for?.available;
+      if (Array.isArray(available) && available.length > 0) {
+        acde.registerContractsForMetadata(symbol, available);
+        return true;
+      }
+    } catch {
+      // Non-fatal: falls back to ACDE conservative symbol bounds
+    }
+    return false;
+  }
+
   public async requestProposalQuote(params: {
     symbol: string;
     amount: number;
     contract_type: 'CALL' | 'PUT';
     duration: number;
-    duration_unit: 'm' | 's' | 't';
+    duration_unit: DerivDurationUnitCode;
     currency?: string;
   }): Promise<TradeProposalQuote> {
     const primaryKey: 'underlying_symbol' | 'symbol' =
@@ -1629,6 +1656,23 @@ export class DerivWebSocketClient {
       throw new Error('Deriv proposal quote is already expired.');
     }
 
+    const requestedUnit = fromDerivDurationUnit(params.duration_unit) || 'minutes';
+    const expiryVerification = acde.verifyBrokerProposalExpiry({
+      symbol: returnedSymbol || params.symbol,
+      requestedDuration: params.duration,
+      requestedUnit,
+      dateStartMs,
+      dateExpiryMs,
+      spotTimeMs,
+      brokerQuoteExpiresAtMs,
+      fetchedAt: now,
+      now,
+    });
+
+    if (!expiryVerification.verified) {
+      throw new Error(`Deriv proposal duration/expiry verification failed: ${expiryVerification.note}`);
+    }
+
     return {
       proposalId: String(p.id).trim(),
       askPrice: Number(askPrice.toFixed(2)),
@@ -1638,6 +1682,15 @@ export class DerivWebSocketClient {
       dateStartMs,
       dateExpiryMs,
       brokerQuoteExpiresAtMs,
+      requestedDuration: params.duration,
+      requestedDurationUnit: requestedUnit,
+      brokerDurationUnit: params.duration_unit,
+      brokerConfirmedDuration:
+        requestedUnit === 'ticks'
+          ? params.duration
+          : expiryVerification.observedHorizonSeconds,
+      brokerDurationVerified: expiryVerification.verified,
+      brokerVerificationNote: expiryVerification.note,
       symbol: returnedSymbol || params.symbol,
       currency: params.currency || this.selectedAccount?.currency || 'USD',
       accountId: this.confirmedAccountId || undefined,

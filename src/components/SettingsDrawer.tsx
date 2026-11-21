@@ -42,6 +42,8 @@ import {
   Flame,
 } from 'lucide-react';
 import { BotState, TechnicalIndicators, MarketRegime, CoreRiskMetrics, TradeRecord, TrailingStopConfig } from '../types/trading';
+import { TradeDurationUnit } from '../types/sniper';
+import { formatDurationLabel, DEFAULT_DURATION_GOVERNANCE } from '../lib/adaptiveDurationEngine';
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS, AgentVoicePersonaId, VoiceEngineState } from '../lib/voiceEngine';
 import { useTerminalSettings } from '../context/TerminalSettingsContext';
@@ -75,7 +77,8 @@ interface SettingsDrawerProps {
   stake: number;
   onStakeChange: (s: number) => void;
   duration: number;
-  onDurationChange: (d: number) => void;
+  durationUnit?: TradeDurationUnit;
+  onDurationChange: (d: number, unit?: TradeDurationUnit) => void;
   isLiveMode: boolean;
   onToggleLiveMode: () => void;
   botState: BotState;
@@ -146,6 +149,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
     updateAudio,
     updateConnection,
     updateInterface,
+    updateDurationGovernance,
     resetToDefaults,
     exportSettingsJSON,
     importSettingsJSON,
@@ -508,26 +512,25 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="font-bold text-sm text-slate-200 block">Default Duration</span>
-                    <span className="text-[11px] text-slate-400">Default expiry interval</span>
+                    <span className="text-[11px] text-slate-400">Default contract expiry interval</span>
                   </div>
                   <span className="font-mono text-cyan-400 font-bold text-sm">
-                    {settings.general.defaultDuration}{' '}
-                    {settings.general.defaultDurationUnit === 'ticks'
-                      ? 'ticks'
-                      : settings.general.defaultDurationUnit === 'seconds'
-                      ? 'sec'
-                      : 'min'}
+                    {formatDurationLabel(
+                      settings.general.defaultDuration,
+                      settings.general.defaultDurationUnit
+                    )}
                   </span>
                 </div>
-                <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-900 rounded-lg border border-slate-800 font-mono">
-                  {(['ticks', 'seconds', 'minutes'] as const).map((unit) => (
+                <div className="grid grid-cols-5 gap-1 p-1 bg-slate-900 rounded-lg border border-slate-800 font-mono">
+                  {(['ticks', 'seconds', 'minutes', 'hours', 'days'] as const).map((unit) => (
                     <button
                       key={unit}
                       onClick={() => {
                         updateGeneral({ defaultDurationUnit: unit });
+                        onDurationChange(duration, unit);
                         sound.play('click');
                       }}
-                      className={`py-1 rounded text-center text-xs font-bold capitalize transition-all ${
+                      className={`py-1 rounded text-center text-[11px] font-bold capitalize transition-all ${
                         settings.general.defaultDurationUnit === unit
                           ? 'bg-cyan-500 text-slate-950 shadow-sm'
                           : 'text-slate-400 hover:text-slate-200'
@@ -538,6 +541,125 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   ))}
                 </div>
               </div>
+
+              {/* Adaptive Contract Duration Governance (ACDE) */}
+              {(() => {
+                const gov = settings.durationGovernance || DEFAULT_DURATION_GOVERNANCE;
+                return (
+                  <div className="bg-slate-950/70 p-4 rounded-xl border border-cyan-500/30 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-bold text-sm text-slate-200 block">
+                          ACDE Duration Governance
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          Broker-verified market-aware duration engine
+                        </span>
+                      </div>
+                      <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-bold">
+                        {gov.mode}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 font-mono">
+                      {(['ADAPTIVE_AUTO', 'MANUAL_OVERRIDE'] as const).map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => {
+                            updateDurationGovernance({ mode: m });
+                            sound.play('click');
+                          }}
+                          className={`py-2 px-2 rounded-xl border font-bold text-[11px] transition-all ${
+                            gov.mode === m
+                              ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50'
+                              : 'bg-slate-900 text-slate-400 border-slate-800'
+                          }`}
+                        >
+                          {m === 'ADAPTIVE_AUTO' ? 'Adaptive Auto' : 'Manual Override'}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="space-y-1.5 pt-2 border-t border-slate-800">
+                      <div className="flex items-center justify-between font-mono text-[11px]">
+                        <span className="text-slate-400">Minimum Confidence Threshold:</span>
+                        <span className="text-cyan-400 font-bold">{gov.confidenceThreshold}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="35"
+                        max="85"
+                        step="5"
+                        value={gov.confidenceThreshold}
+                        onChange={(e) =>
+                          updateDurationGovernance({ confidenceThreshold: Number(e.target.value) })
+                        }
+                        className="w-full accent-cyan-500"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+                      <div>
+                        <span className="font-bold text-slate-200 block">Low-Confidence Behavior</span>
+                        <span className="text-[10px] text-slate-400">
+                          HOLD blocks entry; Safe Baseline uses bounded baseline
+                        </span>
+                      </div>
+                      <div className="flex gap-1 font-mono text-[10px]">
+                        {(['HOLD', 'SAFE_BASELINE'] as const).map((fb) => (
+                          <button
+                            key={fb}
+                            onClick={() => {
+                              updateDurationGovernance({ fallbackBehavior: fb });
+                              sound.play('click');
+                            }}
+                            className={`px-2 py-1 rounded border font-bold ${
+                              gov.fallbackBehavior === fb
+                                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                : 'bg-slate-900 text-slate-400 border-slate-800'
+                            }`}
+                          >
+                            {fb === 'HOLD' ? 'HOLD' : 'Baseline'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-800">
+                      <div>
+                        <span className="font-bold text-slate-200 block">
+                          Block Post-Loss Lengthening
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          Prevents extending expiry after losing trades
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          updateDurationGovernance({
+                            recalibrationPolicy: {
+                              ...gov.recalibrationPolicy,
+                              neverLengthenAfterLoss: !gov.recalibrationPolicy.neverLengthenAfterLoss,
+                            },
+                          });
+                          sound.play('toggle');
+                        }}
+                        className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${
+                          gov.recalibrationPolicy.neverLengthenAfterLoss
+                            ? 'bg-emerald-500'
+                            : 'bg-slate-800'
+                        }`}
+                      >
+                        <span
+                          className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${
+                            gov.recalibrationPolicy.neverLengthenAfterLoss ? 'translate-x-5' : ''
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Default Direction */}
               <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-3">
