@@ -4,6 +4,7 @@ import {
   TradeReadinessFlag,
   TradeReadinessResult,
 } from '../types/trading';
+import { DEFAULT_BALANCE_STALE_MS } from './balanceManager';
 import { TradeProposalQuote, validateTradeRiskGate } from './riskEngine';
 import { PositionSizingMode } from '../types/trading';
 
@@ -88,14 +89,22 @@ export class TradeReadinessGuard {
       );
     }
 
+    const balanceIsTimedOut =
+      input.balanceSnapshot.last_updated > 0 &&
+      now - input.balanceSnapshot.last_updated > DEFAULT_BALANCE_STALE_MS;
+    const effectiveFreshness =
+      input.balanceSnapshot.freshness === 'LIVE' && balanceIsTimedOut
+        ? 'STALE'
+        : input.balanceSnapshot.freshness;
+
     const FRESH_BALANCE = Boolean(
-      input.balanceSnapshot.freshness === 'LIVE' &&
+      effectiveFreshness === 'LIVE' &&
         Number.isFinite(input.balanceSnapshot.amount) &&
         input.balanceSnapshot.amount > 0
     );
     if (!FRESH_BALANCE) {
       blockers.push(
-        `Balance not trade-ready (freshness: ${input.balanceSnapshot.freshness}, amount: $${input.balanceSnapshot.amount.toFixed(2)}).`
+        `Balance not trade-ready (freshness: ${effectiveFreshness}, amount: $${input.balanceSnapshot.amount.toFixed(2)}).`
       );
     }
 

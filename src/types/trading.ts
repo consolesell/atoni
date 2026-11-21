@@ -209,6 +209,7 @@ export interface TradeRecord {
   profitLockSecuredAmount?: number;
   profitLockTriggerTime?: string;
   contract_id?: string | number;
+  proposalId?: string;
   profitPercentage?: number;
   bidPrice?: number;
   currentSpot?: number;
@@ -304,6 +305,8 @@ export interface BalanceSnapshot {
   source: BalanceSource;
   connection_state: ConnectionState;
   freshness: BalanceFreshness;
+  session_generation?: number;
+  connection_id?: string | null;
 }
 
 export type TradeReadinessFlag =

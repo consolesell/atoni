@@ -32,9 +32,12 @@ export function normalizeDiscoveredAccounts(
 
   for (const item of rawAccounts) {
     if (!item || typeof item !== 'object') continue;
-    const rawId = item.account_id ?? item.loginid ?? item.account ?? item.id;
-    if (!rawId) continue;
-    const id = String(rawId).trim();
+    const rawLogin = item.loginid ?? item.login_id ?? item.account;
+    const rawAccountId = item.account_id ?? item.id ?? rawLogin;
+    const primaryId = rawLogin ?? rawAccountId;
+    if (!primaryId) continue;
+    const id = String(primaryId).trim();
+    const resolvedAccountId = String(rawAccountId ?? id).trim();
     if (!id || seen.has(id)) continue;
     seen.add(id);
 
@@ -50,7 +53,7 @@ export function normalizeDiscoveredAccounts(
               ? item.is_virtual === 1
               : typeof item.isVirtual === 'boolean'
                 ? item.isVirtual
-                : id.toUpperCase().startsWith('VRTC');
+                : id.toUpperCase().startsWith('VRTC') || resolvedAccountId.toUpperCase().startsWith('VRTC');
 
     const numericBalance =
       typeof item.balance === 'number' && Number.isFinite(item.balance)
@@ -61,7 +64,7 @@ export function normalizeDiscoveredAccounts(
 
     const entry: DerivLinkedAccount = {
       account: id,
-      account_id: String(item.account_id ?? id),
+      account_id: resolvedAccountId || id,
       currency: String(item.currency || 'USD').toUpperCase(),
       isVirtual,
       account_type: isVirtual ? 'demo' : 'real',

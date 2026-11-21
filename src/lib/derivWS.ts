@@ -76,6 +76,8 @@ export class DerivWebSocketClient {
   private confirmedAccountId: string | null = null;
 
   private connectionState: ConnectionState = 'OFFLINE';
+  private activeSocketProtocol: 'options_v1' | 'legacy_v3' = 'options_v1';
+  private activeConnectionId: string | null = null;
   private sessionGeneration = 0;
   private publicGeneration = 0;
 
@@ -83,6 +85,9 @@ export class DerivWebSocketClient {
   private publicReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimeout: ReturnType<typeof setTimeout> | null = null;
+  private balanceSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private rateLimitFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private balanceFallbackSentForGen = -1;
   private pingStartTimestamp = 0;
   private lastLatencyMs = 35;
   private reconnectAttempts = 0;
@@ -149,6 +154,10 @@ export class DerivWebSocketClient {
     return this.sessionGeneration;
   }
 
+  public getActiveConnectionId(): string | null {
+    return this.activeConnectionId;
+  }
+
   public getConnectionState(): ConnectionState {
     return this.connectionState;
   }
@@ -173,10 +182,15 @@ export class DerivWebSocketClient {
     return this.sessionExpired;
   }
 
-  private setConnectionState(next: ConnectionState): void {
-    if (this.connectionState === next) return;
+  private setConnectionState(next: ConnectionState, sessionGeneration?: number): void {
+    const targetGen = sessionGeneration ?? this.sessionGeneration;
+    if (targetGen < this.sessionGeneration) return;
+    if (this.connectionState === next) {
+      this.balMgr.setConnectionState(next, Date.now(), targetGen);
+      return;
+    }
     this.connectionState = next;
-    this.balMgr.setConnectionState(next);
+    this.balMgr.setConnectionState(next, Date.now(), targetGen);
     this.emit({ msg_type: 'connection_state', state: next });
   }
 
@@ -203,6 +217,14 @@ export class DerivWebSocketClient {
     if (this.pongTimeout) {
       clearTimeout(this.pongTimeout);
       this.pongTimeout = null;
+    }
+    if (this.balanceSyncTimer) {
+      clearTimeout(this.balanceSyncTimer);
+      this.balanceSyncTimer = null;
+    }
+    if (this.rateLimitFlushTimer) {
+      clearTimeout(this.rateLimitFlushTimer);
+      this.rateLimitFlushTimer = null;
     }
   }
 
@@ -390,13 +412,16 @@ export class DerivWebSocketClient {
    */
   public async bootstrapSession(): Promise<void> {
     if (!this.fetchImpl) return;
+    const startGen = this.sessionGeneration;
     try {
       const res = await this.fetchImpl('/api/deriv/session', {
         method: 'GET',
         credentials: 'include',
       });
       if (!res.ok) return;
+      if (this.sessionGeneration !== startGen || this.isAuthorized()) return;
       const data = await res.json();
+      if (this.sessionGeneration !== startGen || this.isAuthorized()) return;
       if (data.expired) {
         this.handleAuthRequired('Session token expired. Please re-authenticate.');
         return;
@@ -450,7 +475,7 @@ export class DerivWebSocketClient {
     }
 
     // Account discovery balance is strictly provisional until live subscription confirms!
-    this.balMgr.applyDiscoveryAccount(chosen);
+    this.balMgr.applyDiscoveryAccount(chosen, Date.now(), this.sessionGeneration);
 
     return this.connectOtpAccountSession(chosen);
   }
@@ -466,13 +491,22 @@ export class DerivWebSocketClient {
     }
 
     const gen = ++this.sessionGeneration;
+    const connId = `otp_${gen}_${Date.now()}_${this.nextReqId}`;
+    this.activeConnectionId = connId;
     this.clearTimers();
+    this.rateLimitHistory.clear();
     this.cleanupSocket(this.ws);
     this.ws = null;
+    this.markSubscriptionsInactive();
     this.sessionAuthenticated = false;
     this.confirmedAccountId = null;
     this.isConnecting = true;
-    this.setConnectionState('CONNECTING');
+    this.balMgr.beginSession(gen, {
+      account_id: account.account_id || account.account,
+      login_id: account.account,
+      connection_id: connId,
+    });
+    this.setConnectionState('CONNECTING', gen);
     this.rejectPendingRequests('Session rotated during account OTP connection.');
 
     try {
@@ -496,13 +530,19 @@ export class DerivWebSocketClient {
 
       if (!res.ok || !body.wsUrl) {
         this.isConnecting = false;
-        this.setConnectionState('RECONNECTING');
+        this.setConnectionState('RECONNECTING', gen);
         this.scheduleReconnect();
         return { ok: false, error: body.error || 'Failed requesting account-specific OTP URL.' };
       }
 
+      const resolvedProtocol: 'options_v1' | 'legacy_v3' = String(body.wsUrl).includes('/websockets/v3')
+        ? 'legacy_v3'
+        : 'options_v1';
+      this.activeSocketProtocol = resolvedProtocol;
+
       this.openAuthenticatedSocket(body.wsUrl, {
         generation: gen,
+        connectionId: connId,
         sendAuthorize: false, // CRITICAL: OTP WebSocket URL is already pre-authorized for this account
         expectedAccount: account,
       });
@@ -511,7 +551,7 @@ export class DerivWebSocketClient {
     } catch (err: any) {
       if (gen === this.sessionGeneration) {
         this.isConnecting = false;
-        this.setConnectionState('RECONNECTING');
+        this.setConnectionState('RECONNECTING', gen);
         this.scheduleReconnect();
       }
       return { ok: false, error: redactTokenFromLog(err?.message || 'OTP request error') };
@@ -521,21 +561,37 @@ export class DerivWebSocketClient {
   private connectAuthenticatedLegacySocket(): void {
     if (!this.volatileLegacyToken) return;
     const gen = ++this.sessionGeneration;
+    const connId = `ws_${gen}_${Date.now()}_${this.nextReqId}`;
+    this.activeConnectionId = connId;
     this.clearTimers();
+    this.rateLimitHistory.clear();
     this.cleanupSocket(this.ws);
     this.ws = null;
+    this.markSubscriptionsInactive();
     this.sessionAuthenticated = false;
     this.confirmedAccountId = null;
     this.isConnecting = true;
-    this.setConnectionState('CONNECTING');
+    this.balMgr.beginSession(
+      gen,
+      this.selectedAccount
+        ? {
+            account_id: this.selectedAccount.account_id || this.selectedAccount.account,
+            login_id: this.selectedAccount.account,
+            connection_id: connId,
+          }
+        : { connection_id: connId }
+    );
+    this.setConnectionState('CONNECTING', gen);
     this.rejectPendingRequests('Session reconnecting.');
 
     // Legacy WS v3 requires a numeric app_id; fallback to 1089 if OAuth client ID is alphanumeric
     const numericAppId = /^\d+$/.test(this.appId) ? this.appId : DEFAULT_LEGACY_WS_APP_ID;
     const wsUrl = `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(numericAppId)}`;
+    this.activeSocketProtocol = 'legacy_v3';
 
     this.openAuthenticatedSocket(wsUrl, {
       generation: gen,
+      connectionId: connId,
       sendAuthorize: true,
       expectedAccount: this.selectedAccount,
     });
@@ -545,18 +601,19 @@ export class DerivWebSocketClient {
     wsUrl: string,
     opts: {
       generation: number;
+      connectionId: string;
       sendAuthorize: boolean;
       expectedAccount: DerivLinkedAccount | null;
     }
   ): void {
-    const { generation, sendAuthorize, expectedAccount } = opts;
+    const { generation, connectionId, sendAuthorize, expectedAccount } = opts;
 
     try {
       const sock = this.wsFactory(wsUrl);
       this.ws = sock;
 
       sock.onopen = () => {
-        if (generation !== this.sessionGeneration) {
+        if (generation !== this.sessionGeneration || connectionId !== this.activeConnectionId) {
           this.cleanupSocket(sock);
           return;
         }
@@ -578,28 +635,30 @@ export class DerivWebSocketClient {
             is_virtual: expectedAccount.isVirtual ?? expectedAccount.account_type === 'demo',
             balance: expectedAccount.balance,
           };
-          this.setConnectionState('ONLINE');
           this.balMgr.applyAuthorize({
             account_id: expectedAccount.account_id || expectedAccount.account,
             login_id: expectedAccount.account,
             is_virtual: expectedAccount.isVirtual,
             currency: expectedAccount.currency,
             balance: expectedAccount.balance,
+            sessionGeneration: generation,
+            connection_id: connectionId,
             promoteLive: false, // Remains SYNCING until live balance subscription confirms!
           });
+          this.setConnectionState('ONLINE', generation);
 
           this.emit({ msg_type: 'connected', connected: true });
           this.emit({ msg_type: 'authorize', authorize: this.lastAuthorizeResponse });
           this.emit({ msg_type: 'authorize_success', authorize: this.lastAuthorizeResponse });
 
-          this.initializeAccountSubscriptionsAndReconcile();
+          this.initializeAccountSubscriptionsAndReconcile(generation);
           this.flushPendingQueue();
         }
       };
 
       sock.onmessage = (event: any) => {
-        if (generation !== this.sessionGeneration) return;
-        this.handleAuthenticatedMessage(event, generation);
+        if (generation !== this.sessionGeneration || connectionId !== this.activeConnectionId) return;
+        this.handleAuthenticatedMessage(event, generation, connectionId);
       };
 
       sock.onerror = () => {
@@ -653,10 +712,16 @@ export class DerivWebSocketClient {
         console.warn('[derivWS] Heartbeat timeout: no pong within 12s. Reconnecting...');
         this.reconnect();
       }, 12_000);
+      if (typeof (this.pongTimeout as any)?.unref === 'function') {
+        (this.pongTimeout as any).unref();
+      }
     }, 20_000);
+    if (typeof (this.pingTimer as any)?.unref === 'function') {
+      (this.pingTimer as any).unref();
+    }
   }
 
-  private initializeAccountSubscriptionsAndReconcile(): void {
+  private initializeAccountSubscriptionsAndReconcile(generation: number = this.sessionGeneration): void {
     // Ensure required core streams are registered & subscribed without duplicates
     this.ensureSubscription('balance', { balance: 1, subscribe: 1 });
     this.ensureSubscription('tx', { transaction: 1, subscribe: 1 });
@@ -672,6 +737,27 @@ export class DerivWebSocketClient {
     // Trigger broker reconciliation snapshot for open positions & statements
     this.send({ portfolio: 1 });
     this.send({ statement: 1, limit: 25 });
+
+    // Fallback one-shot balance sync if stream stays SYNCING after connect
+    this.scheduleBalanceSyncFallback(generation);
+  }
+
+  private scheduleBalanceSyncFallback(generation: number): void {
+    if (this.balanceSyncTimer) {
+      clearTimeout(this.balanceSyncTimer);
+      this.balanceSyncTimer = null;
+    }
+    this.balanceSyncTimer = setTimeout(() => {
+      this.balanceSyncTimer = null;
+      if (generation !== this.sessionGeneration) return;
+      if (!this.ws || this.ws.readyState !== WS_OPEN || !this.sessionAuthenticated) return;
+      if (this.balMgr.getSnapshot().freshness === 'SYNCING') {
+        this.send({ balance: 1 });
+      }
+    }, 2500);
+    if (typeof (this.balanceSyncTimer as any)?.unref === 'function') {
+      (this.balanceSyncTimer as any).unref();
+    }
   }
 
   private markSubscriptionsInactive(): void {
@@ -724,8 +810,9 @@ export class DerivWebSocketClient {
     this.subscriptions.delete(key);
   }
 
-  private handleAuthenticatedMessage(event: any, generation: number): void {
+  private handleAuthenticatedMessage(event: any, generation: number, connectionId?: string | null): void {
     if (generation !== this.sessionGeneration) return;
+    if (connectionId && this.activeConnectionId && connectionId !== this.activeConnectionId) return;
 
     if (this.pongTimeout) {
       clearTimeout(this.pongTimeout);
@@ -770,7 +857,11 @@ export class DerivWebSocketClient {
           sub.active = true;
         }
       } else if (data.msg_type === 'proposal_open_contract') {
-        const poc = this.subscriptions.get('poc');
+        const pocContractId =
+          data.proposal_open_contract?.contract_id ?? data.echo_req?.contract_id;
+        const pocKey =
+          pocContractId !== undefined && pocContractId !== null ? `poc:${pocContractId}` : 'poc';
+        const poc = this.subscriptions.get(pocKey) || this.subscriptions.get('poc');
         if (poc) {
           poc.subscriptionId = subId;
           poc.active = true;
@@ -787,7 +878,7 @@ export class DerivWebSocketClient {
     if (data.msg_type === 'ping' || data.ping) {
       if (this.pingStartTimestamp > 0) {
         this.lastLatencyMs = Math.max(12, Date.now() - this.pingStartTimestamp);
-        this.balMgr.touchHeartbeat();
+        this.balMgr.touchHeartbeat(Date.now(), generation);
         this.emit({ msg_type: 'ping_latency', latency: this.lastLatencyMs });
       }
     }
@@ -806,11 +897,27 @@ export class DerivWebSocketClient {
       return;
     }
 
+    // Fallback one-shot balance request if subscribed balance call returned an error (e.g. AlreadySubscribed)
+    if (
+      data.error &&
+      (data.msg_type === 'balance' || data.echo_req?.balance !== undefined) &&
+      this.balanceFallbackSentForGen !== generation
+    ) {
+      this.balanceFallbackSentForGen = generation;
+      if (data.error.code !== 'AlreadySubscribed') {
+        const sub = this.subscriptions.get('balance');
+        if (sub) sub.active = false;
+      }
+      if (this.ws && this.ws.readyState === WS_OPEN && this.sessionAuthenticated) {
+        this.send({ balance: 1 });
+      }
+    }
+
     if (data.msg_type === 'authorize' && data.authorize) {
       this.sessionAuthenticated = true;
       this.sessionExpired = false;
       this.lastAuthorizeResponse = data.authorize;
-      const currentLoginId = data.authorize.loginid || null;
+      const currentLoginId = data.authorize.loginid || data.authorize.account_id || null;
       this.confirmedAccountId = currentLoginId;
 
       if (typeof window !== 'undefined' && currentLoginId) {
@@ -841,50 +948,79 @@ export class DerivWebSocketClient {
 
       this.selectedAccount = {
         account: currentLoginId,
-        account_id: currentLoginId,
+        account_id: data.authorize.account_id || currentLoginId,
         currency: data.authorize.currency || 'USD',
         isVirtual: Boolean(data.authorize.is_virtual),
         account_type: data.authorize.is_virtual ? 'demo' : 'real',
         balance: typeof data.authorize.balance === 'number' ? data.authorize.balance : undefined,
       };
 
-      this.setConnectionState('ONLINE');
       this.balMgr.applyAuthorize({
-        account_id: currentLoginId,
+        account_id: data.authorize.account_id || currentLoginId,
         login_id: currentLoginId,
         is_virtual: Boolean(data.authorize.is_virtual),
         currency: data.authorize.currency || 'USD',
         balance: typeof data.authorize.balance === 'number' ? data.authorize.balance : undefined,
+        sessionGeneration: generation,
+        connection_id:
+          data.connection_id ?? data.authorize?.connection_id ?? connectionId ?? this.activeConnectionId,
         promoteLive: false,
       });
+      this.setConnectionState('ONLINE', generation);
 
       this.emit({ msg_type: 'connected', connected: true });
       this.emit({ msg_type: 'authorize_success', authorize: data.authorize });
-      this.initializeAccountSubscriptionsAndReconcile();
+      this.initializeAccountSubscriptionsAndReconcile(generation);
       this.flushPendingQueue();
     }
 
-    if (data.msg_type === 'balance' && data.balance) {
-      const bal = data.balance;
-      const numericBal = typeof bal.balance === 'number' ? bal.balance : Number(bal.balance);
-      if (Number.isFinite(numericBal)) {
-        const applyRes = this.balMgr.applyLiveBalanceUpdate({
-          amount: numericBal,
-          currency: bal.currency,
-          login_id: bal.loginid || null,
-          account_id: bal.account_id || null,
-          source: 'SUBSCRIPTION',
-        });
+    const parsedBal = this.extractBalancePayload(data);
+    if (parsedBal) {
+      const applyRes = this.balMgr.applyLiveBalanceUpdate({
+        amount: parsedBal.amount,
+        currency: parsedBal.currency,
+        login_id: parsedBal.loginid || null,
+        account_id: parsedBal.account_id || null,
+        source: 'SUBSCRIPTION',
+        sessionGeneration: generation,
+        req_id: parsedBal.reqId ?? null,
+        connection_id: parsedBal.connectionId ?? connectionId ?? this.activeConnectionId,
+      });
 
-        if (!applyRes.accepted) {
-          // Cross-account update rejected; do not mutate active account balance or emit to UI as active
-          return;
-        }
+      if (!applyRes.accepted) {
+        // Cross-account or stale-generation update rejected; do not mutate active account balance or emit to UI as active
+        return;
+      }
 
-        if (this.lastAuthorizeResponse) {
-          this.lastAuthorizeResponse.balance = numericBal;
-          if (bal.currency) this.lastAuthorizeResponse.currency = bal.currency;
+      if (this.balanceSyncTimer) {
+        clearTimeout(this.balanceSyncTimer);
+        this.balanceSyncTimer = null;
+      }
+      const balSub = this.subscriptions.get('balance');
+      if (balSub) {
+        balSub.active = true;
+      }
+      const resolvedSnap = this.balMgr.getSnapshot();
+      if (resolvedSnap.login_id && this.confirmedAccountId !== resolvedSnap.login_id) {
+        this.confirmedAccountId = resolvedSnap.login_id;
+        if (
+          this.selectedAccount &&
+          (!this.selectedAccount.account || this.selectedAccount.account === this.selectedAccount.account_id)
+        ) {
+          this.selectedAccount = {
+            ...this.selectedAccount,
+            account: resolvedSnap.login_id,
+          };
         }
+      }
+      if (this.lastAuthorizeResponse) {
+        this.lastAuthorizeResponse.balance = parsedBal.amount;
+        if (parsedBal.currency) this.lastAuthorizeResponse.currency = parsedBal.currency;
+        if (resolvedSnap.login_id) this.lastAuthorizeResponse.loginid = resolvedSnap.login_id;
+      }
+      if (this.selectedAccount) {
+        this.selectedAccount.balance = parsedBal.amount;
+        if (parsedBal.currency) this.selectedAccount.currency = parsedBal.currency;
       }
     }
 
@@ -893,6 +1029,8 @@ export class DerivWebSocketClient {
         amount: data.buy.balance_after,
         login_id: this.confirmedAccountId,
         source: 'SETTLEMENT',
+        sessionGeneration: generation,
+        connection_id: data.connection_id ?? connectionId ?? this.activeConnectionId,
       });
     }
 
@@ -901,23 +1039,39 @@ export class DerivWebSocketClient {
         amount: data.sell.balance_after,
         login_id: this.confirmedAccountId,
         source: 'SETTLEMENT',
+        sessionGeneration: generation,
+        connection_id: data.connection_id ?? connectionId ?? this.activeConnectionId,
       });
     }
 
     if (
       data.msg_type === 'proposal_open_contract' &&
       data.proposal_open_contract &&
-      typeof data.proposal_open_contract.balance_after === 'number' &&
       (data.proposal_open_contract.is_sold === 1 ||
         data.proposal_open_contract.status === 'won' ||
         data.proposal_open_contract.status === 'lost' ||
         data.proposal_open_contract.status === 'sold')
     ) {
-      this.balMgr.applyLiveBalanceUpdate({
-        amount: data.proposal_open_contract.balance_after,
-        login_id: this.confirmedAccountId,
-        source: 'SETTLEMENT',
-      });
+      if (typeof data.proposal_open_contract.balance_after === 'number') {
+        this.balMgr.applyLiveBalanceUpdate({
+          amount: data.proposal_open_contract.balance_after,
+          login_id: this.confirmedAccountId,
+          source: 'SETTLEMENT',
+          sessionGeneration: generation,
+          connection_id: data.connection_id ?? connectionId ?? this.activeConnectionId,
+        });
+      }
+      const settledId = data.proposal_open_contract.contract_id;
+      if (settledId !== undefined && settledId !== null) {
+        const contractSubKey = `poc:${settledId}`;
+        const contractSub = this.subscriptions.get(contractSubKey);
+        if (contractSub) {
+          if (contractSub.subscriptionId && this.ws && this.ws.readyState === WS_OPEN) {
+            this.send({ forget: contractSub.subscriptionId });
+          }
+          this.subscriptions.delete(contractSubKey);
+        }
+      }
     }
 
     if (data.msg_type === 'transaction' && data.transaction) {
@@ -927,6 +1081,8 @@ export class DerivWebSocketClient {
           amount: tx.balance_after,
           login_id: this.confirmedAccountId,
           source: 'SETTLEMENT',
+          sessionGeneration: generation,
+          connection_id: data.connection_id ?? connectionId ?? this.activeConnectionId,
         });
       }
     }
@@ -934,10 +1090,107 @@ export class DerivWebSocketClient {
     this.emit(data);
   }
 
+  private extractBalancePayload(data: any): {
+    amount: number;
+    currency?: string;
+    loginid?: string | null;
+    account_id?: string | null;
+    reqId?: number | null;
+    connectionId?: string | null;
+  } | null {
+    if (!data || data.error) return null;
+
+    const reqId =
+      typeof data.req_id === 'number'
+        ? data.req_id
+        : typeof data.echo_req?.req_id === 'number'
+          ? data.echo_req.req_id
+          : null;
+    const connectionId =
+      typeof (data.connection_id ?? data.balance?.connection_id) === 'string'
+        ? String(data.connection_id ?? data.balance?.connection_id).trim()
+        : null;
+
+    const isBalanceMessage =
+      data.msg_type === 'balance' ||
+      (data.balance !== undefined &&
+        (data.echo_req?.balance !== undefined ||
+          (reqId !== null &&
+            this.balMgr.hasRegisteredBalanceRequest(
+              reqId,
+              this.sessionGeneration,
+              this.activeConnectionId
+            ))));
+
+    if (!isBalanceMessage) return null;
+
+    const raw = data.balance !== undefined ? data.balance : data.data?.balance ?? data.data;
+    if (raw === undefined || raw === null) return null;
+
+    if (typeof raw === 'number' || typeof raw === 'string') {
+      const num = Number(raw);
+      if (!Number.isFinite(num)) return null;
+      return {
+        amount: num,
+        currency: data.currency,
+        loginid: data.loginid ?? null,
+        account_id: data.account_id ?? null,
+        reqId,
+        connectionId,
+      };
+    }
+
+    if (typeof raw === 'object') {
+      const directVal = raw.balance ?? raw.amount ?? raw.value;
+      if (directVal !== undefined && directVal !== null && directVal !== '') {
+        const num = Number(directVal);
+        if (!Number.isFinite(num)) return null;
+        return {
+          amount: num,
+          currency: raw.currency ?? data.currency,
+          loginid: raw.loginid ?? raw.login_id ?? data.loginid ?? null,
+          account_id: raw.account_id ?? raw.id_account ?? data.account_id ?? null,
+          reqId,
+          connectionId,
+        };
+      }
+
+      if (raw.accounts && typeof raw.accounts === 'object') {
+        const candidateKeys = [
+          this.confirmedAccountId,
+          this.selectedAccount?.account,
+          this.selectedAccount?.account_id,
+        ].filter(Boolean) as string[];
+        let matchedKey = candidateKeys.find((k) => raw.accounts[k] !== undefined);
+        if (!matchedKey) {
+          const keys = Object.keys(raw.accounts);
+          if (keys.length === 1) matchedKey = keys[0];
+        }
+        if (matchedKey && raw.accounts[matchedKey] && typeof raw.accounts[matchedKey] === 'object') {
+          const entry = raw.accounts[matchedKey];
+          const num = Number(entry.balance ?? entry.amount);
+          if (Number.isFinite(num)) {
+            return {
+              amount: num,
+              currency: entry.currency ?? raw.currency ?? data.currency,
+              loginid: entry.loginid ?? matchedKey,
+              account_id: entry.account_id ?? matchedKey,
+              reqId,
+              connectionId,
+            };
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
   private handleAuthRequired(reason: string, expired = true): void {
     this.sessionExpired = expired;
     this.sessionAuthenticated = false;
     this.confirmedAccountId = null;
+    this.activeConnectionId = null;
     this.volatileLegacyToken = '';
     this.lastAuthorizeResponse = null;
     this.clearTimers();
@@ -971,7 +1224,7 @@ export class DerivWebSocketClient {
 
     if (this.authMethod === 'legacy_token' && account.token) {
       this.selectedAccount = account;
-      this.balMgr.applyDiscoveryAccount(account);
+      this.balMgr.applyDiscoveryAccount(account, Date.now(), this.sessionGeneration);
       this.connectWithLegacyToken(account.token, this.appId);
       return { ok: true };
     }
@@ -1004,7 +1257,7 @@ export class DerivWebSocketClient {
 
       const chosen = body.selectedAccount || account;
       this.selectedAccount = chosen;
-      this.balMgr.applyDiscoveryAccount(chosen);
+      this.balMgr.applyDiscoveryAccount(chosen, Date.now(), this.sessionGeneration);
       return this.connectOtpAccountSession(chosen);
     } catch (err: any) {
       const msg = redactTokenFromLog(err?.message || 'Account switch failed.');
@@ -1041,6 +1294,7 @@ export class DerivWebSocketClient {
 
   public async logout(): Promise<void> {
     this.sessionGeneration++;
+    this.activeConnectionId = null;
     this.clearTimers();
     this.volatileLegacyToken = '';
     this.authMethod = null;
@@ -1143,6 +1397,9 @@ export class DerivWebSocketClient {
         this.publicReconnectTimer = setTimeout(() => {
           this.connectPublicFeed();
         }, delay);
+        if (typeof (this.publicReconnectTimer as any)?.unref === 'function') {
+          (this.publicReconnectTimer as any).unref();
+        }
       };
     } catch {
       this.isPublicConnecting = false;
@@ -1205,6 +1462,17 @@ export class DerivWebSocketClient {
         generation,
       });
 
+      if ('balance' in payload) {
+        this.balMgr.registerBalanceRequest({
+          reqId,
+          connectionId: this.activeConnectionId,
+          sessionGeneration: generation,
+          accountId: this.selectedAccount?.account_id || this.selectedAccount?.account || null,
+          loginId: this.selectedAccount?.account || null,
+          isSubscription: Boolean(payload.subscribe),
+        });
+      }
+
       try {
         this.ws!.send(JSON.stringify({ ...payload, req_id: reqId }));
       } catch (err: any) {
@@ -1215,6 +1483,38 @@ export class DerivWebSocketClient {
     });
   }
 
+  private buildProposalPayload(
+    params: {
+      symbol: string;
+      amount: number;
+      contract_type: 'CALL' | 'PUT';
+      duration: number;
+      duration_unit: 'm' | 's' | 't';
+      currency?: string;
+    },
+    symbolKeyOverride?: 'underlying_symbol' | 'symbol'
+  ): Record<string, any> {
+    const symbolKey =
+      symbolKeyOverride ?? (this.activeSocketProtocol === 'options_v1' ? 'underlying_symbol' : 'symbol');
+    return {
+      proposal: 1,
+      amount: params.amount,
+      basis: 'stake',
+      contract_type: params.contract_type,
+      currency: params.currency || this.selectedAccount?.currency || 'USD',
+      duration: params.duration,
+      duration_unit: params.duration_unit,
+      [symbolKey]: params.symbol,
+    };
+  }
+
+  private normalizeEpochMs(raw: unknown): number | undefined {
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    const num = Number(raw);
+    if (!Number.isFinite(num) || num <= 0) return undefined;
+    return num < 1_000_000_000_000 ? num * 1000 : num;
+  }
+
   public async requestProposalQuote(params: {
     symbol: string;
     amount: number;
@@ -1223,57 +1523,175 @@ export class DerivWebSocketClient {
     duration_unit: 'm' | 's' | 't';
     currency?: string;
   }): Promise<TradeProposalQuote> {
-    const res = await this.request<any>(
-      {
-        proposal: 1,
-        amount: params.amount,
-        basis: 'stake',
-        contract_type: params.contract_type,
-        currency: params.currency || this.selectedAccount?.currency || 'USD',
-        duration: params.duration,
-        duration_unit: params.duration_unit,
-        symbol: params.symbol,
-      },
-      { category: 'trading' }
-    );
+    const primaryKey: 'underlying_symbol' | 'symbol' =
+      this.activeSocketProtocol === 'options_v1' ? 'underlying_symbol' : 'symbol';
+    const fallbackKey: 'underlying_symbol' | 'symbol' =
+      primaryKey === 'underlying_symbol' ? 'symbol' : 'underlying_symbol';
+
+    let res: any;
+    try {
+      res = await this.request<any>(this.buildProposalPayload(params, primaryKey), {
+        category: 'trading',
+      });
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (/(?:unknown|unrecognized|not allowed|additional|required|missing|invalid).*(?:symbol|underlying_symbol)|(?:symbol|underlying_symbol).*(?:unknown|unrecognized|not allowed|required|invalid)/i.test(msg)) {
+        res = await this.request<any>(this.buildProposalPayload(params, fallbackKey), {
+          category: 'trading',
+        });
+      } else {
+        throw err;
+      }
+    }
 
     const p = res?.proposal;
-    if (!p?.id) {
+    if (!p?.id || !String(p.id).trim()) {
       throw new Error('Deriv proposal response missing proposal ID.');
     }
 
+    const askPrice = Number(p.ask_price ?? p.display_value);
+    if (!Number.isFinite(askPrice) || askPrice <= 0) {
+      throw new Error('Deriv proposal response missing a valid positive ask_price.');
+    }
+
+    const payout = p.payout !== undefined && p.payout !== null ? Number(p.payout) : undefined;
+    if (payout !== undefined && (!Number.isFinite(payout) || payout <= 0)) {
+      throw new Error('Deriv proposal response returned invalid payout.');
+    }
+
+    const returnedSymbol = p.underlying_symbol || p.symbol;
+    if (returnedSymbol && returnedSymbol !== params.symbol) {
+      throw new Error(`Deriv proposal symbol mismatch (${returnedSymbol} != ${params.symbol}).`);
+    }
+
     const now = Date.now();
+    const maxQuoteAgeMs = 15_000;
+    const spotTimeMs = this.normalizeEpochMs(p.spot_time);
+    if (spotTimeMs !== undefined && now - spotTimeMs > maxQuoteAgeMs) {
+      throw new Error('Deriv proposal spot_time quote is already stale.');
+    }
+
+    const dateStartMs = this.normalizeEpochMs(p.date_start);
+    const dateExpiryMs = this.normalizeEpochMs(p.date_expiry ?? p.expiry_time);
+    if (dateExpiryMs !== undefined && dateExpiryMs <= now) {
+      throw new Error('Deriv proposal contract date_expiry is already in the past.');
+    }
+
+    const brokerQuoteExpiresAtMs = this.normalizeEpochMs(p.valid_until ?? p.expires_at ?? p.quote_expiry);
+    if (brokerQuoteExpiresAtMs !== undefined && brokerQuoteExpiresAtMs <= now) {
+      throw new Error('Deriv proposal quote validity window has already expired.');
+    }
+
+    const expiryCandidates = [now + maxQuoteAgeMs];
+    if (spotTimeMs !== undefined) expiryCandidates.push(spotTimeMs + maxQuoteAgeMs);
+    if (brokerQuoteExpiresAtMs !== undefined) expiryCandidates.push(brokerQuoteExpiresAtMs);
+    if (dateExpiryMs !== undefined) expiryCandidates.push(dateExpiryMs);
+    const expiresAt = Math.min(...expiryCandidates);
+
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+      throw new Error('Deriv proposal quote is already expired.');
+    }
+
     return {
-      proposalId: String(p.id),
-      askPrice: Number(p.ask_price ?? params.amount),
-      payout: typeof p.payout === 'number' ? Number(p.payout) : undefined,
-      symbol: params.symbol,
+      proposalId: String(p.id).trim(),
+      askPrice: Number(askPrice.toFixed(2)),
+      payout: payout !== undefined ? Number(payout.toFixed(2)) : undefined,
+      spot: typeof p.spot === 'number' ? p.spot : undefined,
+      spotTimeMs,
+      dateStartMs,
+      dateExpiryMs,
+      brokerQuoteExpiresAtMs,
+      symbol: returnedSymbol || params.symbol,
       currency: params.currency || this.selectedAccount?.currency || 'USD',
       accountId: this.confirmedAccountId || undefined,
       fetchedAt: now,
-      expiresAt: now + 15_000,
+      expiresAt,
+    };
+  }
+
+  /**
+   * Executes a contract purchase strictly using a validated Deriv proposal ID and maximum acceptable price.
+   * Attaches req_id correlation and immediately subscribes to proposal_open_contract for contract_id monitoring.
+   */
+  public async buyProposal(params: {
+    proposalId: string;
+    maxPrice: number;
+    timeoutMs?: number;
+  }): Promise<{
+    contractId: number | string;
+    buyPrice: number;
+    payout?: number;
+    balanceAfter?: number;
+    transactionId?: number | string;
+    startTime?: number;
+    rawBuy: any;
+  }> {
+    const cleanId = String(params.proposalId || '').trim();
+    if (!cleanId) {
+      throw new Error('Proposal ID is required before executing buy.');
+    }
+    if (!Number.isFinite(params.maxPrice) || params.maxPrice <= 0) {
+      throw new Error('Maximum acceptable purchase price must be greater than zero.');
+    }
+
+    const res = await this.request<any>(
+      {
+        buy: cleanId,
+        price: Number(params.maxPrice.toFixed(2)),
+      },
+      {
+        category: 'trading',
+        timeoutMs: params.timeoutMs,
+      }
+    );
+
+    const buyData = res?.buy;
+    if (!buyData || buyData.contract_id === undefined || buyData.contract_id === null) {
+      throw new Error('Deriv buy response missing contract_id.');
+    }
+
+    const contractId = buyData.contract_id;
+    this.subscribeProposalOpenContract(contractId);
+
+    return {
+      contractId,
+      buyPrice:
+        typeof buyData.buy_price === 'number'
+          ? Number(buyData.buy_price.toFixed(2))
+          : Number(params.maxPrice.toFixed(2)),
+      payout: typeof buyData.payout === 'number' ? Number(buyData.payout.toFixed(2)) : undefined,
+      balanceAfter:
+        typeof buyData.balance_after === 'number' ? Number(buyData.balance_after.toFixed(2)) : undefined,
+      transactionId: buyData.transaction_id,
+      startTime: typeof buyData.start_time === 'number' ? buyData.start_time : undefined,
+      rawBuy: buyData,
     };
   }
 
   public async requestReconciliationSnapshot(): Promise<{
     openContracts: any[];
     settledTransactions: any[];
+    portfolioVerified: boolean;
+    statementVerified: boolean;
   }> {
     const [portRes, stmtRes] = await Promise.allSettled([
       this.request<any>({ portfolio: 1 }, { category: 'portfolio_profit' }),
       this.request<any>({ statement: 1, limit: 25 }, { category: 'balance_statement' }),
     ]);
 
-    const openContracts =
-      portRes.status === 'fulfilled' && Array.isArray(portRes.value?.portfolio?.contracts)
-        ? portRes.value.portfolio.contracts
-        : [];
-    const settledTransactions =
-      stmtRes.status === 'fulfilled' && Array.isArray(stmtRes.value?.statement?.transactions)
-        ? stmtRes.value.statement.transactions
-        : [];
+    const portfolioVerified =
+      portRes.status === 'fulfilled' &&
+      !portRes.value?.error &&
+      Array.isArray(portRes.value?.portfolio?.contracts);
+    const statementVerified =
+      stmtRes.status === 'fulfilled' &&
+      !stmtRes.value?.error &&
+      Array.isArray(stmtRes.value?.statement?.transactions);
 
-    return { openContracts, settledTransactions };
+    const openContracts = portfolioVerified ? portRes.value.portfolio.contracts : [];
+    const settledTransactions = statementVerified ? stmtRes.value.statement.transactions : [];
+
+    return { openContracts, settledTransactions, portfolioVerified, statementVerified };
   }
 
   public async testToken(
@@ -1356,6 +1774,7 @@ export class DerivWebSocketClient {
       connected: !!this.ws && this.ws.readyState === WS_OPEN,
       publicConnected: !!this.publicWs && this.publicWs.readyState === WS_OPEN,
       connectionState: this.connectionState,
+      connectionId: this.activeConnectionId,
       authMethod: this.authMethod,
       sessionGeneration: this.sessionGeneration,
       appId: this.appId,
@@ -1408,7 +1827,9 @@ export class DerivWebSocketClient {
   }
 
   private flushPendingQueue(): void {
-    while (this.pendingSendQueue.length > 0 && this.ws && this.ws.readyState === WS_OPEN) {
+    let remaining = this.pendingSendQueue.length;
+    while (remaining > 0 && this.pendingSendQueue.length > 0 && this.ws && this.ws.readyState === WS_OPEN) {
+      remaining--;
       const queued = this.pendingSendQueue.shift();
       try {
         this.send(queued);
@@ -1438,10 +1859,30 @@ export class DerivWebSocketClient {
       if (this.pendingSendQueue.length < 25) {
         this.pendingSendQueue.push(payload);
       }
+      if (!this.rateLimitFlushTimer) {
+        this.rateLimitFlushTimer = setTimeout(() => {
+          this.rateLimitFlushTimer = null;
+          this.flushPendingQueue();
+        }, rate.retryAfterMs + 10);
+        if (typeof (this.rateLimitFlushTimer as any)?.unref === 'function') {
+          (this.rateLimitFlushTimer as any).unref();
+        }
+      }
       return;
     }
 
     const withReqId = typeof payload.req_id === 'number' ? payload : { ...payload, req_id: this.nextReqId++ };
+
+    if ('balance' in withReqId && typeof withReqId.req_id === 'number') {
+      this.balMgr.registerBalanceRequest({
+        reqId: withReqId.req_id,
+        connectionId: this.activeConnectionId,
+        sessionGeneration: this.sessionGeneration,
+        accountId: this.selectedAccount?.account_id || this.selectedAccount?.account || null,
+        loginId: this.selectedAccount?.account || null,
+        isSubscription: Boolean(withReqId.subscribe),
+      });
+    }
 
     if (this.ws && this.ws.readyState === WS_OPEN) {
       try {
@@ -1484,26 +1925,25 @@ export class DerivWebSocketClient {
     currency?: string;
   }): void {
     this.send({
-      proposal: 1,
-      amount: params.amount,
-      basis: 'stake',
-      contract_type: params.contract_type,
-      currency: params.currency || this.selectedAccount?.currency || 'USD',
-      duration: params.duration,
-      duration_unit: params.duration_unit,
-      symbol: params.symbol,
+      ...this.buildProposalPayload(params),
       subscribe: 1,
     });
   }
 
   public buyContract(proposalId: string, price: number): void {
+    const cleanId = String(proposalId || '').trim();
+    if (!cleanId || !Number.isFinite(price) || price <= 0) {
+      throw new Error('buyContract requires a valid proposalId and positive price.');
+    }
     this.send({
-      buy: proposalId,
-      price,
-      subscribe: 1,
+      buy: cleanId,
+      price: Number(price.toFixed(2)),
     });
   }
 
+  /**
+   * @deprecated Prefer requestProposalQuote() + buyProposal({ proposalId, maxPrice }).
+   */
   public buyContractDirect(params: {
     contract_type: 'CALL' | 'PUT';
     symbol: string;
@@ -1512,6 +1952,7 @@ export class DerivWebSocketClient {
     amount: number;
     currency?: string;
   }): void {
+    const symbolKey = this.activeSocketProtocol === 'options_v1' ? 'underlying_symbol' : 'symbol';
     this.send({
       buy: 1,
       price: params.amount,
@@ -1522,7 +1963,7 @@ export class DerivWebSocketClient {
         currency: params.currency || this.selectedAccount?.currency || 'USD',
         duration: params.duration,
         duration_unit: params.duration_unit,
-        symbol: params.symbol,
+        [symbolKey]: params.symbol,
       },
       subscribe: 1,
     });
@@ -1530,9 +1971,15 @@ export class DerivWebSocketClient {
 
   public subscribeProposalOpenContract(contractId?: number | string): void {
     if (contractId !== undefined && contractId !== null) {
-      this.ensureSubscription(`poc:${contractId}`, {
+      const normalizedId =
+        typeof contractId === 'number'
+          ? contractId
+          : Number.isFinite(Number(contractId)) && /^\d+$/.test(String(contractId).trim())
+          ? Number(contractId)
+          : String(contractId);
+      this.ensureSubscription(`poc:${normalizedId}`, {
         proposal_open_contract: 1,
-        contract_id: Number(contractId),
+        contract_id: normalizedId,
         subscribe: 1,
       });
     } else {
@@ -1574,6 +2021,9 @@ export class DerivWebSocketClient {
         void this.connectOtpAccountSession(this.selectedAccount);
       }
     }, delay);
+    if (typeof (this.reconnectTimer as any)?.unref === 'function') {
+      (this.reconnectTimer as any).unref();
+    }
   }
 
   public reconnect(): void {

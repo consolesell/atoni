@@ -14,7 +14,7 @@ import {
 } from '../src/lib/derivAccounts.ts';
 import { BalanceManager } from '../src/lib/balanceManager.ts';
 import { PortfolioReconciler } from '../src/lib/portfolioReconciler.ts';
-import { calculateDynamicStake } from '../src/lib/riskEngine.ts';
+import { calculateDynamicStake, validateTradeRiskGate } from '../src/lib/riskEngine.ts';
 import { TradeReadinessGuard, TradeReadinessInput } from '../src/lib/readinessGuard.ts';
 import { SBAgent } from '../src/lib/sbagentAutonomyEngine.ts';
 import { calculateDerivRealtimePnL } from '../src/lib/derivPnL.ts';
@@ -710,3 +710,597 @@ test('15 & 16. Zero bearer token leaks and conditional Deriv-App-ID header on PA
 
   await wsClient.logout();
 });
+
+test('17. Balance freshness transitions SYNCING -> LIVE on demo balance ($9,866.97), unblocks TradeReadinessGuard, and survives re-session/authorize', async () => {
+  const sockets: MockWebSocket[] = [];
+  const mockFetch = (async (url: string) => {
+    if (url.includes('/otp')) {
+      return new Response(
+        JSON.stringify({ ok: true, wsUrl: 'wss://api.derivws.com/trading/v1/options/ws/otp?token=otp_demo' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (url.includes('/accounts/select')) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          selectedAccount: { account: 'VRTC9866', account_id: 'acct-uuid-9866', account_type: 'demo', currency: 'USD', balance: 9866.97 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch;
+
+  const balMgr = new BalanceManager(30_000);
+  const snapshots: string[] = [];
+  const unsub = balMgr.subscribe((s) => snapshots.push(`${s.connection_state}:${s.freshness}:${s.amount}`));
+
+  const wsClient = new DerivWebSocketClient({
+    wsFactory: (u) => {
+      const s = new MockWebSocket(u);
+      sockets.push(s);
+      return s;
+    },
+    fetchImpl: mockFetch,
+    balanceManager: balMgr,
+    portfolioReconciler: new PortfolioReconciler(),
+  });
+
+  // Unauthenticated / offline baseline must remain UNAVAILABLE
+  assert.equal(balMgr.getSnapshot().freshness, 'UNAVAILABLE');
+
+  await wsClient.completeServerSession({
+    authMethod: 'oauth2_pkce',
+    appId: '33zsnNh6YJ2HWm30oZZJR',
+    accounts: [
+      { account: 'VRTC9866', account_id: 'acct-uuid-9866', account_type: 'demo', currency: 'USD', balance: 9866.97 },
+    ],
+    selectedAccountId: 'VRTC9866',
+  });
+
+  assert.equal(sockets.length, 1);
+  sockets[0].triggerOpen();
+
+  // Immediately after open, connection is ONLINE with $9,866.97 displayed as SYNCING (readiness blocked)
+  assert.equal(wsClient.getConnectionState(), 'ONLINE');
+  assert.equal(balMgr.getSnapshot().amount, 9866.97);
+  assert.equal(balMgr.getSnapshot().freshness, 'SYNCING');
+
+  const guard = new TradeReadinessGuard();
+  const evalReadiness = () =>
+    guard.evaluate({
+      hasValidAuth: wsClient.hasRealToken() && !wsClient.isTokenExpired(),
+      tokenExpired: wsClient.isTokenExpired(),
+      selectedAccountId: wsClient.getSelectedAccount()?.account || null,
+      confirmedAccountId: wsClient.getConfirmedAccountId(),
+      connectionState: wsClient.getConnectionState(),
+      isSessionAuthenticated: wsClient.isAuthorized(),
+      balanceSnapshot: wsClient.getBalanceSnapshot(),
+      requiredSubscriptionsActive: wsClient.getSubscriptionStatus().requiredSubscriptionsActive,
+      hasUnresolvedPurchaseTimeout: false,
+      hasPendingReconciliation: false,
+      emergencyStopActive: false,
+      symbol: '1HZ10V',
+      stake: 5,
+      winRate: 0.65,
+      confidence: 0.65,
+      sizingMode: 'KELLY_HALF',
+      maxStakePercent: 0.05,
+      minStake: 0.35,
+      openExposure: 0,
+      maxOpenExposure: 1000,
+      openContractsCount: 0,
+      maxConcurrentContracts: 3,
+      dailyLoss: 0,
+      maxDailyLoss: 500,
+      drawdownPercent: 0,
+      maxDrawdownPercent: 5,
+      consecutiveLosses: 0,
+      maxConsecutiveLosses: 3,
+    });
+
+  assert.equal(evalReadiness().flags.FRESH_BALANCE, false);
+  assert.equal(evalReadiness().ready, false);
+
+  // Live balance frame arrives -> immediately transitions to LIVE and unblocks TradeReadinessGuard
+  sockets[0].triggerMessage({
+    msg_type: 'balance',
+    balance: { balance: 9866.97, currency: 'USD', loginid: 'VRTC9866' },
+    subscription: { id: 'sub_demo_1' },
+  });
+
+  assert.equal(balMgr.getSnapshot().freshness, 'LIVE');
+  assert.equal(balMgr.getSnapshot().amount, 9866.97);
+  assert.ok(snapshots.includes('ONLINE:LIVE:9866.97'));
+  assert.equal(evalReadiness().flags.FRESH_BALANCE, true);
+  assert.equal(evalReadiness().ready, true);
+
+  // Duplicate authorize in the same generation must NOT downgrade LIVE back to SYNCING
+  sockets[0].triggerMessage({
+    msg_type: 'authorize',
+    authorize: { loginid: 'VRTC9866', account_id: 'acct-uuid-9866', currency: 'USD', is_virtual: 1, balance: 9866.97 },
+  });
+  assert.equal(balMgr.getSnapshot().freshness, 'LIVE');
+
+  // Rotating session / re-running completeServerSession MUST reset subscriptions so balance: 1 is re-sent on new socket
+  await wsClient.completeServerSession({
+    authMethod: 'oauth2_pkce',
+    appId: '33zsnNh6YJ2HWm30oZZJR',
+    accounts: [
+      { account: 'VRTC9866', account_id: 'acct-uuid-9866', account_type: 'demo', currency: 'USD', balance: 9866.97 },
+    ],
+    selectedAccountId: 'VRTC9866',
+  });
+  assert.equal(sockets.length, 2);
+  sockets[1].triggerOpen();
+  assert.equal(balMgr.getSnapshot().freshness, 'SYNCING');
+  const balSubReq = sockets[1].sentPayloads.find((p) => p.balance === 1 && p.subscribe === 1);
+  assert.ok(balSubReq, 'New socket must send { balance: 1, subscribe: 1 } after rotation');
+
+  // If subscribe returns AlreadySubscribed error, fallback one-shot { balance: 1 } must be dispatched
+  sockets[1].triggerMessage({
+    msg_type: 'balance',
+    echo_req: balSubReq,
+    error: { code: 'AlreadySubscribed', message: 'Already subscribed' },
+  });
+  assert.ok(
+    sockets[1].sentPayloads.some((p) => p.balance === 1 && p.subscribe === undefined),
+    'Fallback one-shot { balance: 1 } must be sent on AlreadySubscribed'
+  );
+
+  // One-shot balance payload (even without subscription.id) promotes to LIVE
+  sockets[1].triggerMessage({
+    msg_type: 'balance',
+    balance: { amount: 9866.97, currency: 'USD', account_id: 'acct-uuid-9866' },
+  });
+  assert.equal(balMgr.getSnapshot().freshness, 'LIVE');
+  assert.equal(evalReadiness().ready, true);
+
+  unsub();
+  await wsClient.logout();
+  assert.equal(balMgr.getSnapshot().freshness, 'UNAVAILABLE');
+});
+
+test('18. BalanceManager enforces sessionGeneration, timestamp monotonicity, account identity, and non-revivable STALE guards', () => {
+  const mgr = new BalanceManager(30_000);
+  const t0 = 5_000_000;
+
+  // Reject live update when no account is selected
+  assert.equal(
+    mgr.applyLiveBalanceUpdate({ amount: 100, login_id: 'VRTC1', sessionGeneration: 0 }, t0).accepted,
+    false
+  );
+
+  mgr.beginSession(2, { account_id: 'acct-2', login_id: 'VRTC2' }, t0);
+  mgr.applyAuthorize(
+    { account_id: 'acct-2', login_id: 'VRTC2', is_virtual: true, currency: 'USD', balance: 9866.97, sessionGeneration: 2 },
+    t0
+  );
+  assert.equal(mgr.getSnapshot(t0).freshness, 'SYNCING');
+
+  // Stale sessionGeneration rejected
+  const staleGenRes = mgr.applyLiveBalanceUpdate(
+    { amount: 9999, login_id: 'VRTC2', sessionGeneration: 1 },
+    t0 + 100
+  );
+  assert.equal(staleGenRes.accepted, false);
+  assert.equal(mgr.getSnapshot(t0 + 100).freshness, 'SYNCING');
+
+  // Invalid / expired eventTimestamp rejected
+  const staleTsRes = mgr.applyLiveBalanceUpdate(
+    { amount: 9866.97, login_id: 'VRTC2', sessionGeneration: 2, eventTimestamp: t0 - 40_000 },
+    t0 + 100
+  );
+  assert.equal(staleTsRes.accepted, false);
+  assert.equal(mgr.getSnapshot(t0 + 100).freshness, 'SYNCING');
+
+  // Mismatched account_id even with matching login_id rejected
+  const badAcctRes = mgr.applyLiveBalanceUpdate(
+    { amount: 9866.97, login_id: 'VRTC2', account_id: 'acct-OTHER', sessionGeneration: 2 },
+    t0 + 100
+  );
+  assert.equal(badAcctRes.accepted, false);
+
+  // Valid update transitions to LIVE
+  const validRes = mgr.applyLiveBalanceUpdate(
+    { amount: 9866.97, login_id: 'VRTC2', account_id: 'acct-2', sessionGeneration: 2 },
+    t0 + 200
+  );
+  assert.equal(validRes.accepted, true);
+  assert.equal(mgr.getSnapshot(t0 + 200).freshness, 'LIVE');
+
+  // Out-of-order older timestamp rejected once LIVE
+  const oooRes = mgr.applyLiveBalanceUpdate(
+    { amount: 9000, login_id: 'VRTC2', sessionGeneration: 2 },
+    t0 + 150
+  );
+  assert.equal(oooRes.accepted, false);
+  assert.equal(mgr.getSnapshot(t0 + 200).amount, 9866.97);
+
+  // Heartbeat AFTER staleThresholdMs cannot revive stale snapshot back to LIVE
+  mgr.touchHeartbeat(t0 + 35_000, 2);
+  assert.equal(mgr.getSnapshot(t0 + 35_000).freshness, 'STALE');
+  assert.equal(mgr.isFreshForTrading(t0 + 35_000), false);
+});
+
+test('19. Options API underlying_symbol proposal, verified quote expiry, correlated buyProposal, and POC monitoring cleanup', async () => {
+  const sockets: MockWebSocket[] = [];
+  const mockFetch = (async (url: string) => {
+    if (url.includes('/otp')) {
+      return new Response(
+        JSON.stringify({ ok: true, wsUrl: 'wss://api.derivws.com/trading/v1/options/ws/otp?token=otp_buy_test' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch;
+
+  const wsClient = new DerivWebSocketClient({
+    wsFactory: (u) => {
+      const s = new MockWebSocket(u);
+      sockets.push(s);
+      return s;
+    },
+    fetchImpl: mockFetch,
+    balanceManager: new BalanceManager(),
+    portfolioReconciler: new PortfolioReconciler(),
+  });
+
+  await wsClient.completeServerSession({
+    authMethod: 'oauth2_pkce',
+    appId: '33zsnNh6YJ2HWm30oZZJR',
+    accounts: [{ account: 'VRTC777', account_id: 'acct-777', account_type: 'demo', currency: 'USD', balance: 5000 }],
+    selectedAccountId: 'VRTC777',
+  });
+  const sock = sockets[0];
+  sock.triggerOpen();
+  sock.triggerMessage({
+    msg_type: 'balance',
+    balance: { balance: 5000, currency: 'USD', loginid: 'VRTC777', account_id: 'acct-777' },
+    subscription: { id: 'sub_bal_777' },
+  });
+
+  // 1. Options API OTP session sends underlying_symbol (not legacy symbol)
+  const propPromise = wsClient.requestProposalQuote({
+    symbol: '1HZ10V',
+    amount: 5,
+    contract_type: 'CALL',
+    duration: 5,
+    duration_unit: 't',
+  });
+  const propReq = sock.sentPayloads.find((p) => p.proposal === 1);
+  assert.ok(propReq, 'Proposal payload must be sent');
+  assert.equal(propReq.underlying_symbol, '1HZ10V');
+  assert.equal('symbol' in propReq, false);
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  sock.triggerMessage({
+    req_id: propReq.req_id,
+    msg_type: 'proposal',
+    proposal: {
+      id: 'prop_abc_123',
+      ask_price: 5.05,
+      payout: 9.75,
+      spot: 100.25,
+      spot_time: nowSec,
+      date_start: nowSec,
+      date_expiry: nowSec + 10,
+      valid_until: nowSec + 8,
+      underlying_symbol: '1HZ10V',
+    },
+  });
+
+  const quote = await propPromise;
+  assert.equal(quote.proposalId, 'prop_abc_123');
+  assert.equal(quote.askPrice, 5.05);
+  assert.ok(quote.expiresAt <= (nowSec + 8) * 1000);
+  assert.ok(quote.spotTimeMs);
+
+  // Stale quote rejection in validateTradeRiskGate
+  const staleGate = validateTradeRiskGate({
+    balance: 5000,
+    balanceFreshness: 'LIVE',
+    stake: 5,
+    symbol: '1HZ10V',
+    openExposure: 0,
+    maxOpenExposure: 500,
+    openContractsCount: 0,
+    maxConcurrentContracts: 3,
+    dailyLoss: 0,
+    maxDailyLoss: 200,
+    drawdownPercent: 0,
+    maxDrawdownPercent: 5,
+    consecutiveLosses: 0,
+    maxConsecutiveLosses: 3,
+    proposal: quote,
+    now: (nowSec + 9) * 1000,
+  });
+  assert.equal(staleGate.approved, false);
+  assert.ok(staleGate.blockers.some((b) => /expired|stale/i.test(b)));
+
+  // Rejects proposal with stale spot_time directly from requestProposalQuote
+  const stalePropPromise = wsClient.requestProposalQuote({
+    symbol: '1HZ10V',
+    amount: 5,
+    contract_type: 'CALL',
+    duration: 5,
+    duration_unit: 't',
+  });
+  const stalePropReq = sock.sentPayloads.filter((p) => p.proposal === 1).pop();
+  sock.triggerMessage({
+    req_id: stalePropReq.req_id,
+    msg_type: 'proposal',
+    proposal: {
+      id: 'prop_stale_spot',
+      ask_price: 5.0,
+      spot_time: nowSec - 30,
+      date_expiry: nowSec + 60,
+    },
+  });
+  await assert.rejects(stalePropPromise, /stale/i);
+
+  // 2. buyProposal uses proposal ID, quote askPrice as max price, attaches req_id, and subscribes POC by contract_id
+  const buyPromise = wsClient.buyProposal({
+    proposalId: quote.proposalId,
+    maxPrice: quote.askPrice,
+  });
+  const buyReq = sock.sentPayloads.find((p) => p.buy === 'prop_abc_123');
+  assert.ok(buyReq, 'Buy payload must reference proposalId');
+  assert.equal(buyReq.price, 5.05);
+  assert.equal(typeof buyReq.req_id, 'number');
+
+  sock.triggerMessage({
+    req_id: buyReq.req_id,
+    msg_type: 'buy',
+    buy: {
+      contract_id: 888999,
+      buy_price: 5.05,
+      payout: 9.75,
+      balance_after: 4994.95,
+      transaction_id: 555111,
+    },
+  });
+  const buyRes = await buyPromise;
+  assert.equal(buyRes.contractId, 888999);
+  assert.equal(buyRes.buyPrice, 5.05);
+
+  // Must subscribe proposal_open_contract for exact contract_id
+  const pocSubReq = sock.sentPayloads.find(
+    (p) => p.proposal_open_contract === 1 && p.contract_id === 888999 && p.subscribe === 1
+  );
+  assert.ok(pocSubReq, 'Must subscribe to proposal_open_contract for purchased contract_id');
+
+  // Tracking subscription id and cleaning up on settlement
+  sock.triggerMessage({
+    msg_type: 'proposal_open_contract',
+    subscription: { id: 'sub_poc_888999' },
+    proposal_open_contract: { contract_id: 888999, is_sold: 0, is_valid_to_sell: 1, profit: 0.45 },
+  });
+  assert.ok(wsClient.getRegisteredSubscriptions().some((s) => s.key === 'poc:888999' && s.subscriptionId === 'sub_poc_888999'));
+
+  sock.triggerMessage({
+    msg_type: 'proposal_open_contract',
+    proposal_open_contract: { contract_id: 888999, is_sold: 1, status: 'won', profit: 4.7, balance_after: 5004.7 },
+  });
+  assert.ok(sock.sentPayloads.some((p) => p.forget === 'sub_poc_888999'));
+  assert.equal(wsClient.getRegisteredSubscriptions().some((s) => s.key === 'poc:888999'), false);
+
+  await wsClient.logout();
+});
+
+test('20. Purchase timeout reconciliation requires verified account statement + portfolio check before unlocking retry', async () => {
+  const reconciler = new PortfolioReconciler();
+  const t0 = Date.now();
+
+  const reg = reconciler.registerIntent({
+    intentId: 'int_timeout_stmt',
+    accountId: 'VRTC100',
+    symbol: '1HZ10V',
+    contractType: 'CALL',
+    amount: 10,
+    duration: 1,
+    durationUnit: 'ticks',
+    proposalId: 'prop_timeout_1',
+    now: t0,
+  });
+  assert.equal(reg.ok, true);
+  reconciler.markIntentTimedOut('int_timeout_stmt');
+  assert.equal(reconciler.hasPendingReconciliation(), true);
+
+  // If statement query failed (statementChecked: false), empty portfolio must NOT unlock blind retry!
+  const unverifiedRec = reconciler.reconcile({
+    openTrades: [],
+    broker: {
+      openPortfolioContracts: [],
+      settledTransactions: [],
+      portfolioChecked: true,
+      statementChecked: false,
+    },
+  });
+  assert.equal(unverifiedRec.stillPendingReconciliation, true);
+  assert.equal(reconciler.hasPendingReconciliation(), true);
+
+  // Once account statement confirms a settled transaction matching the timed-out purchase, record & resolve cleanly
+  const stmtMatchRec = reconciler.reconcile({
+    openTrades: [],
+    broker: {
+      openPortfolioContracts: [],
+      settledTransactions: [
+        {
+          contract_id: 444555,
+          action_type: 'buy',
+          amount: -10,
+          shortcode: 'CALL_1HZ10V_10_1T',
+          transaction_time: Math.floor(t0 / 1000) + 1,
+          balance_after: 9990,
+        },
+      ],
+      portfolioChecked: true,
+      statementChecked: true,
+    },
+  });
+  assert.deepEqual(stmtMatchRec.newlySettledContractIds, [444555]);
+  assert.equal(stmtMatchRec.stillPendingReconciliation, false);
+  assert.equal(reconciler.hasPendingReconciliation(), false);
+});
+
+test('21. BalanceManager & DerivWebSocketClient correlate connection_id and req_id for SYNCING -> LIVE while rejecting stale or mismatched connections', async () => {
+  const sockets: MockWebSocket[] = [];
+  const mockFetch = (async (url: string) => {
+    if (url.includes('/otp')) {
+      return new Response(
+        JSON.stringify({ ok: true, wsUrl: 'wss://api.derivws.com/trading/v1/options/ws/otp?token=otp_corr' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch;
+
+  const balMgr = new BalanceManager(30_000);
+  const wsClient = new DerivWebSocketClient({
+    wsFactory: (u) => {
+      const s = new MockWebSocket(u);
+      sockets.push(s);
+      return s;
+    },
+    fetchImpl: mockFetch,
+    balanceManager: balMgr,
+    portfolioReconciler: new PortfolioReconciler(),
+  });
+
+  // 1) Simulate REST /options/accounts returning UUID account_id without loginid
+  await wsClient.completeServerSession({
+    authMethod: 'oauth2_pkce',
+    appId: '33zsnNh6YJ2HWm30oZZJR',
+    accounts: [
+      { account: 'acct-uuid-555', account_id: 'acct-uuid-555', account_type: 'demo', currency: 'USD', balance: 4250.5 },
+    ],
+    selectedAccountId: 'acct-uuid-555',
+  });
+
+  const conn1 = wsClient.getActiveConnectionId();
+  assert.ok(conn1, 'Active connection_id must be allocated on session start');
+  assert.equal(balMgr.getSnapshot().connection_id, conn1);
+
+  sockets[0].triggerOpen();
+  assert.equal(balMgr.getSnapshot().freshness, 'SYNCING');
+
+  const balReq1 = sockets[0].sentPayloads.find((p) => p.balance === 1 && p.subscribe === 1);
+  assert.ok(balReq1 && typeof balReq1.req_id === 'number', 'Must assign numeric req_id to outbound balance subscription');
+  assert.equal(balMgr.hasRegisteredBalanceRequest(balReq1.req_id, wsClient.getSessionGeneration(), conn1), true);
+
+  // 2) Mismatched connection_id on incoming payload must be rejected cleanly
+  const badConnRes = balMgr.applyLiveBalanceUpdate({
+    amount: 9999,
+    login_id: 'VRTC555',
+    source: 'SUBSCRIPTION',
+    sessionGeneration: wsClient.getSessionGeneration(),
+    req_id: balReq1.req_id,
+    connection_id: 'conn_wrong_socket',
+  });
+  assert.equal(badConnRes.accepted, false);
+  assert.equal(balMgr.getSnapshot().freshness, 'SYNCING');
+
+  // 3) Valid correlated WS balance response (even when WS returns VRTC555 instead of REST UUID acct-uuid-555)
+  // must bind login_id, promote SYNCING -> LIVE immediately, and satisfy TradeReadinessGuard
+  sockets[0].triggerMessage({
+    msg_type: 'balance',
+    req_id: balReq1.req_id,
+    balance: { balance: 4250.5, currency: 'USD', loginid: 'VRTC555' },
+    subscription: { id: 'sub_corr_555' },
+  });
+
+  const snap1 = balMgr.getSnapshot();
+  assert.equal(snap1.freshness, 'LIVE');
+  assert.equal(snap1.amount, 4250.5);
+  assert.equal(snap1.login_id, 'VRTC555');
+  assert.equal(snap1.account_id, 'acct-uuid-555');
+  assert.equal(snap1.connection_id, conn1);
+  assert.equal(wsClient.getConfirmedAccountId(), 'VRTC555');
+  assert.equal(wsClient.getSelectedAccount()?.account, 'VRTC555');
+
+  const guard = new TradeReadinessGuard();
+  const readiness = guard.evaluate({
+    hasValidAuth: wsClient.hasRealToken() && !wsClient.isTokenExpired(),
+    tokenExpired: wsClient.isTokenExpired(),
+    selectedAccountId: wsClient.getSelectedAccount()?.account || null,
+    confirmedAccountId: wsClient.getConfirmedAccountId(),
+    connectionState: wsClient.getConnectionState(),
+    isSessionAuthenticated: wsClient.isAuthorized(),
+    balanceSnapshot: wsClient.getBalanceSnapshot(),
+    requiredSubscriptionsActive: wsClient.getSubscriptionStatus().requiredSubscriptionsActive,
+    hasUnresolvedPurchaseTimeout: false,
+    hasPendingReconciliation: false,
+    emergencyStopActive: false,
+    symbol: '1HZ10V',
+    stake: 5,
+    winRate: 0.65,
+    confidence: 0.65,
+    sizingMode: 'KELLY_HALF',
+    maxStakePercent: 0.05,
+    minStake: 0.35,
+    openExposure: 0,
+    maxOpenExposure: 1000,
+    openContractsCount: 0,
+    maxConcurrentContracts: 3,
+    dailyLoss: 0,
+    maxDailyLoss: 500,
+    drawdownPercent: 0,
+    maxDrawdownPercent: 5,
+    consecutiveLosses: 0,
+    maxConsecutiveLosses: 3,
+  });
+  assert.equal(readiness.ready, true);
+  assert.equal(readiness.flags.FRESH_BALANCE, true);
+  assert.equal(readiness.flags.ACCOUNT_IDENTITY_CONFIRMED, true);
+
+  // 4) Once canonical loginid VRTC555 is bound, a cross-account VRTC999 frame must be rejected even on active connection_id
+  const crossAcctRes = balMgr.applyLiveBalanceUpdate({
+    amount: 12345,
+    login_id: 'VRTC999',
+    source: 'SUBSCRIPTION',
+    sessionGeneration: wsClient.getSessionGeneration(),
+    connection_id: conn1,
+  });
+  assert.equal(crossAcctRes.accepted, false);
+  assert.equal(balMgr.getSnapshot().amount, 4250.5);
+
+  // 5) Reconnect / new session rotates connection_id; stale req_id from conn1 must be rejected even without sessionGeneration param
+  await wsClient.completeServerSession({
+    authMethod: 'oauth2_pkce',
+    appId: '33zsnNh6YJ2HWm30oZZJR',
+    accounts: [
+      { account: 'VRTC555', account_id: 'acct-uuid-555', account_type: 'demo', currency: 'USD', balance: 4250.5 },
+    ],
+    selectedAccountId: 'VRTC555',
+  });
+  const conn2 = wsClient.getActiveConnectionId();
+  assert.ok(conn2 && conn2 !== conn1);
+  sockets[1].triggerOpen();
+  assert.equal(balMgr.getSnapshot().freshness, 'SYNCING');
+
+  const staleReqRes = balMgr.applyLiveBalanceUpdate({
+    amount: 7777,
+    login_id: 'VRTC555',
+    source: 'SUBSCRIPTION',
+    req_id: balReq1.req_id,
+    connection_id: conn2,
+  });
+  assert.equal(staleReqRes.accepted, false);
+  assert.equal(balMgr.getSnapshot().freshness, 'SYNCING');
+
+  const balReq2 = sockets[1].sentPayloads.find((p) => p.balance === 1 && p.subscribe === 1);
+  assert.ok(balReq2 && typeof balReq2.req_id === 'number');
+  sockets[1].triggerMessage({
+    msg_type: 'balance',
+    req_id: balReq2.req_id,
+    balance: { balance: 4261.25, currency: 'USD' }, // payload omits loginid/account_id; mapped via req_id + conn2
+  });
+  assert.equal(balMgr.getSnapshot().freshness, 'LIVE');
+  assert.equal(balMgr.getSnapshot().amount, 4261.25);
+
+  await wsClient.logout();
+});
+
+

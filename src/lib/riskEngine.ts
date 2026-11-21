@@ -20,11 +20,16 @@ export interface TradeProposalQuote {
   proposalId: string;
   askPrice: number;
   payout?: number;
+  spot?: number;
+  spotTimeMs?: number;
+  dateStartMs?: number;
+  dateExpiryMs?: number;
+  brokerQuoteExpiresAtMs?: number;
   symbol?: string;
   currency?: string;
   accountId?: string;
   fetchedAt: number;
-  expiresAt?: number;
+  expiresAt: number;
 }
 
 export interface TradeRiskValidationParams {
@@ -325,12 +330,24 @@ export function validateTradeRiskGate(params: TradeRiskValidationParams): TradeR
 
   if (params.proposal) {
     const p = params.proposal;
-    if (!p.proposalId) {
+    if (!p.proposalId || !String(p.proposalId).trim()) {
       blockers.push('Missing proposal ID.');
     }
+    if (!Number.isFinite(p.askPrice) || p.askPrice <= 0) {
+      blockers.push('Deriv proposal quote is missing a valid positive ask_price.');
+    }
     const maxAgeMs = 15_000;
-    if ((p.expiresAt && now > p.expiresAt) || now - p.fetchedAt > maxAgeMs) {
+    if (!Number.isFinite(p.expiresAt) || now > p.expiresAt || now - p.fetchedAt > maxAgeMs) {
       blockers.push('Proposal quote is stale or expired; fetch a fresh proposal.');
+    }
+    if (p.spotTimeMs !== undefined && (!Number.isFinite(p.spotTimeMs) || p.spotTimeMs <= 0 || now - p.spotTimeMs > maxAgeMs)) {
+      blockers.push('Proposal quote spot_time is stale or invalid; fetch a fresh proposal.');
+    }
+    if (p.brokerQuoteExpiresAtMs !== undefined && (!Number.isFinite(p.brokerQuoteExpiresAtMs) || now > p.brokerQuoteExpiresAtMs)) {
+      blockers.push('Broker proposal validity window expired; fetch a fresh proposal.');
+    }
+    if (p.dateExpiryMs !== undefined && (!Number.isFinite(p.dateExpiryMs) || p.dateExpiryMs <= now)) {
+      blockers.push('Proposal contract date_expiry is already in the past.');
     }
     if (p.askPrice > params.stake * 1.05 + 0.01) {
       blockers.push(`Proposal ask price ($${p.askPrice.toFixed(2)}) exceeds authorized stake ($${params.stake.toFixed(2)}).`);

@@ -152,6 +152,7 @@ export default function App() {
   const [durationUnit, setDurationUnit] = useState<TradeDurationUnit>(() => settings.general.defaultDurationUnit ?? 'minutes');
   const [direction, setDirection] = useState<'CALL' | 'PUT'>(() => settings.general.defaultDirection ?? 'CALL');
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const isExecutingRef = useRef<boolean>(false);
   const [isSniperTriggerArmed, setIsSniperTriggerArmed] = useState<boolean>(false);
 
   // Positions & Balance (Driven strictly by live Deriv authorize & BalanceManager stream)
@@ -208,8 +209,9 @@ export default function App() {
   const [localLiveMode, setLocalLiveMode] = useState<boolean>(false);
   const isLiveMode = userProfile ? userProfile.accountMode === 'REAL' : localLiveMode;
 
-  // Subscribe to centralized BalanceManager snapshots
+  // Subscribe to centralized BalanceManager snapshots and keep staleness reactive
   useEffect(() => {
+    setBalanceSnapshot(balanceManager.getSnapshot());
     const unsub = balanceManager.subscribe((snap) => {
       setBalanceSnapshot(snap);
       if (snap.connection_state === 'ONLINE' || snap.freshness === 'LIVE' || snap.freshness === 'SYNCING') {
@@ -219,7 +221,13 @@ export default function App() {
         setBalance(0);
       }
     });
-    return () => unsub();
+    const staleCheckInterval = setInterval(() => {
+      balanceManager.refreshStaleness();
+    }, 5000);
+    return () => {
+      clearInterval(staleCheckInterval);
+      unsub();
+    };
   }, []);
 
   // Load persistent trade history & evolution from Firestore on user login
@@ -835,16 +843,21 @@ export default function App() {
         }
       } else if (data.msg_type === 'connection_state') {
         if (data.state === 'ONLINE' && portfolioReconciler.hasPendingReconciliation()) {
-          derivWS.requestReconciliationSnapshot().then(({ openContracts, settledTransactions }) => {
+          derivWS.requestReconciliationSnapshot().then(({ openContracts, settledTransactions, portfolioVerified, statementVerified }) => {
             const rec = portfolioReconciler.reconcile({
               openTrades: openTradesRef.current,
-              broker: { openPortfolioContracts: openContracts, settledTransactions },
+              broker: {
+                openPortfolioContracts: openContracts,
+                settledTransactions,
+                portfolioChecked: portfolioVerified,
+                statementChecked: statementVerified,
+              },
             });
             openTradesRef.current = rec.updatedOpenTrades;
             setOpenTrades(rec.updatedOpenTrades);
             if (!rec.stillPendingReconciliation) {
               balanceManager.clearReconciliationPending();
-              addLogRef.current?.('Portfolio reconciliation complete against Deriv broker snapshot.', 'info');
+              addLogRef.current?.('Portfolio & statement reconciliation complete against Deriv broker snapshot.', 'info');
             }
           }).catch(() => {});
         }
@@ -904,7 +917,8 @@ export default function App() {
                 currentSpot: typeof poc.current_spot === 'number' ? poc.current_spot : trade.currentSpot,
                 barrier: poc.barrier ?? trade.barrier,
                 isDerivRealTime: true,
-                isValidToSell: Boolean(poc.is_valid_to_sell),
+                isValidToSell:
+                  poc.is_sold !== 1 && (poc.is_valid_to_sell === 1 || poc.is_valid_to_sell === true),
                 status: poc.status,
                 dateExpiry: poc.date_expiry,
                 dateStart: poc.date_start,
@@ -937,7 +951,8 @@ export default function App() {
                 currentSpot: typeof poc.current_spot === 'number' ? poc.current_spot : trade.currentSpot,
                 barrier: poc.barrier ?? trade.barrier,
                 isDerivRealTime: true,
-                isValidToSell: Boolean(poc.is_valid_to_sell),
+                isValidToSell:
+                  poc.is_sold !== 1 && (poc.is_valid_to_sell === 1 || poc.is_valid_to_sell === true),
                 status: poc.status,
                 dateExpiry: poc.date_expiry,
                 dateStart: poc.date_start,
@@ -961,31 +976,18 @@ export default function App() {
           updateBalancesRef.current?.(isVirt ? nextBal : undefined, !isVirt ? nextBal : undefined);
         }
         if (contractId) {
-          let linkedRef = false;
-          openTradesRef.current = openTradesRef.current.map((t) => {
-            if (!linkedRef && !t.contract_id) {
-              linkedRef = true;
-              const pendingTimer = tradeTimeoutsRef.current.get(t.id);
-              if (pendingTimer) {
-                clearTimeout(pendingTimer);
-                tradeTimeoutsRef.current.delete(t.id);
-              }
-              portfolioReconciler.markIntentConfirmed(t.id, contractId);
-              return {
-                ...t,
-                contract_id: contractId,
-                amount: typeof buyData.buy_price === 'number' ? Number(buyData.buy_price.toFixed(2)) : t.amount,
-                payout: typeof buyData.payout === 'number' ? Number(buyData.payout.toFixed(2)) : t.payout,
-                isDerivRealTime: true,
-              };
-            }
-            return t;
-          });
-          setOpenTrades((prev) => {
-            let linked = false;
-            return prev.map((t) => {
-              if (!linked && !t.contract_id) {
-                linked = true;
+          const alreadyLinked = openTradesRef.current.some((t) => t.contract_id === contractId);
+          if (!alreadyLinked) {
+            let linkedRef = false;
+            openTradesRef.current = openTradesRef.current.map((t) => {
+              if (!linkedRef && !t.contract_id) {
+                linkedRef = true;
+                const pendingTimer = tradeTimeoutsRef.current.get(t.id);
+                if (pendingTimer) {
+                  clearTimeout(pendingTimer);
+                  tradeTimeoutsRef.current.delete(t.id);
+                }
+                portfolioReconciler.markIntentConfirmed(t.id, contractId);
                 return {
                   ...t,
                   contract_id: contractId,
@@ -996,10 +998,28 @@ export default function App() {
               }
               return t;
             });
-          });
-          derivWS.subscribeProposalOpenContract(contractId);
-          addLogRef.current?.(`Deriv contract #${contractId} confirmed. Streaming live real-time P/L.`, 'info');
+            setOpenTrades((prev) => {
+              if (prev.some((t) => t.contract_id === contractId)) return prev;
+              let linked = false;
+              return prev.map((t) => {
+                if (!linked && !t.contract_id) {
+                  linked = true;
+                  return {
+                    ...t,
+                    contract_id: contractId,
+                    amount: typeof buyData.buy_price === 'number' ? Number(buyData.buy_price.toFixed(2)) : t.amount,
+                    payout: typeof buyData.payout === 'number' ? Number(buyData.payout.toFixed(2)) : t.payout,
+                    isDerivRealTime: true,
+                  };
+                }
+                return t;
+              });
+            });
+            derivWS.subscribeProposalOpenContract(contractId);
+            addLogRef.current?.(`Deriv contract #${contractId} confirmed. Streaming live real-time P/L.`, 'info');
+          }
         }
+        isExecutingRef.current = false;
         setIsExecuting(false);
       } else if (data.msg_type === 'sell' && data.sell) {
         const sellData = data.sell;
@@ -1053,6 +1073,7 @@ export default function App() {
         if (derivWS.hasRealToken()) {
           derivWS.refreshBalance();
         }
+        isExecutingRef.current = false;
         setIsExecuting(false);
         sound.play('alert');
         addLogRef.current?.(`Deriv contract execution rejected: ${data.error.message || 'Unknown error'}`, 'error');
@@ -1483,7 +1504,7 @@ export default function App() {
       },
       trailingStopOptions?: TrailingStopConfig
     ) => {
-      if (isExecuting) return;
+      if (isExecuting || isExecutingRef.current) return;
 
       const entrySpot = currentPriceRef.current;
       if (!entrySpot || entrySpot <= 0) {
@@ -1511,7 +1532,7 @@ export default function App() {
       const maxAllowedDrawdown = botState.maxSessionDrawdownPercent || config.risk.maxSessionDrawdownPercent;
       const subStatus = derivWS.getSubscriptionStatus();
       const selectedAcctId = derivWS.getSelectedAccount()?.account || loginid;
-      const confirmedAcctId = derivWS.getConfirmedAccountId() || loginid;
+      const confirmedAcctId = derivWS.getConfirmedAccountId();
 
       const clientOrderKey = portfolioReconciler.buildClientOrderKey({
         accountId: selectedAcctId || 'UNSELECTED',
@@ -1522,8 +1543,7 @@ export default function App() {
         durationUnit: tradeDurationUnit,
       });
 
-      // Single centralized TradeReadinessGuard gate across ALL 10 flags + risk bounds
-      const readiness = tradeReadinessGuard.evaluate({
+      const baseReadinessInput = {
         hasValidAuth: derivWS.hasRealToken() && !derivWS.isTokenExpired(),
         tokenExpired: derivWS.isTokenExpired(),
         selectedAccountId: selectedAcctId || null,
@@ -1553,18 +1573,20 @@ export default function App() {
         consecutiveLosses: botState.consecutiveLosses,
         maxConsecutiveLosses: botState.maxConsecutiveLosses,
         duplicateIntentActive: portfolioReconciler.hasInFlightOrPendingIntent(clientOrderKey),
-      });
+      };
 
-      if (!readiness.ready) {
+      // Pre-proposal readiness guard across ALL 10 flags + risk bounds
+      const preReadiness = tradeReadinessGuard.evaluate(baseReadinessInput);
+      if (!preReadiness.ready) {
         hostHaptic('error');
-        const primaryBlocker = readiness.blockers[0] || 'Trade execution blocked by readiness guard.';
+        const primaryBlocker = preReadiness.blockers[0] || 'Trade execution blocked by readiness guard.';
         hostToast(primaryBlocker);
-        addLog(`🛑 [READINESS GUARD] ${readiness.blockers.join(' | ')}`, 'warn');
+        addLog(`🛑 [READINESS GUARD] ${preReadiness.blockers.join(' | ')}`, 'warn');
         sound.play('alert');
-        if (!readiness.flags.VALID_AUTHENTICATION) {
+        if (!preReadiness.flags.VALID_AUTHENTICATION) {
           setIsTokenModalOpen(true);
         }
-        if (source !== 'MANUAL' && !readiness.flags.RISK_ENGINE_APPROVAL && coreRiskMetrics.maxDrawdownPercent >= maxAllowedDrawdown) {
+        if (source !== 'MANUAL' && !preReadiness.flags.RISK_ENGINE_APPROVAL && coreRiskMetrics.maxDrawdownPercent >= maxAllowedDrawdown) {
           setBotState((b) => ({ ...b, enabled: false }));
         }
         return;
@@ -1591,8 +1613,63 @@ export default function App() {
         return;
       }
 
+      isExecutingRef.current = true;
       setIsExecuting(true);
       hostHaptic('medium');
+
+      const unitSuffix = tradeDurationUnit === 'ticks' ? 't' : tradeDurationUnit === 'seconds' ? 's' : 'm';
+
+      // Step 1: Request authoritative Deriv proposal & validate real quote expiry / ask_price
+      let proposalQuote;
+      try {
+        proposalQuote = await derivWS.requestProposalQuote({
+          symbol: selectedSymbol,
+          amount: tradeStake,
+          contract_type: tradeDirection,
+          duration: validDuration,
+          duration_unit: unitSuffix,
+          currency: currency || 'USD',
+        });
+      } catch (propErr: any) {
+        portfolioReconciler.markIntentFailed(tradeId);
+        isExecutingRef.current = false;
+        setIsExecuting(false);
+        hostHaptic('error');
+        const msg = propErr?.message || 'Deriv proposal request failed.';
+        hostToast(msg);
+        addLog(`Deriv proposal rejected: ${msg}`, 'error');
+        sound.play('alert');
+        return;
+      }
+
+      // Step 2: Re-evaluate TradeReadinessGuard WITH the live verified proposal quote before sending buy
+      const postReadiness = tradeReadinessGuard.evaluate({
+        ...baseReadinessInput,
+        balanceSnapshot: derivWS.getBalanceSnapshot(),
+        confirmedAccountId: derivWS.getConfirmedAccountId(),
+        connectionState: derivWS.getConnectionState(),
+        isSessionAuthenticated: derivWS.isAuthorized(),
+        requiredSubscriptionsActive: derivWS.getSubscriptionStatus().requiredSubscriptionsActive,
+        hasUnresolvedPurchaseTimeout: portfolioReconciler.hasUnresolvedTimeout(),
+        hasPendingReconciliation: portfolioReconciler.hasPendingReconciliation(),
+        duplicateIntentActive: false, // Current intent is tradeId itself
+        proposal: proposalQuote,
+      });
+
+      if (!postReadiness.ready) {
+        portfolioReconciler.markIntentFailed(tradeId);
+        isExecutingRef.current = false;
+        setIsExecuting(false);
+        hostHaptic('error');
+        const primaryBlocker = postReadiness.blockers[0] || 'Proposal failed post-quote readiness guard.';
+        hostToast(primaryBlocker);
+        addLog(`🛑 [QUOTE GUARD] ${postReadiness.blockers.join(' | ')}`, 'warn');
+        sound.play('alert');
+        return;
+      }
+
+      portfolioReconciler.attachProposalId(tradeId, proposalQuote.proposalId);
+      const maxPurchasePrice = Number(proposalQuote.askPrice.toFixed(2));
 
       let tslProps: Partial<TradeRecord> = {};
       if (trailingStopOptions?.enabled) {
@@ -1631,7 +1708,9 @@ export default function App() {
         timestamp: new Date().toISOString(),
         mode: isLiveMode ? 'REAL' : 'DEMO',
         symbol: selectedSymbol,
-        amount: tradeStake,
+        amount: maxPurchasePrice,
+        payout: proposalQuote.payout,
+        proposalId: proposalQuote.proposalId,
         decision: tradeDirection === 'CALL' ? 'BUY' : 'SELL',
         result: 'PENDING',
         profit: 0,
@@ -1647,6 +1726,8 @@ export default function App() {
         duration: validDuration,
         durationUnit: tradeDurationUnit,
         entryPrice: entrySpot,
+        dateExpiry: proposalQuote.dateExpiryMs ? Math.floor(proposalQuote.dateExpiryMs / 1000) : undefined,
+        isValidToSell: false,
         isSniperTrade: sniperData?.isSniperTrade,
         confluenceScore: sniperData?.confluenceScore,
         ...tslProps,
@@ -1655,65 +1736,144 @@ export default function App() {
       openTradesRef.current = [newTrade, ...openTradesRef.current];
       setOpenTrades((prev) => [newTrade, ...prev]);
 
-      const unitSuffix = tradeDurationUnit === 'ticks' ? 't' : tradeDurationUnit === 'seconds' ? 's' : 'm';
       const sniperTag = sniperData?.isSniperTrade ? ` [SNIPER ${sniperData.confluenceScore}%]` : '';
       const tslTag = trailingStopOptions?.enabled
         ? ` [TSL Stop: ${tslProps.currentTrailingStopPrice?.toFixed(decimals)}]`
         : '';
 
-      // Timeout transitions into RECONCILIATION_PENDING — never permits blind immediate retry
+      const triggerStatementReconciliation = (reasonMsg: string) => {
+        portfolioReconciler.markIntentTimedOut(tradeId);
+        balanceManager.markReconciliationPending();
+        isExecutingRef.current = false;
+        setIsExecuting(false);
+        addLogRef.current?.(
+          `⏳ Order ${tradeId} uncertain (${reasonMsg}) — entered RECONCILIATION_PENDING lock. Verifying Deriv account statement & portfolio before allowing new purchases...`,
+          'warn'
+        );
+        derivWS
+          .requestReconciliationSnapshot()
+          .then(({ openContracts, settledTransactions, portfolioVerified, statementVerified }) => {
+            const rec = portfolioReconciler.reconcile({
+              openTrades: openTradesRef.current,
+              broker: {
+                openPortfolioContracts: openContracts,
+                settledTransactions,
+                portfolioChecked: portfolioVerified,
+                statementChecked: statementVerified,
+              },
+            });
+            const recoveredContractId = rec.matchedOpenContractIds[0];
+            openTradesRef.current = rec.updatedOpenTrades
+              .map((t) =>
+                t.id === tradeId && !t.contract_id && recoveredContractId
+                  ? { ...t, contract_id: recoveredContractId, isDerivRealTime: true }
+                  : t
+              )
+              .filter((t) => t.id !== tradeId || Boolean(t.contract_id));
+            setOpenTrades(openTradesRef.current);
+
+            if (recoveredContractId) {
+              derivWS.subscribeProposalOpenContract(recoveredContractId);
+            }
+            if (!rec.stillPendingReconciliation) {
+              balanceManager.clearReconciliationPending();
+              derivWS.refreshBalance();
+              addLogRef.current?.(
+                `✅ Order ${tradeId} reconciled via Deriv account statement & portfolio.`,
+                'info'
+              );
+            } else {
+              addLogRef.current?.(
+                `⚠️ Statement verification incomplete for ${tradeId}; trading remains locked until statement & portfolio sync completes.`,
+                'warn'
+              );
+            }
+          })
+          .catch(() => {});
+      };
+
+      // Timeout safety guard in case socket stalls without resolving/rejecting RPC
       const buyTimeoutId = setTimeout(() => {
         tradeTimeoutsRef.current.delete(tradeId);
         const stillUnconfirmed = openTradesRef.current.find((t) => t.id === tradeId && !t.contract_id);
         if (stillUnconfirmed) {
-          portfolioReconciler.markIntentTimedOut(tradeId);
-          balanceManager.markReconciliationPending();
-          setIsExecuting(false);
-          addLogRef.current?.(
-            `⏳ Order ${tradeId} timed out awaiting broker confirmation — entered RECONCILIATION_PENDING lock. Querying broker portfolio...`,
-            'warn'
-          );
-          derivWS.requestReconciliationSnapshot().then(({ openContracts, settledTransactions }) => {
-            const rec = portfolioReconciler.reconcile({
-              openTrades: openTradesRef.current,
-              broker: { openPortfolioContracts: openContracts, settledTransactions },
-            });
-            openTradesRef.current = rec.updatedOpenTrades.filter(
-              (t) => t.id !== tradeId || Boolean(t.contract_id)
-            );
-            setOpenTrades(openTradesRef.current);
-            if (!rec.stillPendingReconciliation) {
-              balanceManager.clearReconciliationPending();
-              addLogRef.current?.(`✅ Order ${tradeId} reconciled against Deriv portfolio.`, 'info');
-            }
-          }).catch(() => {});
+          triggerStatementReconciliation('timeout awaiting broker buy confirmation');
         }
       }, 15000);
       tradeTimeoutsRef.current.set(tradeId, buyTimeoutId);
 
+      // Step 3: Buy strictly by verified proposal_id and maximum quote ask_price with req_id correlation
       try {
-        derivWS.buyContractDirect({
-          contract_type: tradeDirection,
-          symbol: selectedSymbol,
-          duration: validDuration,
-          duration_unit: unitSuffix,
-          amount: tradeStake,
-          currency: currency || 'USD',
+        const buyResult = await derivWS.buyProposal({
+          proposalId: proposalQuote.proposalId,
+          maxPrice: maxPurchasePrice,
+          timeoutMs: 15000,
         });
+
+        clearTimeout(buyTimeoutId);
+        tradeTimeoutsRef.current.delete(tradeId);
+        portfolioReconciler.markIntentConfirmed(tradeId, buyResult.contractId);
+
+        openTradesRef.current = openTradesRef.current.map((t) =>
+          t.id === tradeId
+            ? {
+                ...t,
+                contract_id: buyResult.contractId,
+                amount: buyResult.buyPrice,
+                payout: buyResult.payout ?? t.payout,
+                isDerivRealTime: true,
+              }
+            : t
+        );
+        setOpenTrades((prev) =>
+          prev.map((t) =>
+            t.id === tradeId
+              ? {
+                  ...t,
+                  contract_id: buyResult.contractId,
+                  amount: buyResult.buyPrice,
+                  payout: buyResult.payout ?? t.payout,
+                  isDerivRealTime: true,
+                }
+              : t
+          )
+        );
+
+        if (typeof buyResult.balanceAfter === 'number') {
+          setBalance(buyResult.balanceAfter);
+          const isVirt = Boolean(loginidRef.current?.startsWith('VRTC') || !isLiveModeRef.current);
+          updateBalancesRef.current?.(isVirt ? buyResult.balanceAfter : undefined, !isVirt ? buyResult.balanceAfter : undefined);
+        }
+
+        isExecutingRef.current = false;
+        setIsExecuting(false);
         addLog(
-          `[${source}${sniperTag}${tslTag}] Dispatched ${isLiveMode ? 'REAL' : 'DEMO'} Deriv ${
+          `[${source}${sniperTag}${tslTag}] Purchased ${isLiveMode ? 'REAL' : 'DEMO'} Deriv ${
             tradeDirection === 'CALL' ? 'RISE' : 'FALL'
-          } contract on ${selectedSymbol} at ${entrySpot.toFixed(decimals)} ($${tradeStake}, ${validDuration}${unitSuffix})`,
+          } contract #${buyResult.contractId} on ${selectedSymbol} via proposal ${proposalQuote.proposalId} (max $${maxPurchasePrice.toFixed(2)}, ${validDuration}${unitSuffix})`,
           'success'
         );
       } catch (err: any) {
         clearTimeout(buyTimeoutId);
         tradeTimeoutsRef.current.delete(tradeId);
-        portfolioReconciler.markIntentFailed(tradeId);
-        openTradesRef.current = openTradesRef.current.filter((t) => t.id !== tradeId);
-        setOpenTrades((prev) => prev.filter((t) => t.id !== tradeId));
-        setIsExecuting(false);
-        addLog(`Deriv contract dispatch failed: ${err?.message || 'Unknown error'}`, 'error');
+        const errMsg = err?.message || 'Unknown error';
+        const isUncertainTimeoutOrDisconnect =
+          /timed out|closed|not open|reconnecting|interrupted/i.test(errMsg);
+
+        if (isUncertainTimeoutOrDisconnect) {
+          triggerStatementReconciliation(errMsg);
+        } else {
+          // Definitive broker rejection before execution
+          portfolioReconciler.markIntentFailed(tradeId);
+          openTradesRef.current = openTradesRef.current.filter((t) => t.id !== tradeId);
+          setOpenTrades((prev) => prev.filter((t) => t.id !== tradeId));
+          isExecutingRef.current = false;
+          setIsExecuting(false);
+          if (derivWS.hasRealToken()) {
+            derivWS.refreshBalance();
+          }
+          addLog(`Deriv contract purchase rejected: ${errMsg}`, 'error');
+        }
       }
     },
     [
@@ -2070,10 +2230,10 @@ export default function App() {
       return;
     }
 
-    if (trade.isValidToSell === false) {
+    if (trade.isValidToSell !== true) {
       sound.play('alert');
       addLog(
-        `Deriv contract #${trade.contract_id} is not valid for early resale right now (near expiry or locked by broker).`,
+        `Deriv contract #${trade.contract_id} requires active is_valid_to_sell confirmation before early resale.`,
         'warn'
       );
       return;

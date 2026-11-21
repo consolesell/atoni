@@ -368,18 +368,18 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
 
                         <button
                           onClick={() => handleEarlyExitClick(tradeId)}
-                          disabled={isExiting || !trade.contract_id || trade.isValidToSell === false}
+                          disabled={isExiting || !trade.contract_id || trade.isValidToSell !== true}
                           title={
                             !trade.contract_id
                               ? 'Awaiting Deriv contract confirmation'
-                              : trade.isValidToSell === false
-                              ? 'Contract cannot be resold before expiry on Deriv'
+                              : trade.isValidToSell !== true
+                              ? 'Awaiting Deriv is_valid_to_sell confirmation or contract cannot be resold'
                               : 'Sell contract at current Deriv bid price'
                           }
                           className={`px-3 py-1 rounded-lg text-xs font-mono transition-colors flex items-center gap-1.5 ${
                             isExiting
                               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 opacity-70 cursor-wait'
-                              : !trade.contract_id || trade.isValidToSell === false
+                              : !trade.contract_id || trade.isValidToSell !== true
                               ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed opacity-60'
                               : 'bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40'
                           }`}
@@ -391,7 +391,7 @@ export const PositionsDrawer: React.FC<PositionsDrawerProps> = ({
                             </>
                           ) : !trade.contract_id ? (
                             <span>Awaiting Contract...</span>
-                          ) : trade.isValidToSell === false ? (
+                          ) : trade.isValidToSell !== true ? (
                             <span>Resale Unavailable</span>
                           ) : (
                             <span>Early Close (${livePnL.resaleValue.toFixed(2)})</span>

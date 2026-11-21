@@ -18,9 +18,13 @@ export interface ReconcileBrokerInput {
     payout?: number;
     amount?: number;
     action?: string;
+    action_type?: string;
+    shortcode?: string;
     transaction_time?: number;
     balance_after?: number;
   }>;
+  portfolioChecked?: boolean;
+  statementChecked?: boolean;
 }
 
 export class PortfolioReconciler {
@@ -103,6 +107,13 @@ export class PortfolioReconciler {
     return { ok: true, intent };
   }
 
+  public attachProposalId(intentId: string, proposalId: string): void {
+    const existing = this.pendingIntents.get(intentId);
+    if (existing) {
+      existing.proposalId = proposalId;
+    }
+  }
+
   public markIntentConfirmed(intentId: string, contractId: string | number): void {
     this.unresolvedTimeoutIds.delete(intentId);
     const existing = this.pendingIntents.get(intentId);
@@ -148,6 +159,8 @@ export class PortfolioReconciler {
   } {
     const brokerOpen = params.broker.openPortfolioContracts || [];
     const brokerSettled = params.broker.settledTransactions || [];
+    const portfolioChecked = params.broker.portfolioChecked !== false;
+    const statementChecked = params.broker.statementChecked !== false;
 
     const openIds = new Set(brokerOpen.map((c) => String(c.contract_id)));
     const settledMap = new Map<string, NonNullable<ReconcileBrokerInput['settledTransactions']>[number]>();
@@ -161,7 +174,7 @@ export class PortfolioReconciler {
     const matchedOpenContractIds: Array<string | number> = [];
     const newlySettledContractIds: Array<string | number> = [];
 
-    // Resolve any pending/timed-out intents against broker open contracts or settled tx
+    // Resolve any pending/timed-out intents against broker open contracts or account statement transactions
     for (const [intentId, intent] of this.pendingIntents.entries()) {
       if (intent.contractId && openIds.has(String(intent.contractId))) {
         matchedOpenContractIds.push(intent.contractId);
@@ -179,7 +192,7 @@ export class PortfolioReconciler {
         continue;
       }
 
-      // If no contractId was returned before timeout, match against any newly discovered open contract on same symbol+amount
+      // If no contractId was returned before timeout, match against newly discovered open portfolio contract
       const matchedPortfolio = brokerOpen.find(
         (c) =>
           (!c.symbol || c.symbol === intent.symbol) &&
@@ -192,16 +205,41 @@ export class PortfolioReconciler {
         this.pendingIntents.delete(intentId);
         this.unresolvedTimeoutIds.delete(intentId);
         resolvedTimeoutIntents.push(intentId);
-      } else if (intent.status === 'RECONCILIATION_PENDING') {
-        // Broker portfolio & statements returned clean with no matching contract: timeout did not fill
+        continue;
+      }
+
+      // Match against account statement transactions (e.g. fast contract that already settled during timeout)
+      const matchedStatementTx = brokerSettled.find((tx) => {
+        if (tx.contract_id === undefined || tx.contract_id === null) return false;
+        const action = String(tx.action_type || tx.action || '').toLowerCase();
+        if (action && action !== 'buy' && action !== 'sell') return false;
+        const txAmount =
+          typeof tx.buy_price === 'number'
+            ? tx.buy_price
+            : typeof tx.amount === 'number'
+            ? Math.abs(tx.amount)
+            : null;
+        const amountMatch = txAmount === null || Math.abs(txAmount - intent.amount) < 0.05;
+        const symbolMatch = !tx.shortcode || tx.shortcode.includes(intent.symbol);
+        const timeMatch = !tx.transaction_time || tx.transaction_time * 1000 >= intent.createdAt - 120_000;
+        return amountMatch && symbolMatch && timeMatch;
+      });
+
+      if (matchedStatementTx && matchedStatementTx.contract_id !== undefined) {
+        newlySettledContractIds.push(matchedStatementTx.contract_id);
+        this.pendingIntents.delete(intentId);
+        this.unresolvedTimeoutIds.delete(intentId);
+        resolvedTimeoutIntents.push(intentId);
+      } else if (intent.status === 'RECONCILIATION_PENDING' && portfolioChecked && statementChecked) {
+        // Broker portfolio AND account statement both verified clean with no matching contract: timeout did not fill
         this.pendingIntents.delete(intentId);
         this.unresolvedTimeoutIds.delete(intentId);
         resolvedTimeoutIntents.push(intentId);
       }
     }
 
-    // Also clear any orphan timeout flags once broker reconciliation snapshot completes
-    if (this.pendingIntents.size === 0) {
+    // Only clear orphan timeout flags when no pending reconciliations remain and statement/portfolio checks succeeded
+    if (this.pendingIntents.size === 0 && portfolioChecked && statementChecked) {
       this.unresolvedTimeoutIds.clear();
     }
 
