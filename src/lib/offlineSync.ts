@@ -35,12 +35,32 @@ class OfflineSyncManager {
         this.notify();
       });
 
-      // Register Service Worker in production / browser environment
-      if ('serviceWorker' in navigator && process.env.NODE_ENV === 'production') {
-        navigator.serviceWorker
-          .register('/sw.js')
-          .then(() => console.log('[SW] Service Worker registered successfully.'))
-          .catch((err) => console.warn('[SW] Registration warning:', err));
+      // Unregister stale Service Workers in dev/preview hosts; only register on production hosts
+      if ('serviceWorker' in navigator) {
+        const host = window.location.hostname || '';
+        const isDevPreview =
+          host.startsWith('ais-dev-') || host === 'localhost' || host === '127.0.0.1';
+        if (isDevPreview || process.env.NODE_ENV !== 'production') {
+          navigator.serviceWorker
+            .getRegistrations()
+            .then((regs) => Promise.all(regs.map((r) => r.unregister())))
+            .catch(() => {});
+          if ('caches' in window) {
+            caches
+              .keys()
+              .then((keys) =>
+                Promise.all(keys.filter((k) => k.startsWith('sbatomic-')).map((k) => caches.delete(k)))
+              )
+              .catch(() => {});
+          }
+        } else {
+          navigator.serviceWorker
+            .register('/sw.js', { updateViaCache: 'none' })
+            .then((reg) => {
+              void reg.update().catch(() => {});
+            })
+            .catch((err) => console.warn('[SW] Registration warning:', err));
+        }
       }
     }
   }

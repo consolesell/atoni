@@ -41,9 +41,11 @@ import {
   Download,
   Flame,
 } from 'lucide-react';
-import { BotState, TechnicalIndicators, MarketRegime, CoreRiskMetrics, TradeRecord, TrailingStopConfig } from '../types/trading';
+import { BotState, TechnicalIndicators, MarketRegime, CoreRiskMetrics, TradeRecord, TrailingStopConfig, ASIRESensitivity } from '../types/trading';
+import { DEFAULT_ASIRE_POLICY } from '../types/settings';
 import { TradeDurationUnit } from '../types/sniper';
 import { formatDurationLabel, DEFAULT_DURATION_GOVERNANCE } from '../lib/adaptiveDurationEngine';
+import { symbolIntelligenceEngine } from '../lib/symbolIntelligenceEngine';
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS, AgentVoicePersonaId, VoiceEngineState } from '../lib/voiceEngine';
 import { useTerminalSettings } from '../context/TerminalSettingsContext';
@@ -150,6 +152,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
     updateConnection,
     updateInterface,
     updateDurationGovernance,
+    updateASIRE,
     resetToDefaults,
     exportSettingsJSON,
     importSettingsJSON,
@@ -1118,11 +1121,17 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
 
               <div className="bg-slate-950/70 p-4 rounded-xl border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-200">Autonomous Symbol Rotation</span>
+                  <div>
+                    <span className="font-bold text-slate-200 block">ASIRE Autonomous Symbol Rotation</span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      Broker-verified multi-symbol ranking, correlation & hysteresis
+                    </span>
+                  </div>
                   <button
                     onClick={() => {
                       const next = !settings.ai.autonomousSymbolChange;
                       updateAI({ autonomousSymbolChange: next });
+                      updateASIRE({ enabled: next });
                       onUpdateBotState({ autonomousSymbolChange: next });
                       sound.play('toggle');
                     }}
@@ -1137,24 +1146,102 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                     />
                   </button>
                 </div>
+
+                {/* Sensitivity Mode */}
+                <div className="pt-2 border-t border-slate-800 space-y-1.5 font-mono text-[11px]">
+                  <span className="text-slate-400 block">ASIRE Sensitivity Profile:</span>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {(['CONSERVATIVE', 'BALANCED', 'RESPONSIVE'] as ASIRESensitivity[]).map((mode) => {
+                      const active = (settings.asire?.sensitivity ?? DEFAULT_ASIRE_POLICY.sensitivity) === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => {
+                            sound.play('click');
+                            updateASIRE({ sensitivity: mode });
+                          }}
+                          className={`py-1.5 rounded-lg border text-[10px] font-bold transition-all ${
+                            active
+                              ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50'
+                              : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {mode}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Cooldown Slider */}
                 <div className="space-y-1 pt-2 border-t border-slate-800">
                   <div className="flex items-center justify-between font-mono text-[11px] text-slate-400">
                     <span>Rotation Cooldown:</span>
-                    <span className="text-cyan-400 font-bold">{settings.ai.rotationCooldownSeconds}s</span>
+                    <span className="text-cyan-400 font-bold">{settings.asire?.cooldownSeconds ?? settings.ai.rotationCooldownSeconds}s</span>
                   </div>
                   <input
                     type="range"
                     min="15"
-                    max="180"
+                    max="300"
                     step="5"
-                    value={settings.ai.rotationCooldownSeconds}
+                    value={settings.asire?.cooldownSeconds ?? settings.ai.rotationCooldownSeconds}
                     onChange={(e) => {
                       const val = Number(e.target.value);
                       updateAI({ rotationCooldownSeconds: val });
+                      updateASIRE({ cooldownSeconds: val });
                       onUpdateBotState({ rotationCooldownSeconds: val });
                     }}
                     className="w-full accent-cyan-400"
                   />
+                </div>
+
+                {/* Hysteresis Numeric Controls */}
+                <div className="grid grid-cols-2 gap-2.5 pt-2 border-t border-slate-800 font-mono text-[11px]">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-slate-400">Min Score Delta (pts)</span>
+                    <input
+                      type="number"
+                      min="2"
+                      max="40"
+                      value={settings.asire?.minScoreImprovement ?? DEFAULT_ASIRE_POLICY.minScoreImprovement}
+                      onChange={(e) => updateASIRE({ minScoreImprovement: Math.max(2, Math.min(40, Number(e.target.value) || 10)) })}
+                      className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-cyan-300 font-bold"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-slate-400">Confirmations Req.</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="6"
+                      value={settings.asire?.confirmationEvaluations ?? DEFAULT_ASIRE_POLICY.confirmationEvaluations}
+                      onChange={(e) => updateASIRE({ confirmationEvaluations: Math.max(1, Math.min(6, Number(e.target.value) || 2)) })}
+                      className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-cyan-300 font-bold"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-slate-400">Max Rotations/Session</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={settings.asire?.maxRotationsPerSession ?? DEFAULT_ASIRE_POLICY.maxRotationsPerSession}
+                      onChange={(e) => updateASIRE({ maxRotationsPerSession: Math.max(1, Math.min(50, Number(e.target.value) || 8)) })}
+                      className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-cyan-300 font-bold"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <span className="text-slate-400">Min Data Quality (%)</span>
+                    <input
+                      type="number"
+                      min="15"
+                      max="95"
+                      value={Math.round((settings.asire?.minDataQualityThreshold ?? DEFAULT_ASIRE_POLICY.minDataQualityThreshold) * 100)}
+                      onChange={(e) => updateASIRE({ minDataQualityThreshold: Math.max(0.15, Math.min(0.95, (Number(e.target.value) || 45) / 100)) })}
+                      className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-cyan-300 font-bold"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -1635,6 +1722,8 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
               onSelectSymbol={onSymbolChange}
               currency={currency}
               regime={regime}
+              asireSnapshot={symbolIntelligenceEngine.getSnapshot()}
+              onClearQuarantine={(sym) => symbolIntelligenceEngine.clearQuarantine(sym)}
               onOpenAutoRotationConfig={() => setActiveCategory('sbagent')}
             />
           )}

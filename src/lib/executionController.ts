@@ -21,6 +21,7 @@ import { acde, toDerivDurationUnit } from './adaptiveDurationEngine';
 import { sanitizeForPersistence } from './securitySanitizer';
 import { balanceManager as defaultBalanceManager } from './balanceManager';
 import { intelligenceManager as defaultIntelligenceManager } from './intelligenceManager';
+import { symbolIntelligenceEngine as defaultSymbolIntelligenceEngine } from './symbolIntelligenceEngine';
 
 export interface ExecutionBrokerAdapter {
   getConnectionState: () => ConnectionState;
@@ -180,6 +181,7 @@ export class ExecutionController {
   private reconciler: PortfolioReconciler;
   private portfolioProvider: ExecutionPortfolioContextProvider;
   private predictionValidator?: PredictionContextValidator;
+  private transitionGuard: { isTransitionBlockingPurchases: (symbol?: string) => { blocked: boolean; reason?: string } };
   private pendingSellContractIds: Set<string> = new Set();
   private executionInFlight = false;
   private eventLog: ExecutionAuditEvent[] = [];
@@ -193,6 +195,7 @@ export class ExecutionController {
     reconciler?: PortfolioReconciler;
     portfolioProvider?: ExecutionPortfolioContextProvider;
     predictionValidator?: PredictionContextValidator;
+    transitionGuard?: { isTransitionBlockingPurchases: (symbol?: string) => { blocked: boolean; reason?: string } };
   }) {
     this.broker = deps?.broker ?? createDefaultBrokerAdapter();
     this.autonomy = deps?.autonomy ?? defaultAutonomyManager;
@@ -207,6 +210,7 @@ export class ExecutionController {
       getDailyTradesCount: () => 0,
     };
     this.predictionValidator = deps?.predictionValidator ?? defaultIntelligenceManager;
+    this.transitionGuard = deps?.transitionGuard ?? defaultSymbolIntelligenceEngine;
   }
 
   public setPortfolioProvider(provider: ExecutionPortfolioContextProvider): void {
@@ -285,6 +289,19 @@ export class ExecutionController {
     const dailyTradesCount = this.portfolioProvider.getDailyTradesCount();
     if (dailyTradesCount >= cfg.risk.maxDailyTrades) {
       const reason = `Daily trade ceiling reached (${dailyTradesCount}/${cfg.risk.maxDailyTrades}).`;
+      this.recordEvent('PURCHASE', request.source, request.symbol, 'BLOCKED', reason, undefined, undefined, request.stake);
+      return {
+        executed: false,
+        status: 'BLOCKED',
+        blockers: [reason],
+        reason,
+        timestamp: now,
+      };
+    }
+
+    const transitionCheck = this.transitionGuard.isTransitionBlockingPurchases(request.symbol);
+    if (transitionCheck.blocked) {
+      const reason = transitionCheck.reason || 'Symbol transition pending verification; purchase locked.';
       this.recordEvent('PURCHASE', request.source, request.symbol, 'BLOCKED', reason, undefined, undefined, request.stake);
       return {
         executed: false,
@@ -899,3 +916,4 @@ export class ExecutionController {
 }
 
 export const executionController = new ExecutionController();
+defaultSymbolIntelligenceEngine.setPurchaseLockChecker(() => executionController.isPurchaseLocked());

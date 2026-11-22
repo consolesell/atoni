@@ -729,7 +729,7 @@ test('J11. Separated persistence preserves requested duration, broker expiry, ch
   const origBrokerExpiry = openTrade.brokerConfirmedExpiryMs;
   assert.ok(origBrokerExpiry && origBrokerExpiry > Date.now() + 800_000);
 
-  const saleTs = Date.parse(openTrade.timestamp) + 23_000;
+  const saleTs = (openTrade.brokerConfirmedStartMs ?? Date.parse(openTrade.timestamp)) + 23_000;
   const sellRes = await controller.executeSell({
     source: 'EARLY_SELLING',
     trade: { ...openTrade, isValidToSell: true },

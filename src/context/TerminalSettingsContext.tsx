@@ -2,8 +2,9 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import {
   TerminalSettings,
   DEFAULT_TERMINAL_SETTINGS,
+  DEFAULT_ASIRE_POLICY,
 } from '../types/settings';
-import { DurationGovernancePolicy } from '../types/trading';
+import { ASIREPolicyConfig, DurationGovernancePolicy } from '../types/trading';
 import { sound } from '../lib/soundEngine';
 import { voice, AGENT_PERSONAS, AgentVoicePersonaId } from '../lib/voiceEngine';
 import { derivWS } from '../lib/derivWS';
@@ -25,6 +26,7 @@ interface TerminalSettingsContextType {
   updateConnection: (updates: Partial<TerminalSettings['connection']>) => void;
   updateInterface: (updates: Partial<TerminalSettings['interface']>) => void;
   updateDurationGovernance: (updates: Partial<DurationGovernancePolicy>) => void;
+  updateASIRE: (updates: Partial<ASIREPolicyConfig>) => void;
   resetToDefaults: () => void;
   exportSettingsJSON: () => string;
   importSettingsJSON: (jsonStr: string) => { success: boolean; error?: string };
@@ -78,6 +80,14 @@ function loadStoredSettings(): TerminalSettings {
           DEFAULT_TERMINAL_SETTINGS.durationGovernance!,
           parsed.durationGovernance
         ),
+        asire: {
+          ...DEFAULT_ASIRE_POLICY,
+          ...(parsed.asire || {}),
+          weights: {
+            ...DEFAULT_ASIRE_POLICY.weights,
+            ...(parsed.asire?.weights || {}),
+          },
+        },
       };
     }
   } catch (e) {
@@ -135,6 +145,7 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
           earlyExit: unified.earlyExit,
           trailingStop: unified.trailingStop,
           durationGovernance: unified.durationGovernance,
+          asire: unified.asire,
         },
         version: unified.revision,
         updatedAt: unified.updatedAt,
@@ -225,6 +236,32 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
     }));
   }, []);
 
+  const updateASIRE = useCallback((updates: Partial<ASIREPolicyConfig>) => {
+    setSettings((prev) => ({
+      ...prev,
+      asire: {
+        ...DEFAULT_ASIRE_POLICY,
+        ...(prev.asire || {}),
+        ...updates,
+        weights: {
+          ...DEFAULT_ASIRE_POLICY.weights,
+          ...(prev.asire?.weights || {}),
+          ...(updates.weights || {}),
+        },
+      },
+      ai: {
+        ...prev.ai,
+        ...(typeof updates.enabled === 'boolean'
+          ? { autonomousSymbolChange: updates.enabled }
+          : {}),
+        ...(typeof updates.cooldownSeconds === 'number'
+          ? { rotationCooldownSeconds: updates.cooldownSeconds }
+          : {}),
+      },
+      updatedAt: new Date().toISOString(),
+    }));
+  }, []);
+
   const resetToDefaults = useCallback(() => {
     setSettings({
       ...DEFAULT_TERMINAL_SETTINGS,
@@ -281,6 +318,7 @@ export const TerminalSettingsProvider: React.FC<{ children: React.ReactNode }> =
         updateConnection,
         updateInterface,
         updateDurationGovernance,
+        updateASIRE,
         resetToDefaults,
         exportSettingsJSON,
         importSettingsJSON,

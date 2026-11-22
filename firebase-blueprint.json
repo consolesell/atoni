@@ -176,6 +176,7 @@
         "revision": { "type": "number" },
         "version": { "type": "number" },
         "durationGovernance": { "type": "object" },
+        "asire": { "type": "object" },
         "updatedAt": { "type": "number" }
       },
       "required": ["uid", "updatedAt"]

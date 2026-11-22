@@ -18,6 +18,8 @@ export interface AutonomyPreset {
   strategyProfile: string;          // e.g. 'sbagent.md-v4.1'
   minConsensusAgreement: number;    // e.g. 0.62 (or 3 of 4 agents)
   rotationCooldownSeconds: number;  // e.g. 60
+  minScoreImprovement?: number;     // e.g. 10
+  maxRotationsPerSession?: number;  // e.g. 8
 }
 
 export interface AutonomySessionContext {

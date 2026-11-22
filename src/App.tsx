@@ -16,6 +16,7 @@ import {
   ExecutionSource,
   ACDEResult,
   DurationRecommendation,
+  ASIRESnapshot,
 } from './types/trading';
 import { derivWS, DEFAULT_DERIV_APP_ID } from './lib/derivWS';
 import { balanceManager } from './lib/balanceManager';
@@ -25,6 +26,7 @@ import { autonomyManager } from './lib/autonomyManager';
 import { executionController } from './lib/executionController';
 import { earlySellingEngine } from './lib/earlySellingEngine';
 import { intelligenceManager } from './lib/intelligenceManager';
+import { symbolIntelligenceEngine, SymbolFeedInput } from './lib/symbolIntelligenceEngine';
 import { aiActionRegistry } from './lib/aiActionRegistry';
 import { strategyEvolutionManager } from './lib/strategyEvolutionManager';
 import { memoryManager } from './lib/memoryManager';
@@ -327,6 +329,7 @@ export default function App() {
 
   // Unified Autonomy Control, Strategy Evolution & SBAgent Auto-Grant State
   const [autonomySnapshot, setAutonomySnapshot] = useState(() => autonomyManager.getSnapshot());
+  const [asireSnapshot, setAsireSnapshot] = useState<ASIRESnapshot>(() => symbolIntelligenceEngine.getSnapshot());
   const [strategyState, setStrategyState] = useState(() => strategyEvolutionManager.getState());
   const [autonomyMode, setAutonomyMode] = useState<AutonomyMode>('OFF');
   const [sbagentAutonomyGrant, setSbagentAutonomyGrant] = useState<boolean>(false);
@@ -469,6 +472,15 @@ export default function App() {
       tradeTimeoutsRef.current.clear();
     };
   }, []);
+
+  // Keep ASIRE snapshot & active symbol synchronized cleanly
+  useEffect(() => {
+    return symbolIntelligenceEngine.subscribe(setAsireSnapshot);
+  }, []);
+
+  useEffect(() => {
+    symbolIntelligenceEngine.setActiveSymbol(selectedSymbol);
+  }, [selectedSymbol]);
 
   // Subscribe to centralized AutonomyManager, StrategyEvolutionManager & ExecutionController portfolio context
   useEffect(() => {
@@ -886,6 +898,7 @@ export default function App() {
     }
 
     setClosedTrades((currClosed) => [settled, ...currClosed.filter((t) => t.id !== trade.id)]);
+    symbolIntelligenceEngine.recordTradeSettlement(settled);
 
     auditLogger.record({
       type: 'AUTONOMOUS_TRADE',
@@ -992,11 +1005,13 @@ export default function App() {
         setCurrentPrice(newQuote);
 
         // Update live spot reference on open positions without overwriting Deriv POC P/L
+        // Enforce strict symbol match so non-real-time trades never inherit another market's spot
+        const streamSym = tickSymbol || selectedSymbol;
         setOpenTrades((prev) => {
           if (prev.length === 0) return prev;
           let changed = false;
           const next = prev.map((t) => {
-            if (!t.isDerivRealTime && t.currentSpot !== newQuote) {
+            if (!t.isDerivRealTime && t.symbol === streamSym && t.currentSpot !== newQuote) {
               changed = true;
               return { ...t, currentSpot: newQuote };
             }
@@ -1058,6 +1073,7 @@ export default function App() {
 
         if (data.candles.length > 0) {
           setCandles(data.candles);
+          derivWS.seedSymbolMarketData(selectedSymbol, data.candles, granularity);
           const lastClose = data.candles[data.candles.length - 1].close;
           setCurrentPrice(lastClose);
           setPrevPrice(lastClose);
@@ -1472,6 +1488,31 @@ export default function App() {
   }, [selectedSymbol, candles, indicators, regime, botState.allowedRotationSymbols]);
 
   // Unified Autonomy Handlers
+  const applyASIRECommittedSymbol = useCallback(
+    (nextSym: string, context?: { decision?: any }) => {
+      setSelectedSymbol(nextSym);
+      derivWS.fetchCandles(nextSym, granularity, 120);
+      derivWS.subscribeTicks(nextSym);
+      setBotState((prev) => ({
+        ...prev,
+        lastSymbolRotationTime: Date.now(),
+        lastRotationReason: context?.decision?.reason || prev.lastRotationReason,
+      }));
+    },
+    [granularity]
+  );
+
+  const handleManualSymbolSelect = useCallback(
+    (nextSym: string) => {
+      symbolIntelligenceEngine.requestManualOverride(nextSym, (committed) => {
+        setSelectedSymbol(committed);
+        derivWS.fetchCandles(committed, granularity, 120);
+        derivWS.subscribeTicks(committed);
+      });
+    },
+    [granularity]
+  );
+
   const handleConfigureAutonomy = useCallback(() => {
     sound.play('click');
     setIsAutonomyConfigOpen(true);
@@ -1480,6 +1521,24 @@ export default function App() {
   const handleSaveAutonomyPreset = useCallback((updated: AutonomyPreset) => {
     setAutonomyPreset(updated);
     saveAutonomyPreset(updated);
+    configurationManager.update((prev) => ({
+      autonomy: {
+        ...prev.autonomy,
+        allowedSymbols: [...updated.allowedSymbols],
+        rotationCooldownSeconds: updated.rotationCooldownSeconds,
+      },
+      asire: {
+        ...prev.asire,
+        cooldownSeconds: updated.rotationCooldownSeconds,
+        minScoreImprovement: updated.minScoreImprovement ?? prev.asire.minScoreImprovement,
+        maxRotationsPerSession: updated.maxRotationsPerSession ?? prev.asire.maxRotationsPerSession,
+      },
+    }));
+    setBotState((prev) => ({
+      ...prev,
+      allowedRotationSymbols: [...updated.allowedSymbols],
+      rotationCooldownSeconds: updated.rotationCooldownSeconds,
+    }));
     setAutonomyMode('ARMED');
     setSbagentAutonomyGrant(false);
     setLastAutonomyError(null);
@@ -1488,6 +1547,7 @@ export default function App() {
 
   const handleStopAutonomy = useCallback((reason = 'user') => {
     const stopRes = autonomyManager.stopAll(reason);
+    symbolIntelligenceEngine.abortPendingTransitions(`stop:${reason}`);
     intelligenceManager.invalidateCurrentPrediction(`stop:${reason}`);
     setIsAutonomousRunning(false);
     setBotState((b) => ({ ...b, enabled: false }));
@@ -1668,41 +1728,157 @@ export default function App() {
     speakWithHostFallback,
   ]);
 
-  // Autonomous Symbol Switch on Market Instability
+  // Autonomous Symbol Switch on Market Instability (Routed through Authoritative ASIRE Controller)
   useEffect(() => {
     if (
       botState.enabled &&
+      autonomySnapshot.lifecycle === 'ACTIVE' &&
+      autonomySnapshot.permissions.allowSymbolRotation &&
+      autonomySnapshot.executionMode !== 'MANUAL_ONLY' &&
       marketStability.switchRecommended &&
       marketStability.targetStableSymbol &&
       marketStability.targetStableSymbol !== selectedSymbol &&
-      (botState.autonomousSymbolChange ?? true)
+      asireSnapshot.transitionState === 'IDLE' &&
+      asireSnapshot.cooldownRemainingSeconds === 0
     ) {
-      const cooldownSecs = botState.rotationCooldownSeconds || 60;
-      const lastRot = botState.lastSymbolRotationTime || 0;
-      if (Date.now() - lastRot > cooldownSecs * 1000) {
-        const nextSym = marketStability.targetStableSymbol;
-        setBotState((prev) => ({
-          ...prev,
-          lastSymbolRotationTime: Date.now(),
-          lastRotationReason: marketStability.switchReason,
-        }));
-        addLog(
-          `🛡️ [STABILITY MONITOR] High noise on ${selectedSymbol} (Stability Index: ${marketStability.stabilityIndex}%). Auto-switching to stable pair ${nextSym}.`,
-          'warn'
-        );
-        setSelectedSymbol(nextSym);
-        derivWS.fetchCandles(nextSym, granularity, 120);
-        derivWS.subscribeTicks(nextSym);
-      }
+      const targetSym = marketStability.targetStableSymbol;
+      const gen = autonomyManager.getGeneration();
+      void symbolIntelligenceEngine
+        .requestAutonomousRotation({
+          source: 'MARKET_STABILITY',
+          targetSymbol: targetSym,
+          reason:
+            marketStability.switchReason ||
+            `Stability Index ${marketStability.stabilityIndex}% on ${selectedSymbol}`,
+          requestGeneration: gen,
+          candlesBySymbol: { [selectedSymbol]: candles },
+          closedTrades,
+          openTrades,
+          onCommitSymbol: applyASIRECommittedSymbol,
+        })
+        .then((outcome) => {
+          if (outcome.switched) {
+            addLog(
+              `🛡️ [ASIRE STABILITY] Verified switch ${outcome.previousSymbol} → ${outcome.activeSymbol}: ${outcome.reason}`,
+              'warn'
+            );
+          } else if (outcome.rolledBack) {
+            addLog(`⚠️ [ASIRE STABILITY] Rolled back rotation to ${targetSym}: ${outcome.reason}`, 'warn');
+          }
+        });
     }
   }, [
     botState.enabled,
-    botState.autonomousSymbolChange,
-    botState.rotationCooldownSeconds,
-    botState.lastSymbolRotationTime,
+    autonomySnapshot.lifecycle,
+    autonomySnapshot.permissions.allowSymbolRotation,
+    autonomySnapshot.executionMode,
     marketStability,
     selectedSymbol,
+    asireSnapshot.transitionState,
+    asireSnapshot.cooldownRemainingSeconds,
+    candles,
+    closedTrades,
+    openTrades,
+    applyASIRECommittedSymbol,
+    addLog,
+  ]);
+
+  // Periodic ASIRE Multi-Symbol Intelligence Scanner
+  useEffect(() => {
+    let cancelled = false;
+
+    const runMultiSymbolScan = async () => {
+      if (cancelled) return;
+      const universe = configurationManager.getSnapshot().autonomy.allowedSymbols || botState.allowedRotationSymbols;
+      const scanList = Array.from(new Set([selectedSymbol, ...universe])).slice(0, 6);
+      const activeSet = new Set(await derivWS.fetchActiveSymbols().catch(() => []));
+
+      const feeds: Record<string, SymbolFeedInput> = {};
+      const candlesBySymbol: Record<string, Candle[]> = {};
+
+      for (const sym of scanList) {
+        if (cancelled) return;
+        let symCandles =
+          sym === selectedSymbol && candles.length >= 20
+            ? candles
+            : derivWS.getCachedSymbolCandles(sym)?.candles || [];
+        if (symCandles.length < 20 && derivWS.isConnected()) {
+          try {
+            symCandles = await derivWS.fetchCandlesAsync(sym, granularity, 90);
+          } catch {
+            // Leave empty so ASIRE classifies DATA_UNAVAILABLE truthfully
+          }
+        }
+        const cachedTick = derivWS.getCachedSymbolTick(sym);
+        candlesBySymbol[sym] = symCandles;
+        feeds[sym] = {
+          symbol: sym,
+          candles: symCandles,
+          lastTickTimestamp:
+            sym === selectedSymbol
+              ? tickBuffer[tickBuffer.length - 1]?.epoch || cachedTick?.receivedAt
+              : cachedTick?.receivedAt ?? cachedTick?.epoch,
+          granularity,
+          brokerAvailable: activeSet.size > 0 ? activeSet.has(sym) : undefined,
+          connectionHealthy: derivWS.isConnected(),
+        };
+      }
+
+      if (cancelled) return;
+      const { decision } = symbolIntelligenceEngine.evaluateUniverse({
+        feeds,
+        activeSymbol: selectedSymbol,
+        closedTrades,
+        openTrades,
+        granularitySec: granularity,
+      });
+
+      if (
+        decision.action === 'SWITCH' &&
+        decision.targetSymbol &&
+        autonomyManager.getLifecycle() === 'ACTIVE' &&
+        autonomyManager.getSnapshot().permissions.allowSymbolRotation &&
+        autonomyManager.getExecutionMode() !== 'MANUAL_ONLY'
+      ) {
+        const gen = autonomyManager.getGeneration();
+        const outcome = await symbolIntelligenceEngine.requestAutonomousRotation({
+          source: 'SCANNER',
+          targetSymbol: decision.targetSymbol,
+          reason: decision.reason,
+          requestGeneration: gen,
+          candlesBySymbol,
+          closedTrades,
+          openTrades,
+          onCommitSymbol: applyASIRECommittedSymbol,
+        });
+        if (!cancelled && outcome.switched) {
+          addLog(`🧠 [ASIRE SCANNER] ${outcome.reason}`, 'success');
+          voice.speak(`ASIRE verified symbol rotation to ${outcome.activeSymbol}`, 'analytical');
+        }
+      }
+    };
+
+    const initialTimer = setTimeout(() => {
+      void runMultiSymbolScan();
+    }, 2500);
+    const interval = setInterval(() => {
+      void runMultiSymbolScan();
+    }, 15_000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [
+    selectedSymbol,
     granularity,
+    candles,
+    tickBuffer,
+    closedTrades,
+    openTrades,
+    botState.allowedRotationSymbols,
+    applyASIRECommittedSymbol,
     addLog,
   ]);
 
@@ -2138,7 +2314,11 @@ export default function App() {
             allowedSymbols: botState.allowedRotationSymbols || [
               '1HZ10V', '1HZ25V', '1HZ50V', '1HZ75V', '1HZ100V', 'R_10', 'R_25', 'R_50', 'R_75', 'R_100'
             ],
-            autonomousSymbolChange: botState.autonomousSymbolChange ?? true,
+            autonomousSymbolChange:
+              autonomyManager.getSnapshot().permissions.allowSymbolRotation &&
+              (botState.autonomousSymbolChange ?? true),
+            asireTopCandidate:
+              asireSnapshot.candidates.find((c) => c.eligible && c.symbol !== selectedSymbol)?.symbol || null,
           },
         }),
       });
@@ -2157,35 +2337,39 @@ export default function App() {
           timestamp: new Date().toLocaleTimeString(),
         });
 
-        // Autonomous Symbol Rotation Check
+        // Autonomous Symbol Rotation Check — strictly routed through ASIRE
         if (
           evalData.symbol_action === 'SWITCH_SYMBOL' &&
           evalData.recommended_symbol &&
-          evalData.recommended_symbol !== selectedSymbol &&
-          (botState.autonomousSymbolChange ?? true)
+          evalData.recommended_symbol !== selectedSymbol
         ) {
-          const cooldownSecs = botState.rotationCooldownSeconds || 60;
-          const lastRotTime = botState.lastSymbolRotationTime || 0;
-          if (Date.now() - lastRotTime > cooldownSecs * 1000) {
-            const nextSym = evalData.recommended_symbol;
-            const isDifferentSeries = nextSym.startsWith('1HZ') !== selectedSymbol.startsWith('1HZ');
-            const estCorrelation = isDifferentSeries ? 0.32 : 0.68;
+          const outcome = await symbolIntelligenceEngine.requestAutonomousRotation({
+            source: 'SUBAGENT_MD',
+            targetSymbol: evalData.recommended_symbol,
+            reason: evalData.symbol_rotation_reason || 'SBAgent consolidation/regime optimization',
+            requestGeneration: generation,
+            candlesBySymbol: { [selectedSymbol]: candles },
+            closedTrades,
+            openTrades,
+            onCommitSymbol: applyASIRECommittedSymbol,
+          });
+          if (outcome.switched) {
+            const corrLabel = outcome.decision?.correlation
+              ? `${outcome.decision.correlation.status}${
+                  outcome.decision.correlation.pearsonCorrelation !== null
+                    ? ` r=${outcome.decision.correlation.pearsonCorrelation.toFixed(2)}`
+                    : ''
+                }`
+              : 'UNKNOWN';
             addLog(
-              `🔄 [Correlation-Aware Rotation] Switched from ${selectedSymbol} to ${nextSym} (Est. Correlation: ${estCorrelation.toFixed(2)} • ${
-                isDifferentSeries ? 'Optimal Low-Correlation Hedge' : 'Intra-Regime Flow'
-              }): ${evalData.symbol_rotation_reason || 'Volatility optimization'}`,
+              `🔄 [ASIRE · SBAgent Rotation] Switched ${outcome.previousSymbol} → ${outcome.activeSymbol} (Correlation: ${corrLabel}): ${outcome.reason}`,
               'warn'
             );
-            setSelectedSymbol(nextSym);
-            derivWS.fetchCandles(nextSym, granularity, 120);
-            setBotState((prev) => ({
-              ...prev,
-              lastSymbolRotationTime: Date.now(),
-              lastRotationReason: evalData.symbol_rotation_reason,
-            }));
             sound.play('win');
-            voice.speak(`SBAgent rotated market to ${nextSym} prioritizing low correlation`, 'analytical');
+            voice.speak(`SBAgent rotated market to ${outcome.activeSymbol} via ASIRE`, 'analytical');
             return;
+          } else {
+            addLog(`🛡️ [ASIRE · SBAgent Hold] ${outcome.reason}`, 'info');
           }
         }
 
@@ -2758,16 +2942,44 @@ export default function App() {
   // Register unified AIActionRegistry runtime handlers across Chat, BottomSheet, Fullscreen, Gemini & SBAgent
   useEffect(() => {
     aiActionRegistry.registerHandlers({
-      rotate_symbol: (args) => {
+      rotate_symbol: async (args, meta) => {
         const nextSym = String(args.symbol || '').trim();
         if (!nextSym) {
           return { status: 'REJECTED', action: 'rotate_symbol', message: 'Target symbol missing.', timestamp: Date.now() };
         }
-        setSelectedSymbol(nextSym);
-        derivWS.fetchCandles(nextSym, granularity, 120);
-        derivWS.subscribeTicks(nextSym);
-        addLog(`🔄 [AI ACTION] Rotated market symbol to ${nextSym}.`, 'info');
-        return { status: 'SUCCESS', action: 'rotate_symbol', message: `Switched market to ${nextSym}.`, data: { symbol: nextSym }, timestamp: Date.now() };
+        if (meta.source === 'MANUAL') {
+          handleManualSymbolSelect(nextSym);
+          addLog(`🔄 [MANUAL] Switched market symbol to ${nextSym}.`, 'info');
+          return { status: 'SUCCESS', action: 'rotate_symbol', message: `Switched market to ${nextSym}.`, data: { symbol: nextSym }, timestamp: Date.now() };
+        }
+        const outcome = await symbolIntelligenceEngine.requestAutonomousRotation({
+          source: (meta.source as any) || 'COPILOT',
+          targetSymbol: nextSym,
+          reason: String(args.reason || `${meta.source} requested symbol rotation`),
+          requestGeneration: autonomyManager.getGeneration(),
+          candlesBySymbol: { [selectedSymbol]: candles },
+          closedTrades,
+          openTrades,
+          onCommitSymbol: applyASIRECommittedSymbol,
+        });
+        if (outcome.switched) {
+          addLog(`🔄 [ASIRE · ${meta.source}] Rotated market symbol to ${outcome.activeSymbol}.`, 'info');
+          return {
+            status: 'SUCCESS',
+            action: 'rotate_symbol',
+            message: outcome.reason,
+            data: { symbol: outcome.activeSymbol, acdeResult: outcome.acdeResult },
+            timestamp: Date.now(),
+          };
+        }
+        addLog(`🛡️ [ASIRE · ${meta.source} BLOCKED] ${outcome.reason}`, 'warn');
+        return {
+          status: outcome.action === 'BLOCKED' ? 'UNAUTHORIZED' : 'REJECTED',
+          action: 'rotate_symbol',
+          message: outcome.reason,
+          data: { blockers: outcome.blockers, activeSymbol: outcome.activeSymbol },
+          timestamp: Date.now(),
+        };
       },
       change_timeframe: (args) => {
         const nextGran = Number(args.granularity || args.seconds || 60);
@@ -3056,7 +3268,7 @@ export default function App() {
         <LivePriceHeader
           selectedSymbol={selectedSymbol}
           onSymbolChange={(sym) => {
-            setSelectedSymbol(sym);
+            handleManualSymbolSelect(sym);
             sound.play('click');
           }}
           currentPrice={currentPrice}
@@ -3257,6 +3469,8 @@ export default function App() {
               onUpdateMartingaleState={(updates) => setMartingaleState((prev) => ({ ...prev, ...updates }))}
               highestWinGate={highestWinGate}
               marketStability={marketStability}
+              asireSnapshot={asireSnapshot}
+              onClearQuarantine={(sym) => symbolIntelligenceEngine.clearQuarantine(sym)}
             />
           </div>
         )}
@@ -3279,9 +3493,7 @@ export default function App() {
                 balance={balance}
                 onExpandFullscreen={() => setIsFullscreenWorkspaceOpen(true)}
                 onRotateSymbol={(sym) => {
-                  setSelectedSymbol(sym);
-                  derivWS.fetchCandles(sym, granularity, 120);
-                  derivWS.subscribeTicks(sym);
+                  handleManualSymbolSelect(sym);
                 }}
                 onAdjustStake={(nextStake, mode) => {
                   setStake(nextStake);
@@ -3317,12 +3529,13 @@ export default function App() {
               closedTrades={closedTrades}
               selectedSymbol={selectedSymbol}
               onSelectSymbol={(sym) => {
-                setSelectedSymbol(sym);
-                derivWS.fetchCandles(sym, granularity, 120);
+                handleManualSymbolSelect(sym);
                 sound.play('click');
               }}
               currency={currency}
               regime={regime}
+              asireSnapshot={asireSnapshot}
+              onClearQuarantine={(sym) => symbolIntelligenceEngine.clearQuarantine(sym)}
               onOpenAutoRotationConfig={() => {
                 setSettingsCategory('sbagent');
                 setIsSettingsDrawerOpen(true);
@@ -3345,6 +3558,7 @@ export default function App() {
                 sniperSetup={sniperSetup}
                 highestWinGate={highestWinGate}
                 marketStability={marketStability}
+                asireSnapshot={asireSnapshot}
                 martingaleState={martingaleState}
                 onUpdateMartingaleState={(updates) => setMartingaleState((prev) => ({ ...prev, ...updates }))}
                 trailingStopConfig={trailingStopConfig}
@@ -3360,9 +3574,7 @@ export default function App() {
                 }}
                 balance={balance}
                 onSelectSymbol={(sym) => {
-                  setSelectedSymbol(sym);
-                  derivWS.fetchCandles(sym, granularity, 120);
-                  derivWS.subscribeTicks(sym);
+                  handleManualSymbolSelect(sym);
                 }}
               />
             </React.Suspense>
@@ -3610,7 +3822,7 @@ export default function App() {
         botState={botState}
         onUpdateBotState={(updates) => setBotState((prev) => ({ ...prev, ...updates }))}
         selectedSymbol={selectedSymbol}
-        onSymbolChange={setSelectedSymbol}
+        onSymbolChange={handleManualSymbolSelect}
         granularity={granularity}
         onGranularityChange={setGranularity}
         onOpenTokenModal={() => setIsTokenModalOpen(true)}
@@ -3657,11 +3869,7 @@ export default function App() {
         stake={stake}
         onStakeChange={setStake}
         onExecuteTrade={(dir) => executeTrade(dir, stake, duration, 'MANUAL', durationUnit, undefined, trailingStopConfig)}
-        onRotateSymbol={(sym) => {
-          setSelectedSymbol(sym);
-          derivWS.fetchCandles(sym, granularity, 120);
-          derivWS.subscribeTicks(sym);
-        }}
+        onRotateSymbol={handleManualSymbolSelect}
         onAdjustStake={(nextStake, mode) => {
           setStake(nextStake);
           if (mode && ['FIXED', 'EQUITY_PERCENT', 'KELLY_HALF', 'KELLY_QUARTER'].includes(mode)) {
@@ -3697,11 +3905,7 @@ export default function App() {
           sound.play('toggle');
           setIsSniperTriggerArmed((prev) => !prev);
         }}
-        onSelectSymbol={(sym) => {
-          setSelectedSymbol(sym);
-          derivWS.fetchCandles(sym, granularity, 120);
-          derivWS.subscribeTicks(sym);
-        }}
+        onSelectSymbol={handleManualSymbolSelect}
         onTightenStop={(dist) => {
           addLog(`🛡️ [VOICE COMMAND] Tightened Trailing Stop-Loss by ${dist} ATR`, 'info');
           voice.speak(`Trailing stop tightened by ${dist} ATR`, 'tactical');

@@ -227,10 +227,15 @@ export function analyzeMarketStability(
   let switchReason: string | undefined;
 
   if (switchRecommended) {
-    // Select lowest volatility index available that is different from current
-    const stableCandidates = ['1HZ10V', 'R_10', '1HZ25V', 'R_25'].filter((s) => s !== symbol && allowedSymbols.includes(s));
-    targetStableSymbol = stableCandidates[0] || (symbol !== '1HZ10V' ? '1HZ10V' : 'R_10');
-    switchReason = `Market instability on ${symbol} (Stability Index: ${stabilityIndex}%, Noise Ratio: ${noiseRatio}x). Auto-switching to stable baseline ${targetStableSymbol}.`;
+    // Select lowest volatility index strictly within permitted allowedSymbols
+    const permittedSet = new Set(allowedSymbols);
+    const stableCandidates = ['1HZ10V', 'R_10', '1HZ25V', 'R_25', ...allowedSymbols].filter(
+      (s, idx, arr) => s !== symbol && permittedSet.has(s) && arr.indexOf(s) === idx
+    );
+    targetStableSymbol = stableCandidates[0];
+    switchReason = targetStableSymbol
+      ? `Market instability on ${symbol} (Stability Index: ${stabilityIndex}%, Noise Ratio: ${noiseRatio}x). Candidate ${targetStableSymbol} identified for ASIRE verification.`
+      : `Market instability on ${symbol} (Stability Index: ${stabilityIndex}%, Noise Ratio: ${noiseRatio}x), with no alternative candidate in permitted universe.`;
   }
 
   return {

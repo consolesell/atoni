@@ -27,6 +27,7 @@ import {
   HighestWinGateResult,
   MarketStabilityMetrics,
   TrailingStopConfig,
+  ASIRESnapshot,
 } from '../types/trading';
 import { SniperConfluenceResult } from '../types/sniper';
 import { sound } from '../lib/soundEngine';
@@ -42,6 +43,7 @@ interface BlackboxHubViewProps {
   sniperSetup: SniperConfluenceResult | null;
   highestWinGate: HighestWinGateResult | null;
   marketStability: MarketStabilityMetrics | null;
+  asireSnapshot?: ASIRESnapshot | null;
   martingaleState: AgenticMartingaleState;
   onUpdateMartingaleState: (updates: Partial<AgenticMartingaleState>) => void;
   trailingStopConfig: TrailingStopConfig;
@@ -62,6 +64,7 @@ export const BlackboxHubView: React.FC<BlackboxHubViewProps> = ({
   sniperSetup,
   highestWinGate,
   marketStability,
+  asireSnapshot,
   martingaleState,
   onUpdateMartingaleState,
   trailingStopConfig,
@@ -438,15 +441,29 @@ export const BlackboxHubView: React.FC<BlackboxHubViewProps> = ({
         </div>
       </div>
 
-      {/* Market Stability & Highest-Win Prioritization Bar */}
+      {/* Market Stability, ASIRE Rotation & Highest-Win Prioritization Bar */}
       <div className="p-4 bg-slate-900/70 border border-slate-800 rounded-xl flex flex-wrap items-center justify-between gap-4 text-xs font-mono">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
             <CheckCircle2 className="w-4 h-4" />
           </div>
           <div>
-            <span className="font-bold text-white">Highest-Win Prioritization Engine:</span>
-            <span className="text-emerald-400 ml-2">Active (Filters all low-probability gamble setups)</span>
+            <span className="font-bold text-white">Highest-Win & ASIRE Rotation:</span>
+            <span className="text-emerald-400 ml-2">
+              {asireSnapshot
+                ? `${asireSnapshot.transitionState} • ${asireSnapshot.lastDecision?.action || 'SCAN'} (${asireSnapshot.rotationsThisSession}/${asireSnapshot.policy.maxRotationsPerSession})`
+                : 'Active (Filters all low-probability gamble setups)'}
+            </span>
+            {asireSnapshot?.lastDecision && (
+              <div className="text-[10px] text-slate-400 mt-0.5">
+                {asireSnapshot.lastDecision.reason}
+                {asireSnapshot.lastDecision.correlation && (
+                  <span className="ml-2 text-cyan-300">
+                    [Corr: {asireSnapshot.lastDecision.correlation.status}]
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

@@ -19,9 +19,13 @@ import {
   Info,
   ShieldCheck,
   AlertTriangle,
+  Cpu,
+  Clock,
+  ShieldAlert,
 } from 'lucide-react';
-import { TradeRecord, MarketRegime } from '../types/trading';
+import { TradeRecord, MarketRegime, ASIRESnapshot, SymbolCandidateEvaluation } from '../types/trading';
 import { DERIV_SYMBOLS } from '../lib/derivSymbols';
+import { formatDurationLabel } from '../lib/adaptiveDurationEngine';
 import { sound } from '../lib/soundEngine';
 import { useTheme } from '../context/ThemeContext';
 
@@ -44,6 +48,7 @@ export interface SymbolMetric {
   edgeScore: number;
   recommendation: 'TOP EDGE' | 'STRONG RUN' | 'CHOPPY' | 'UNDERPERFORMING' | 'UNTRADED';
   isCurrent: boolean;
+  asireEval?: SymbolCandidateEvaluation | null;
 }
 
 interface SymbolPerformanceMatrixProps {
@@ -53,6 +58,8 @@ interface SymbolPerformanceMatrixProps {
   onSelectSymbol: (symbol: string) => void;
   currency?: string;
   regime?: MarketRegime;
+  asireSnapshot?: ASIRESnapshot | null;
+  onClearQuarantine?: (symbol: string) => void;
   onOpenAutoRotationConfig?: () => void;
 }
 
@@ -63,6 +70,8 @@ export const SymbolPerformanceMatrix: React.FC<SymbolPerformanceMatrixProps> = (
   onSelectSymbol,
   currency = 'USD',
   regime,
+  asireSnapshot,
+  onClearQuarantine,
   onOpenAutoRotationConfig,
 }) => {
   const { theme, accentColor } = useTheme();
@@ -162,6 +171,9 @@ export const SymbolPerformanceMatrix: React.FC<SymbolPerformanceMatrixProps> = (
         recommendation = winRate >= 50 ? 'STRONG RUN' : 'CHOPPY';
       }
 
+      const asireEval = asireSnapshot?.candidates?.find((c) => c.symbol === symId) || null;
+      const effectiveEdgeScore = asireEval ? Math.round(asireEval.overallScore) : Math.round(edgeScore);
+
       return {
         symbol: symId,
         displayName: symDef.displayName,
@@ -178,12 +190,13 @@ export const SymbolPerformanceMatrix: React.FC<SymbolPerformanceMatrixProps> = (
         recentTrades,
         currentWinStreak,
         avgProfitPerTrade: totalTrades > 0 ? netProfit / totalTrades : 0,
-        edgeScore: Math.round(edgeScore),
+        edgeScore: effectiveEdgeScore,
         recommendation,
         isCurrent: symId === selectedSymbol,
+        asireEval,
       };
     });
-  }, [universe, closedTrades, selectedSymbol]);
+  }, [universe, closedTrades, selectedSymbol, asireSnapshot]);
 
   // Overall Market Summary stats
   const summaryStats = useMemo(() => {
@@ -496,6 +509,81 @@ export const SymbolPerformanceMatrix: React.FC<SymbolPerformanceMatrixProps> = (
         </div>
       </div>
 
+      {/* ASIRE Multi-Symbol Intelligence Telemetry Strip */}
+      {asireSnapshot && (
+        <div
+          className="p-3.5 rounded-xl border text-xs font-mono space-y-2"
+          style={{
+            backgroundColor: theme.bgApp,
+            borderColor:
+              asireSnapshot.transitionState === 'PENDING_VERIFICATION'
+                ? '#f59e0b'
+                : theme.borderColor,
+          }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Cpu className="w-4 h-4 text-cyan-400" />
+              <span className="font-bold" style={{ color: theme.textPrimary }}>
+                ASIRE ROTATION GOVERNANCE
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                  asireSnapshot.transitionState === 'PENDING_VERIFICATION'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse'
+                    : asireSnapshot.lastDecision?.action === 'SWITCH'
+                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                    : asireSnapshot.lastDecision?.action === 'BLOCKED'
+                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/40'
+                    : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40'
+                }`}
+              >
+                {asireSnapshot.transitionState === 'PENDING_VERIFICATION'
+                  ? `VERIFYING → ${asireSnapshot.pendingTargetSymbol}`
+                  : asireSnapshot.lastDecision?.action || 'SCANNING'}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 text-[11px]">
+              <span style={{ color: theme.textSecondary }}>
+                Rotations:{' '}
+                <strong style={{ color: theme.textPrimary }}>
+                  {asireSnapshot.rotationsThisSession}/{asireSnapshot.policy.maxRotationsPerSession}
+                </strong>
+              </span>
+              <span className="flex items-center gap-1" style={{ color: theme.textSecondary }}>
+                <Clock className="w-3 h-3 text-cyan-400" />
+                Cooldown:{' '}
+                <strong className={asireSnapshot.cooldownRemainingSeconds > 0 ? 'text-amber-400' : 'text-emerald-400'}>
+                  {asireSnapshot.cooldownRemainingSeconds > 0 ? `${asireSnapshot.cooldownRemainingSeconds}s` : 'READY'}
+                </strong>
+              </span>
+              {asireSnapshot.learningSummary.followedTrades > 0 && (
+                <span style={{ color: theme.textSecondary }}>
+                  OOS Win:{' '}
+                  <strong className="text-emerald-400">
+                    {asireSnapshot.learningSummary.winRateAfterRotation}% ({asireSnapshot.learningSummary.followedTrades})
+                  </strong>
+                </span>
+              )}
+            </div>
+          </div>
+
+          {asireSnapshot.lastDecision && (
+            <div className="text-[11px] leading-snug" style={{ color: theme.textSecondary }}>
+              {asireSnapshot.lastDecision.reason}
+              {asireSnapshot.lastDecision.confirmationsRequired > 1 &&
+                asireSnapshot.lastDecision.confirmationsCount > 0 && (
+                  <span className="ml-2 text-cyan-300">
+                    [Confirmations: {asireSnapshot.lastDecision.confirmationsCount}/
+                    {asireSnapshot.lastDecision.confirmationsRequired}]
+                  </span>
+                )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Controls Bar: Search, Filters, Sorting */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
         {/* Filter Pills */}
@@ -727,6 +815,64 @@ export const SymbolPerformanceMatrix: React.FC<SymbolPerformanceMatrixProps> = (
                       )}
                     </div>
                   </div>
+
+                  {/* ASIRE Live Eligibility, Correlation & ACDE Row */}
+                  {item.asireEval && (
+                    <div className="mt-1.5 pt-1.5 border-t space-y-1 text-[10px] font-mono" style={{ borderColor: theme.borderColor }}>
+                      <div className="flex items-center justify-between gap-1">
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-bold border ${
+                            item.asireEval.eligibilityStatus === 'ELIGIBLE'
+                              ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                              : item.asireEval.eligibilityStatus === 'QUARANTINED'
+                              ? 'bg-rose-500/20 text-rose-400 border-rose-500/40'
+                              : 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                          }`}
+                        >
+                          {item.asireEval.eligibilityStatus}
+                        </span>
+                        <span style={{ color: theme.textSecondary }}>
+                          {item.asireEval.acdeDuration
+                            ? `ACDE: ${formatDurationLabel(item.asireEval.acdeDuration.value, item.asireEval.acdeDuration.unit)}`
+                            : 'ACDE: --'}
+                        </span>
+                        {!isSelected && item.asireEval.snapshot?.correlationWithActive && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded border ${
+                              item.asireEval.snapshot.correlationWithActive.status === 'LOW'
+                                ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'
+                                : item.asireEval.snapshot.correlationWithActive.status === 'HIGH'
+                                ? 'text-amber-300 border-amber-500/30 bg-amber-500/10'
+                                : 'text-slate-400 border-slate-700 bg-slate-900'
+                            }`}
+                            title={item.asireEval.snapshot.correlationWithActive.reason}
+                          >
+                            Corr: {item.asireEval.snapshot.correlationWithActive.status}
+                            {item.asireEval.snapshot.correlationWithActive.pearsonCorrelation !== null
+                              ? ` (${item.asireEval.snapshot.correlationWithActive.pearsonCorrelation.toFixed(2)})`
+                              : ''}
+                          </span>
+                        )}
+                      </div>
+                      {item.asireEval.rejectionReasons.length > 0 && (
+                        <div className="text-rose-400/90 text-[9px] truncate" title={item.asireEval.rejectionReasons.join(' | ')}>
+                          {item.asireEval.rejectionReasons[0]}
+                        </div>
+                      )}
+                      {item.asireEval.quarantine?.quarantined && onClearQuarantine && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            sound.play('click');
+                            onClearQuarantine(item.symbol);
+                          }}
+                          className="w-full py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/40 text-[9px] font-bold flex items-center justify-center gap-1"
+                        >
+                          <ShieldAlert className="w-3 h-3" /> Release Quarantine
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Card Action: Rotate Button */}

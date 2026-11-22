@@ -1,4 +1,10 @@
-import { DurationGovernancePolicy, DurationUnit, EarlyExitPolicyConfig, ExecutionModeSetting } from './trading';
+import {
+  ASIREPolicyConfig,
+  DurationGovernancePolicy,
+  DurationUnit,
+  EarlyExitPolicyConfig,
+  ExecutionModeSetting,
+} from './trading';
 
 export interface GeneralSettings {
   defaultStake: number; // default: 1.00
@@ -96,6 +102,7 @@ export interface TerminalSettings {
   earlyExit?: EarlyExitPolicyConfig;
   executionMode?: ExecutionModeSetting;
   durationGovernance?: DurationGovernancePolicy;
+  asire?: ASIREPolicyConfig;
   indicators: IndicatorSettings;
   ai: AISettings;
   audio: AudioSettings;
@@ -103,6 +110,35 @@ export interface TerminalSettings {
   interface: InterfaceSettings;
   updatedAt: string;
 }
+
+export const DEFAULT_ASIRE_POLICY: ASIREPolicyConfig = {
+  enabled: true,
+  sensitivity: 'BALANCED',
+  cooldownSeconds: 60,
+  minScoreImprovement: 10,
+  confirmationEvaluations: 2,
+  minDataQualityThreshold: 0.45,
+  maxRotationsPerSession: 8,
+  repeatedFailureCooldownSeconds: 300,
+  quarantineFailureThreshold: 3,
+  quarantineDurationMs: 300_000,
+  maxDataAgeMs: 120_000,
+  minCorrelationSamples: 15,
+  minHistoricalSamplesForTrust: 5,
+  weights: {
+    signalQuality: 0.16,
+    directionalAgreement: 0.12,
+    stabilityScore: 0.10,
+    volatilitySuitability: 0.10,
+    strategyCompatibility: 0.12,
+    historicalExpectancy: 0.08,
+    recentPerformance: 0.06,
+    dataFreshness: 0.08,
+    riskExposure: 0.06,
+    regimeCompatibility: 0.06,
+    durationCompatibility: 0.06,
+  },
+};
 
 export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   version: 4,
@@ -170,6 +206,10 @@ export const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
     },
     perSymbolBounds: {},
     perStrategyBounds: {},
+  },
+  asire: {
+    ...DEFAULT_ASIRE_POLICY,
+    weights: { ...DEFAULT_ASIRE_POLICY.weights },
   },
   indicators: {
     rsiPeriod: 14,

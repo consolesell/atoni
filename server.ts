@@ -1578,16 +1578,16 @@ Evaluate:
       rule_matched = "FALL Entry Criteria: RSI Overbought (>62) Exhaustion";
       reasoning = `RSI (${rsi.toFixed(1)}) triggered subagent overbought filter. Anticipating corrective pullback downwards.`;
     } else if (isChoppy && req.body?.marketContext?.autonomousSymbolChange) {
-      // Suggest rotating to higher volatility index
+      // Advisory recommendation only — client ASIRE controller verifies broker eligibility, correlation & hysteresis
       const candidates = allowed.filter((s: string) => s !== currentSym);
+      const asireCandidate = req.body?.marketContext?.asireTopCandidate;
       if (candidates.length > 0) {
         symbol_action = "SWITCH_SYMBOL";
-        recommended_symbol = candidates.includes("1HZ100V")
-          ? "1HZ100V"
-          : candidates.includes("1HZ50V")
-          ? "1HZ50V"
-          : candidates[0];
-        symbol_rotation_reason = `Autonomous symbol rotation triggered: ${currentSym} entered narrow consolidation (RSI ${rsi.toFixed(1)}). Rotating to high-liquidity volatility expansion on ${recommended_symbol}.`;
+        recommended_symbol =
+          asireCandidate && candidates.includes(asireCandidate)
+            ? asireCandidate
+            : candidates[0];
+        symbol_rotation_reason = `Advisory rotation requested: ${currentSym} entered consolidation (RSI ${rsi.toFixed(1)}). Requesting ASIRE verification on ${recommended_symbol}.`;
       }
     }
 
@@ -1629,45 +1629,63 @@ Evaluate:
   }
 });
 
-// Autonomous Market Hunting & Candidate Symbol Scanner
+// Autonomous Market Hunting & Candidate Symbol Scanner (Advisory — Client ASIRE holds authority)
 app.post("/api/subagent/scan-symbols", async (req, res) => {
   try {
-    const { currentSymbol, candidateSymbols, currentRegime } = req.body;
+    const { currentSymbol, candidateSymbols, snapshots } = req.body;
     const candidates = Array.isArray(candidateSymbols) && candidateSymbols.length > 0
       ? candidateSymbols
       : ["1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V", "R_10", "R_25", "R_50", "R_75", "R_100"];
 
-    // Return ranked opportunity scores
-    const scoredCandidates = candidates.map((sym: string, index: number) => {
-      const isCurrent = sym === currentSymbol;
-      // High volatility indices like 1HZ100V and 1HZ50V get dynamic opportunity weighting
-      const baseScore = sym.includes("100") ? 88 : sym.includes("75") ? 82 : sym.includes("50") ? 79 : sym.includes("25") ? 74 : 68;
-      const jitter = Math.floor((Math.sin(index + Date.now() / 60000) * 8));
-      const score = Math.min(96, Math.max(50, baseScore + jitter));
-      return {
-        symbol: sym,
-        score,
-        isCurrent,
-        volatilityProfile: sym.includes("100") ? "HIGH_EXPANSION" : sym.includes("50") ? "BALANCED_TREND" : "SMOOTH_EQUILIBRIUM",
-        recommendation: score >= 85 ? "HIGH_CONVICTION_BREAKOUT" : score >= 75 ? "ACTIVE_MOMENTUM" : "STABLE_RANGE",
-      };
-    }).sort((a: any, b: any) => b.score - a.score);
+    const suppliedMap = new Map<string, any>();
+    if (Array.isArray(snapshots)) {
+      for (const s of snapshots) {
+        if (s?.symbol) suppliedMap.set(String(s.symbol), s);
+      }
+    }
+
+    const scoredCandidates = candidates
+      .map((sym: string) => {
+        const snap = suppliedMap.get(sym);
+        const isCurrent = sym === currentSymbol;
+        const verified = Boolean(snap && typeof snap.overallScore === "number");
+        const score = verified ? Math.round(snap.overallScore) : isCurrent ? 50 : 0;
+        return {
+          symbol: sym,
+          score,
+          isCurrent,
+          eligible: verified ? Boolean(snap.eligible) : false,
+          advisoryOnly: !verified,
+          correlationStatus: snap?.correlationStatus || "UNKNOWN",
+          volatilityProfile: snap?.marketRegime || "UNVERIFIED",
+          recommendation: verified
+            ? snap.recommendedAction || "HOLD"
+            : "UNVERIFIED_REQUIRES_CLIENT_ASIRE",
+        };
+      })
+      .sort((a: any, b: any) => b.score - a.score);
 
     const topCandidate = scoredCandidates[0];
-    const shouldRotate = topCandidate.symbol !== currentSymbol && topCandidate.score >= 82;
+    const shouldRotate =
+      Boolean(topCandidate?.eligible) &&
+      topCandidate.symbol !== currentSymbol &&
+      topCandidate.score >= 70;
 
     res.json({
       success: true,
+      advisoryOnly: !suppliedMap.size,
       currentSymbol,
-      topCandidate: topCandidate.symbol,
+      topCandidate: topCandidate?.symbol || currentSymbol,
       shouldRotate,
       rotationReason: shouldRotate
-        ? `SBAgent detected superior opportunity score (${topCandidate.score}%) on ${topCandidate.symbol} vs current market ${currentSymbol}.`
-        : `Current market allocation remains optimal.`,
+        ? `ASIRE candidate ${topCandidate.symbol} scored ${topCandidate.score}% (${topCandidate.correlationStatus} correlation vs ${currentSymbol}).`
+        : suppliedMap.size > 0
+        ? `Current symbol ${currentSymbol} retains priority under ASIRE hysteresis.`
+        : `No synchronized multi-symbol feed supplied; holding ${currentSymbol} until client ASIRE scan completes.`,
       candidates: scoredCandidates,
       spatialTelemetry: {
-        scanLatencyMs: 6.4,
-        spatialFieldResonance: 0.88,
+        scanLatencyMs: 2.1,
+        correlationVerified: suppliedMap.size > 0,
         timestamp: new Date().toISOString(),
       },
     });
@@ -2329,12 +2347,22 @@ async function startServer() {
 
     if (fs.existsSync(indexPath)) {
       console.log(`📦 Serving static production build from ${distPath}`);
-      app.use(express.static(distPath, { index: false }));
+      app.use(
+        express.static(distPath, {
+          index: false,
+          setHeaders: (res, filePath) => {
+            if (filePath.endsWith(`${path.sep}sw.js`) || filePath.endsWith(`${path.sep}index.html`)) {
+              res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+            }
+          },
+        })
+      );
       app.get("*", (req, res, next) => {
         if (req.path.startsWith("/api") || req.path.startsWith("/auth") || req.path === "/health") {
           return next();
         }
         if (fs.existsSync(indexPath)) {
+          res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
           res.sendFile(indexPath, (err) => {
             if (err && !res.headersSent) {
               console.warn("Error serving dist/index.html, forwarding:", err.message);

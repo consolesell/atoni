@@ -954,5 +954,225 @@ export interface SessionStateSnapshot {
   recoverySummary?: string;
 }
 
+// ── Autonomous Symbol Intelligence & Rotation Engine (ASIRE) Types ──
+
+export type SymbolEligibilityStatus =
+  | 'ELIGIBLE'
+  | 'DISALLOWED_UNIVERSE'
+  | 'UNAVAILABLE_BROKER'
+  | 'CONTRACT_UNSUPPORTED'
+  | 'STALE_DATA'
+  | 'DATA_UNAVAILABLE'
+  | 'QUARANTINED'
+  | 'UNVERIFIED';
+
+export type CorrelationStatus = 'LOW' | 'MODERATE' | 'HIGH' | 'UNKNOWN';
+
+export interface CorrelationResult {
+  pair: [string, string];
+  status: CorrelationStatus;
+  pearsonCorrelation: number | null;
+  volatilityAdjustedCorrelation: number | null;
+  overlappingSamples: number;
+  confidence: number; // 0..1 based on synchronized bar sample count
+  computedAt: number;
+  reason: string;
+}
+
+export interface SymbolRankingWeights {
+  signalQuality: number;
+  directionalAgreement: number;
+  stabilityScore: number;
+  volatilitySuitability: number;
+  strategyCompatibility: number;
+  historicalExpectancy: number;
+  recentPerformance: number;
+  dataFreshness: number;
+  riskExposure: number;
+  regimeCompatibility: number;
+  durationCompatibility: number;
+}
+
+export interface SymbolRankingBreakdown {
+  signalQuality: number; // 0..1
+  directionalAgreement: number; // 0..1
+  stabilityScore: number; // 0..1
+  volatilitySuitability: number; // 0..1
+  strategyCompatibility: number; // 0..1
+  historicalExpectancy: number; // 0..1
+  recentPerformance: number; // 0..1
+  dataFreshness: number; // 0..1
+  riskExposure: number; // 0..1
+  regimeCompatibility: number; // 0..1
+  durationCompatibility: number; // 0..1
+  evidenceScore: number; // 0..1
+  historicalSamples: number;
+}
+
+export type RotationDecisionAction = 'STAY' | 'SWITCH' | 'HOLD' | 'BLOCKED';
+
+export type RotationTransitionState =
+  | 'IDLE'
+  | 'PENDING_VERIFICATION'
+  | 'FAILED'
+  | 'ROLLED_BACK';
+
+export type RotationRequestSource =
+  | 'SCANNER'
+  | 'MARKET_STABILITY'
+  | 'SUBAGENT_MD'
+  | 'GEMINI_AI'
+  | 'LOCAL_AI'
+  | 'COPILOT'
+  | 'MANUAL';
+
+export type ASIRESensitivity = 'CONSERVATIVE' | 'BALANCED' | 'RESPONSIVE';
+
+export interface SymbolQuarantineState {
+  symbol: string;
+  quarantined: boolean;
+  failureCount: number;
+  quarantinedAt: number | null;
+  recoverAt: number | null;
+  lastFailureAt?: number;
+  reason?: string;
+}
+
+export interface SymbolMarketSnapshot {
+  symbol: string;
+  displayName: string;
+  latestPrice: number;
+  tickTimestamp: number;
+  candleTimestamp: number;
+  candleCount: number;
+  dataFreshnessMs: number;
+  isDataFresh: boolean;
+  realizedVolatility: number;
+  baselineVolatility: number;
+  volatilityAcceleration: number;
+  marketRegime: MarketRegime;
+  trendDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  trendStrength: number; // 0..1
+  momentumPersistence: number; // 0..1
+  rsiNow: number | null;
+  bollingerBandwidth: number;
+  supportLevel: number | null;
+  resistanceLevel: number | null;
+  supportProximity: number | null;
+  resistanceProximity: number | null;
+  candlePattern: CandlestickPatternResult;
+  priceActionQuality: number; // 0..1
+  signalStability: number; // 0..1
+  directionalConsistency: number; // 0..1
+  mtfAgreement: number; // 0..1
+  strategyConfidence: number; // 0..1
+  recommendedAction: 'BUY' | 'SELL' | 'HOLD';
+  spreadQuality: number | null;
+  connectionHealthy: boolean;
+  dataAvailable: boolean;
+  stabilityIndex: number; // 0..100
+  acdeResult?: ACDEResult | null;
+  correlationWithActive?: CorrelationResult | null;
+}
+
+export interface SymbolCandidateEvaluation {
+  symbol: string;
+  eligibilityStatus: SymbolEligibilityStatus;
+  eligible: boolean;
+  rejectionReasons: string[];
+  ranking: SymbolRankingBreakdown;
+  overallScore: number; // 0..100
+  recommendedAction: 'BUY' | 'SELL' | 'HOLD';
+  acdeDuration: {
+    value: number;
+    unit: DurationUnit;
+    approved: boolean;
+  } | null;
+  quarantine: SymbolQuarantineState | null;
+  snapshot: SymbolMarketSnapshot | null;
+  evaluatedAt: number;
+}
+
+export interface RotationDecisionResult {
+  action: RotationDecisionAction;
+  currentSymbol: string;
+  targetSymbol: string | null;
+  currentScore: number;
+  targetScore: number | null;
+  scoreDelta: number;
+  confirmationsCount: number;
+  confirmationsRequired: number;
+  cooldownRemainingSeconds: number;
+  rotationsThisSession: number;
+  maxRotationsPerSession: number;
+  reason: string;
+  blockers: string[];
+  correlation?: CorrelationResult | null;
+  evaluatedAt: number;
+}
+
+export interface RotationLearningRecord {
+  id: string;
+  timestamp: number;
+  source: RotationRequestSource;
+  previousSymbol: string;
+  nextSymbol: string;
+  previousScore: number;
+  nextScore: number;
+  scoreDelta: number;
+  reason: string;
+  regime: string;
+  strategyVersion: string;
+  durationRecommendation: DurationRecommendation | null;
+  confidence: number;
+  followedByTrade: boolean;
+  tradeId?: string;
+  contractOutcome?: 'WIN' | 'LOSS' | 'SOLD' | null;
+  actualHoldingMs?: number;
+  pnl?: number;
+  outcomeDelta?: number;
+  correlationAtSwitch?: CorrelationResult | null;
+}
+
+export interface ASIREPolicyConfig {
+  enabled: boolean;
+  sensitivity: ASIRESensitivity;
+  cooldownSeconds: number;
+  minScoreImprovement: number;
+  confirmationEvaluations: number;
+  minDataQualityThreshold: number; // 0..1
+  maxRotationsPerSession: number;
+  repeatedFailureCooldownSeconds: number;
+  quarantineFailureThreshold: number;
+  quarantineDurationMs: number;
+  maxDataAgeMs: number;
+  minCorrelationSamples: number;
+  minHistoricalSamplesForTrust: number;
+  weights: SymbolRankingWeights;
+}
+
+export interface ASIRESnapshot {
+  enabled: boolean;
+  transitionState: RotationTransitionState;
+  pendingTargetSymbol: string | null;
+  activeSymbol: string;
+  lastDecision: RotationDecisionResult | null;
+  candidates: SymbolCandidateEvaluation[];
+  quarantinedSymbols: Record<string, SymbolQuarantineState>;
+  rotationsThisSession: number;
+  cooldownRemainingSeconds: number;
+  lastRotationAt: number;
+  lastRotationReason: string | null;
+  lastEvaluatedAt: number;
+  policy: ASIREPolicyConfig;
+  learningSummary: {
+    totalRotations: number;
+    followedTrades: number;
+    winRateAfterRotation: number;
+    netPnLAfterRotation: number;
+  };
+}
+
+
 
 

@@ -34,6 +34,9 @@ export const AutonomyConfigModal: React.FC<AutonomyConfigModalProps> = ({
   const [maxConsecutiveLosses, setMaxConsecutiveLosses] = useState<number>(preset.risk.maxConsecutiveLosses);
   const [sizingMode, setSizingMode] = useState<AutonomyPreset['risk']['sizingMode']>(preset.risk.sizingMode);
   const [allowedSymbols, setAllowedSymbols] = useState<string[]>([...preset.allowedSymbols]);
+  const [rotationCooldownSeconds, setRotationCooldownSeconds] = useState<number>(preset.rotationCooldownSeconds ?? 60);
+  const [minScoreImprovement, setMinScoreImprovement] = useState<number>(preset.minScoreImprovement ?? 10);
+  const [maxRotationsPerSession, setMaxRotationsPerSession] = useState<number>(preset.maxRotationsPerSession ?? 8);
   const [strategyProfile, setStrategyProfile] = useState<string>(preset.strategyProfile);
 
   if (!isOpen) return null;
@@ -61,6 +64,9 @@ export const AutonomyConfigModal: React.FC<AutonomyConfigModalProps> = ({
         sizingMode,
       },
       allowedSymbols,
+      rotationCooldownSeconds: Math.max(10, Math.min(600, rotationCooldownSeconds)),
+      minScoreImprovement: Math.max(2, Math.min(40, minScoreImprovement)),
+      maxRotationsPerSession: Math.max(1, Math.min(50, maxRotationsPerSession)),
       strategyProfile,
     };
     onSavePreset(updatedPreset);
@@ -257,6 +263,52 @@ export const AutonomyConfigModal: React.FC<AutonomyConfigModalProps> = ({
                   </button>
                 );
               })}
+            </div>
+
+            {/* ASIRE Rotation Bounds */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3 border-t border-slate-900">
+              <div>
+                <label className="text-slate-400 text-[10px] block mb-1">
+                  ROTATION COOLDOWN (SEC)
+                </label>
+                <input
+                  type="number"
+                  min="10"
+                  max="600"
+                  step="5"
+                  value={rotationCooldownSeconds}
+                  onChange={(e) => setRotationCooldownSeconds(parseInt(e.target.value, 10) || 60)}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-cyan-300 font-bold focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 text-[10px] block mb-1">
+                  MIN SCORE DELTA (PTS)
+                </label>
+                <input
+                  type="number"
+                  min="2"
+                  max="40"
+                  step="1"
+                  value={minScoreImprovement}
+                  onChange={(e) => setMinScoreImprovement(parseFloat(e.target.value) || 10)}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-cyan-300 font-bold focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 text-[10px] block mb-1">
+                  MAX ROTATIONS / SESSION
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="50"
+                  step="1"
+                  value={maxRotationsPerSession}
+                  onChange={(e) => setMaxRotationsPerSession(parseInt(e.target.value, 10) || 8)}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-cyan-300 font-bold focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
             </div>
           </div>
 

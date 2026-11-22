@@ -1,5 +1,6 @@
 import {
   BalanceSnapshot,
+  Candle,
   ConnectionState,
   DerivAuthMethod,
   DerivDurationUnitCode,
@@ -104,8 +105,12 @@ export class DerivWebSocketClient {
 
   private nextReqId = 1;
   private pendingRequests = new Map<number, PendingRequestEntry>();
+  private pendingPublicRequests = new Map<number, PendingRequestEntry>();
   private subscriptions = new Map<string, LogicalSubscription>();
   private rateLimitHistory = new Map<RateLimitCategory, number[]>();
+  private perSymbolCandles = new Map<string, { candles: Candle[]; granularity: number; updatedAt: number }>();
+  private perSymbolLastTick = new Map<string, { epoch: number; quote: number; receivedAt: number }>();
+  private activeSymbolsCache: { symbols: Set<string>; rawList: any[]; fetchedAt: number } | null = null;
 
   private wsFactory: (url: string) => WebSocketLike;
   private fetchImpl: typeof fetch;
@@ -272,6 +277,53 @@ export class DerivWebSocketClient {
       clearTimeout(entry.timer);
       entry.reject(new Error(reason));
       this.pendingRequests.delete(reqId);
+    }
+  }
+
+  private rejectPendingPublicRequests(reason: string): void {
+    for (const [reqId, entry] of this.pendingPublicRequests.entries()) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error(reason));
+      this.pendingPublicRequests.delete(reqId);
+    }
+  }
+
+  private recordMarketPayload(data: any): void {
+    if (!data || typeof data !== 'object') return;
+    if (data.msg_type === 'tick' && data.tick?.symbol) {
+      const sym = String(data.tick.symbol);
+      const quote = Number(data.tick.quote ?? data.tick.price);
+      const epoch = Number(data.tick.epoch || Math.floor(Date.now() / 1000));
+      if (Number.isFinite(quote)) {
+        this.perSymbolLastTick.set(sym, { epoch, quote, receivedAt: Date.now() });
+      }
+    } else if (data.msg_type === 'candles' && Array.isArray(data.candles)) {
+      const reqSymbol = String(data.echo_req?.ticks_history || '');
+      const gran = Number(data.echo_req?.granularity || this.activeGranularity || 60);
+      if (reqSymbol && data.candles.length > 0) {
+        const normalized: Candle[] = data.candles
+          .map((c: any) => ({
+            epoch: Number(c.epoch),
+            open: Number(c.open),
+            high: Number(c.high),
+            low: Number(c.low),
+            close: Number(c.close),
+          }))
+          .filter((c: Candle) => Number.isFinite(c.epoch) && Number.isFinite(c.close));
+        if (normalized.length > 0) {
+          this.perSymbolCandles.set(reqSymbol, {
+            candles: normalized,
+            granularity: gran,
+            updatedAt: Date.now(),
+          });
+          const latest = normalized[normalized.length - 1];
+          this.perSymbolLastTick.set(reqSymbol, {
+            epoch: latest.epoch,
+            quote: latest.close,
+            receivedAt: Date.now(),
+          });
+        }
+      }
     }
   }
 
@@ -1126,6 +1178,7 @@ export class DerivWebSocketClient {
       }
     }
 
+    this.recordMarketPayload(data);
     this.emit(data);
   }
 
@@ -1346,6 +1399,8 @@ export class DerivWebSocketClient {
     this.pendingSendQueue = [];
     this.subscriptions.clear();
     this.rejectPendingRequests('User logged out.');
+    this.rejectPendingPublicRequests('User logged out.');
+    this.activeSymbolsCache = null;
 
     if (typeof window !== 'undefined') {
       try {
@@ -1412,6 +1467,18 @@ export class DerivWebSocketClient {
         try {
           const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
           if (!data || typeof data !== 'object') return;
+          if (typeof data.req_id === 'number') {
+            const pending = this.pendingPublicRequests.get(data.req_id);
+            if (pending && pending.generation === gen) {
+              clearTimeout(pending.timer);
+              this.pendingPublicRequests.delete(data.req_id);
+              if (data.error) {
+                pending.reject(new Error(redactTokenFromLog(data.error.message || 'Deriv public request error')));
+              } else {
+                pending.resolve(data);
+              }
+            }
+          }
           if (data.msg_type === 'tick' && data.tick?.symbol && data.subscription?.id) {
             const sub = this.subscriptions.get(`ticks:${data.tick.symbol}`);
             if (sub) {
@@ -1419,6 +1486,7 @@ export class DerivWebSocketClient {
               sub.active = true;
             }
           }
+          this.recordMarketPayload(data);
           this.emit(data);
         } catch {}
       };
@@ -1430,6 +1498,7 @@ export class DerivWebSocketClient {
       sock.onclose = () => {
         if (gen !== this.publicGeneration) return;
         this.isPublicConnecting = false;
+        this.rejectPendingPublicRequests('Public market WebSocket closed.');
         if (this.publicReconnectTimer) clearTimeout(this.publicReconnectTimer);
         this.publicReconnectAttempts++;
         const delay = Math.min(12000, 1500 * Math.pow(1.5, Math.min(this.publicReconnectAttempts, 5)));
@@ -1554,6 +1623,149 @@ export class DerivWebSocketClient {
     return num < 1_000_000_000_000 ? num * 1000 : num;
   }
 
+  public requestPublicOrPrimary<T = any>(
+    payload: Record<string, any>,
+    options: { timeoutMs?: number; category?: RateLimitCategory } = {}
+  ): Promise<T> {
+    if (this.publicWs && this.publicWs.readyState === WS_OPEN) {
+      const category = options.category || this.inferCategory(payload);
+      const rate = this.checkRateLimit(category);
+      if (!rate.allowed) {
+        return Promise.reject(
+          new Error(`Client rate budget exceeded for ${category}. Retry after ${rate.retryAfterMs}ms.`)
+        );
+      }
+
+      const reqId = this.nextReqId++;
+      const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+      const generation = this.publicGeneration;
+
+      return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pendingPublicRequests.delete(reqId);
+          reject(new Error(`Deriv public request timed out after ${timeoutMs}ms (req_id=${reqId}).`));
+        }, timeoutMs);
+
+        this.pendingPublicRequests.set(reqId, {
+          reqId,
+          resolve,
+          reject,
+          timer,
+          generation,
+        });
+
+        try {
+          this.publicWs!.send(JSON.stringify({ ...payload, req_id: reqId }));
+        } catch (err: any) {
+          clearTimeout(timer);
+          this.pendingPublicRequests.delete(reqId);
+          reject(new Error(redactTokenFromLog(err?.message || 'Failed sending public request')));
+        }
+      });
+    }
+
+    return this.request<T>(payload, options);
+  }
+
+  public getCachedSymbolCandles(
+    symbol: string
+  ): { candles: Candle[]; granularity: number; updatedAt: number } | null {
+    const entry = this.perSymbolCandles.get(symbol);
+    return entry ? { ...entry, candles: [...entry.candles] } : null;
+  }
+
+  public getCachedSymbolTick(
+    symbol: string
+  ): { epoch: number; quote: number; receivedAt: number } | null {
+    const entry = this.perSymbolLastTick.get(symbol);
+    return entry ? { ...entry } : null;
+  }
+
+  public seedSymbolMarketData(symbol: string, candles: Candle[], granularity = 60): void {
+    if (!symbol || !Array.isArray(candles) || candles.length === 0) return;
+    this.perSymbolCandles.set(symbol, {
+      candles: [...candles],
+      granularity,
+      updatedAt: Date.now(),
+    });
+    const last = candles[candles.length - 1];
+    this.perSymbolLastTick.set(symbol, {
+      epoch: last.epoch,
+      quote: last.close,
+      receivedAt: Date.now(),
+    });
+  }
+
+  public async fetchActiveSymbols(force = false): Promise<string[]> {
+    const now = Date.now();
+    if (!force && this.activeSymbolsCache && now - this.activeSymbolsCache.fetchedAt < 300_000) {
+      return Array.from(this.activeSymbolsCache.symbols);
+    }
+    if (!this.isConnected()) return [];
+
+    try {
+      const res = await this.requestPublicOrPrimary<any>(
+        { active_symbols: 'brief', product_type: 'basic' },
+        { category: 'other', timeoutMs: 8000 }
+      );
+      const list = res?.active_symbols;
+      if (Array.isArray(list)) {
+        const available = list
+          .filter((item: any) => item?.symbol && !item.is_trading_suspended && item.exchange_is_open !== 0)
+          .map((item: any) => String(item.symbol));
+        this.activeSymbolsCache = {
+          symbols: new Set(available),
+          rawList: list,
+          fetchedAt: Date.now(),
+        };
+        return available;
+      }
+    } catch {
+      // Non-fatal: caller treats empty/unverified carefully
+    }
+    return this.activeSymbolsCache ? Array.from(this.activeSymbolsCache.symbols) : [];
+  }
+
+  public async fetchCandlesAsync(symbol: string, granularity = 60, count = 120): Promise<Candle[]> {
+    if (!symbol || !this.isConnected()) return [];
+    const res = await this.requestPublicOrPrimary<any>(
+      {
+        ticks_history: symbol,
+        end: 'latest',
+        count,
+        style: 'candles',
+        granularity,
+      },
+      { category: 'other', timeoutMs: 8000 }
+    );
+    if (Array.isArray(res?.candles) && res.candles.length > 0) {
+      const normalized: Candle[] = res.candles
+        .map((c: any) => ({
+          epoch: Number(c.epoch),
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+        }))
+        .filter((c: Candle) => Number.isFinite(c.epoch) && Number.isFinite(c.close));
+      if (normalized.length > 0) {
+        this.perSymbolCandles.set(symbol, {
+          candles: normalized,
+          granularity,
+          updatedAt: Date.now(),
+        });
+        const latest = normalized[normalized.length - 1];
+        this.perSymbolLastTick.set(symbol, {
+          epoch: latest.epoch,
+          quote: latest.close,
+          receivedAt: Date.now(),
+        });
+      }
+      return normalized;
+    }
+    return [];
+  }
+
   public async fetchContractsForSymbol(symbol: string, currency?: string): Promise<boolean> {
     if (!symbol) return false;
     if (acde.getCachedMetadata(symbol, 'CALL')) return true;
@@ -1577,6 +1789,126 @@ export class DerivWebSocketClient {
       // Non-fatal: falls back to ACDE conservative symbol bounds
     }
     return false;
+  }
+
+  public async verifySymbolEligibility(params: {
+    symbol: string;
+    contractType?: 'CALL' | 'PUT';
+    duration?: number;
+    durationUnit?: DerivDurationUnitCode;
+    currency?: string;
+    maxDataAgeMs?: number;
+    verifyProposalQuote?: boolean;
+  }): Promise<{
+    eligible: boolean;
+    reasons: string[];
+    brokerAvailable: boolean;
+    contractsSupported: boolean;
+    dataFresh: boolean;
+    proposalVerified: boolean;
+    askPrice?: number;
+    payout?: number;
+  }> {
+    const reasons: string[] = [];
+    const connected = this.isConnected();
+    if (!connected) {
+      return {
+        eligible: false,
+        reasons: ['Deriv WebSocket is disconnected.'],
+        brokerAvailable: false,
+        contractsSupported: false,
+        dataFresh: false,
+        proposalVerified: false,
+      };
+    }
+
+    let brokerAvailable = true;
+    const activeSymbols = await this.fetchActiveSymbols();
+    if (activeSymbols.length > 0 && !activeSymbols.includes(params.symbol)) {
+      brokerAvailable = false;
+      reasons.push(`Symbol ${params.symbol} is unavailable or suspended on Deriv active_symbols.`);
+    }
+
+    let contractsSupported = true;
+    const targetType = params.contractType || 'CALL';
+    if (this.isAuthorized() && this.connectionState === 'ONLINE') {
+      const hasMeta = await this.fetchContractsForSymbol(params.symbol, params.currency);
+      if (hasMeta) {
+        const meta = acde.getCachedMetadata(params.symbol, targetType);
+        if (!meta) {
+          contractsSupported = false;
+          reasons.push(`Contract type ${targetType} not supported for ${params.symbol}.`);
+        }
+      }
+    }
+
+    let cachedCandles = this.getCachedSymbolCandles(params.symbol);
+    if (!cachedCandles || cachedCandles.candles.length < 20) {
+      try {
+        await this.fetchCandlesAsync(params.symbol, this.activeGranularity || 60, 120);
+        cachedCandles = this.getCachedSymbolCandles(params.symbol);
+      } catch {
+        // Handled below
+      }
+    }
+
+    const maxAgeMs = params.maxDataAgeMs ?? 120_000;
+    const now = Date.now();
+    const tick = this.getCachedSymbolTick(params.symbol);
+    const latestEpochMs = Math.max(
+      tick?.receivedAt ?? 0,
+      tick?.epoch ? tick.epoch * 1000 : 0,
+      cachedCandles?.updatedAt ?? 0
+    );
+    const dataFresh = Boolean(
+      cachedCandles &&
+        cachedCandles.candles.length >= 20 &&
+        latestEpochMs > 0 &&
+        now - latestEpochMs <= maxAgeMs
+    );
+    if (!cachedCandles || cachedCandles.candles.length < 20) {
+      reasons.push(`Insufficient candle history for ${params.symbol}.`);
+    } else if (!dataFresh) {
+      reasons.push(`Market feed for ${params.symbol} is stale.`);
+    }
+
+    let proposalVerified = true;
+    let askPrice: number | undefined;
+    let payout: number | undefined;
+    if (
+      params.verifyProposalQuote &&
+      brokerAvailable &&
+      contractsSupported &&
+      this.isAuthorized() &&
+      this.connectionState === 'ONLINE'
+    ) {
+      try {
+        const quote = await this.requestProposalQuote({
+          symbol: params.symbol,
+          amount: 1,
+          contract_type: targetType,
+          duration: params.duration ?? 2,
+          duration_unit: params.durationUnit ?? 'm',
+          currency: params.currency,
+        });
+        askPrice = quote.askPrice;
+        payout = quote.payout;
+      } catch (err: any) {
+        proposalVerified = false;
+        reasons.push(err?.message || `Deriv proposal check failed for ${params.symbol}.`);
+      }
+    }
+
+    return {
+      eligible: brokerAvailable && contractsSupported && dataFresh && proposalVerified && reasons.length === 0,
+      reasons,
+      brokerAvailable,
+      contractsSupported,
+      dataFresh,
+      proposalVerified,
+      askPrice,
+      payout,
+    };
   }
 
   public async requestProposalQuote(params: {
@@ -1999,8 +2331,14 @@ export class DerivWebSocketClient {
 
   public subscribeTicks(symbol: string): void {
     if (this.activeSymbol && this.activeSymbol !== symbol) {
-      this.forgetSubscription(`ticks:${this.activeSymbol}`);
-      this.sendOnPublicOrPrimary({ forget_all: 'ticks' });
+      const prevKey = `ticks:${this.activeSymbol}`;
+      const prevSub = this.subscriptions.get(prevKey);
+      if (prevSub?.subscriptionId) {
+        this.forgetSubscription(prevKey);
+      } else {
+        this.subscriptions.delete(prevKey);
+        this.sendOnPublicOrPrimary({ forget_all: 'ticks' });
+      }
     }
     this.activeSymbol = symbol;
     this.ensureSubscription(`ticks:${symbol}`, { ticks: symbol, subscribe: 1 });

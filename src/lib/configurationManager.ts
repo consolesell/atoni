@@ -1,4 +1,5 @@
 import {
+  DEFAULT_ASIRE_POLICY,
   DEFAULT_TERMINAL_SETTINGS,
   TerminalSettings,
 } from '../types/settings';
@@ -12,6 +13,7 @@ import {
   DEFAULT_SBAGENT_PRESET,
 } from '../types/autonomy';
 import {
+  ASIREPolicyConfig,
   DurationGovernancePolicy,
   EarlyExitPolicyConfig,
   ExecutionModeSetting,
@@ -82,6 +84,7 @@ export interface UnifiedConfigurationSnapshot {
   };
   earlyExit: EarlyExitPolicyConfig;
   durationGovernance: DurationGovernancePolicy;
+  asire: ASIREPolicyConfig;
   trailingStop: TerminalSettings['trailingStop'];
   updatedAt: number;
 }
@@ -162,6 +165,10 @@ export class ConfigurationManager {
       },
       earlyExit: { ...DEFAULT_EARLY_EXIT_POLICY },
       durationGovernance: structuredClone(DEFAULT_DURATION_GOVERNANCE),
+      asire: {
+        ...DEFAULT_ASIRE_POLICY,
+        weights: { ...DEFAULT_ASIRE_POLICY.weights },
+      },
       trailingStop: { ...DEFAULT_TERMINAL_SETTINGS.trailingStop },
       updatedAt: Date.now(),
     };
@@ -268,6 +275,19 @@ export class ConfigurationManager {
         ...base.durationGovernance,
         ...(legacySettings?.durationGovernance || {}),
       },
+      asire: {
+        ...base.asire,
+        ...(legacySettings?.asire || {}),
+        weights: {
+          ...base.asire.weights,
+          ...(legacySettings?.asire?.weights || {}),
+        },
+        cooldownSeconds:
+          legacySettings?.asire?.cooldownSeconds ??
+          legacySettings?.ai?.rotationCooldownSeconds ??
+          legacyPreset?.rotationCooldownSeconds ??
+          base.asire.cooldownSeconds,
+      },
       trailingStop: {
         ...base.trailingStop,
         ...(legacySettings?.trailingStop || {}),
@@ -325,6 +345,33 @@ export class ConfigurationManager {
         globalMaxTicks: Math.round(clamp(raw.durationGovernance?.globalMaxTicks ?? 10, 1, 10)),
         confidenceThreshold: Math.round(clamp(raw.durationGovernance?.confidenceThreshold ?? 50, 20, 95)),
       },
+      asire: {
+        ...DEFAULT_ASIRE_POLICY,
+        ...(raw.asire || {}),
+        cooldownSeconds: Math.round(clamp(raw.asire?.cooldownSeconds ?? 60, 10, 600)),
+        minScoreImprovement: clamp(raw.asire?.minScoreImprovement ?? 10, 2, 40),
+        confirmationEvaluations: Math.round(clamp(raw.asire?.confirmationEvaluations ?? 2, 1, 6)),
+        minDataQualityThreshold: clamp(raw.asire?.minDataQualityThreshold ?? 0.45, 0.15, 0.95),
+        maxRotationsPerSession: Math.round(clamp(raw.asire?.maxRotationsPerSession ?? 8, 1, 50)),
+        repeatedFailureCooldownSeconds: Math.round(
+          clamp(raw.asire?.repeatedFailureCooldownSeconds ?? 300, 30, 3600)
+        ),
+        quarantineFailureThreshold: Math.round(
+          clamp(raw.asire?.quarantineFailureThreshold ?? 3, 2, 10)
+        ),
+        quarantineDurationMs: Math.round(
+          clamp(raw.asire?.quarantineDurationMs ?? 300_000, 30_000, 3_600_000)
+        ),
+        maxDataAgeMs: Math.round(clamp(raw.asire?.maxDataAgeMs ?? 120_000, 10_000, 600_000)),
+        minCorrelationSamples: Math.round(clamp(raw.asire?.minCorrelationSamples ?? 15, 5, 100)),
+        minHistoricalSamplesForTrust: Math.round(
+          clamp(raw.asire?.minHistoricalSamplesForTrust ?? 5, 2, 50)
+        ),
+        weights: {
+          ...DEFAULT_ASIRE_POLICY.weights,
+          ...(raw.asire?.weights || {}),
+        },
+      },
     };
   }
 
@@ -360,6 +407,14 @@ export class ConfigurationManager {
       durationGovernance: {
         ...this.snapshot.durationGovernance,
         ...(patch.durationGovernance || {}),
+      },
+      asire: {
+        ...this.snapshot.asire,
+        ...(patch.asire || {}),
+        weights: {
+          ...this.snapshot.asire.weights,
+          ...(patch.asire?.weights || {}),
+        },
       },
       trailingStop: { ...this.snapshot.trailingStop, ...(patch.trailingStop || {}) },
       revision: bumpRevision ? this.snapshot.revision + 1 : this.snapshot.revision,
@@ -412,6 +467,16 @@ export class ConfigurationManager {
       durationGovernance: {
         ...prev.durationGovernance,
         ...(settings.durationGovernance || {}),
+      },
+      asire: {
+        ...prev.asire,
+        ...(settings.asire || {}),
+        enabled: settings.asire?.enabled ?? settings.ai.autonomousSymbolChange,
+        cooldownSeconds: settings.asire?.cooldownSeconds ?? settings.ai.rotationCooldownSeconds,
+        weights: {
+          ...prev.asire.weights,
+          ...(settings.asire?.weights || {}),
+        },
       },
       trailingStop: { ...settings.trailingStop },
     }));

@@ -68,11 +68,19 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 googleProvider.addScope('https://www.googleapis.com/auth/documents');
 googleProvider.addScope('https://www.googleapis.com/auth/drive.file');
 
-// Initialize Firestore with specific database ID if configured
+// Initialize Firestore with specific database ID and long-polling in browser to prevent WebChannel 10s proxy/iframe stalls
 const customDbId = (firebaseConfig as any).firestoreDatabaseId;
-export const db = customDbId
-  ? initializeFirestore(app, {}, customDbId)
-  : getFirestore(app);
+function createFirestoreInstance() {
+  const settings = typeof window !== 'undefined' ? { experimentalForceLongPolling: true } : {};
+  try {
+    return customDbId
+      ? initializeFirestore(app, settings, customDbId)
+      : initializeFirestore(app, settings);
+  } catch {
+    return customDbId ? getFirestore(app, customDbId) : getFirestore(app);
+  }
+}
+export const db = createFirestoreInstance();
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
   const errInfo: FirestoreErrorInfo = {
@@ -99,6 +107,7 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 
 async function testConnection() {
   if (typeof window === 'undefined') return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {

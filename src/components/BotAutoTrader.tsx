@@ -9,8 +9,15 @@ import {
   Play,
   Square,
   Activity,
+  Cpu,
 } from 'lucide-react';
-import { BotState, AgenticMartingaleState, HighestWinGateResult, MarketStabilityMetrics } from '../types/trading';
+import {
+  BotState,
+  AgenticMartingaleState,
+  HighestWinGateResult,
+  MarketStabilityMetrics,
+  ASIRESnapshot,
+} from '../types/trading';
 import { sound } from '../lib/soundEngine';
 
 interface BotAutoTraderProps {
@@ -22,6 +29,8 @@ interface BotAutoTraderProps {
   onUpdateMartingaleState?: (updates: Partial<AgenticMartingaleState>) => void;
   highestWinGate?: HighestWinGateResult | null;
   marketStability?: MarketStabilityMetrics | null;
+  asireSnapshot?: ASIRESnapshot | null;
+  onClearQuarantine?: (symbol: string) => void;
 }
 
 export const BotAutoTrader: React.FC<BotAutoTraderProps> = ({
@@ -33,6 +42,8 @@ export const BotAutoTrader: React.FC<BotAutoTraderProps> = ({
   onUpdateMartingaleState,
   highestWinGate,
   marketStability,
+  asireSnapshot,
+  onClearQuarantine,
 }) => {
   const toggleBot = () => {
     sound.play('toggle');
@@ -303,6 +314,84 @@ export const BotAutoTrader: React.FC<BotAutoTraderProps> = ({
               {highestWinGate?.passed ? `PASSED (${highestWinGate.winProbabilityScore}%)` : 'SELECTIVE FILTER'}
             </span>
           </div>
+        </div>
+      )}
+
+      {/* ASIRE Autonomous Symbol Intelligence Status */}
+      {asireSnapshot && (
+        <div className="p-3.5 bg-slate-950/75 border border-slate-800 rounded-xl flex flex-col gap-2 text-xs font-mono">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Cpu className="w-4 h-4 text-cyan-400" />
+              <span className="text-slate-200 font-bold">ASIRE Symbol Intelligence</span>
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                  asireSnapshot.transitionState === 'PENDING_VERIFICATION'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : asireSnapshot.lastDecision?.action === 'SWITCH'
+                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                    : asireSnapshot.lastDecision?.action === 'BLOCKED'
+                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/40'
+                    : 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
+                }`}
+              >
+                {asireSnapshot.transitionState === 'PENDING_VERIFICATION'
+                  ? `VERIFYING ${asireSnapshot.pendingTargetSymbol}`
+                  : asireSnapshot.lastDecision?.action || 'READY'}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+              <span>
+                Active: <strong className="text-white">{asireSnapshot.activeSymbol}</strong>
+              </span>
+              <span>
+                Rotations:{' '}
+                <strong className="text-cyan-300">
+                  {asireSnapshot.rotationsThisSession}/{asireSnapshot.policy.maxRotationsPerSession}
+                </strong>
+              </span>
+              <span>
+                Cooldown:{' '}
+                <strong className={asireSnapshot.cooldownRemainingSeconds > 0 ? 'text-amber-400' : 'text-emerald-400'}>
+                  {asireSnapshot.cooldownRemainingSeconds > 0 ? `${asireSnapshot.cooldownRemainingSeconds}s` : 'READY'}
+                </strong>
+              </span>
+            </div>
+          </div>
+
+          {asireSnapshot.lastDecision && (
+            <div className="text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2">
+              <span className="truncate">{asireSnapshot.lastDecision.reason}</span>
+              {asireSnapshot.lastDecision.targetSymbol && (
+                <span className="text-[10px] text-cyan-300 shrink-0">
+                  Top Alt: {asireSnapshot.lastDecision.targetSymbol} ({asireSnapshot.lastDecision.scoreDelta >= 0 ? '+' : ''}
+                  {asireSnapshot.lastDecision.scoreDelta.toFixed(1)} pts)
+                </span>
+              )}
+            </div>
+          )}
+
+          {Object.values(asireSnapshot.quarantinedSymbols || {}).some((q) => q.quarantined) && (
+            <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-800/80">
+              <span className="text-[10px] text-rose-400 flex items-center gap-1">
+                <AlertTriangle className="w-3 h-3" /> Quarantined:
+              </span>
+              {Object.values(asireSnapshot.quarantinedSymbols)
+                .filter((q) => q.quarantined)
+                .map((q) => (
+                  <button
+                    key={q.symbol}
+                    type="button"
+                    onClick={() => onClearQuarantine?.(q.symbol)}
+                    className="px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px]"
+                    title="Click to release quarantine"
+                  >
+                    {q.symbol} ({q.failureCount} fails) ×
+                  </button>
+                ))}
+            </div>
+          )}
         </div>
       )}
 
